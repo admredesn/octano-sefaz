@@ -1,0 +1,9 @@
+flask==3.0.3
+flask-cors==4.0.1
+requests==2.32.3
+cryptography==42.0.8
+lxml==5.2.2
+signxml==4.0.1
+supabase==2.5.0
+python-dotenv==1.0.1
+gunicorn==22.0.0
