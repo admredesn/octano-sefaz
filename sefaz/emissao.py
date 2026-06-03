@@ -251,7 +251,7 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
 # ---------------------------------------------------------------------------
 # 5) Validacao XSD (opcional; so roda se o schema existir)
 # ---------------------------------------------------------------------------
-def validar_xsd(xml_str: str, xsd_nome="nfe_v4.00.xsd"):
+def validar_xsd(xml_str: str, xsd_nome="leiauteNFe_v4.00.xsd"):
     caminho = os.path.join(SCHEMAS_DIR, xsd_nome)
     if not os.path.exists(caminho):
         return None  # schema nao disponivel -> pula validacao (avisar no log)
