@@ -96,6 +96,33 @@ def baixar_xml(chave):
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
+@app.route("/emitir", methods=["POST"])
+def emitir():
+    """Autoriza uma NF-e modelo 55 na SEFAZ (combustivel monofasico ICMS61)."""
+    try:
+        from sefaz.emissao import emitir_nfe
+        import random
+        dados = request.get_json()
+        cert_base64 = dados.get("cert_base64")
+        cert_senha = dados.get("cert_senha")
+        ambiente = dados.get("ambiente", "homologacao")
+        nota = dados.get("nota")
+
+        if not all([cert_base64, cert_senha, nota]):
+            return jsonify({"erro": "cert_base64, cert_senha e nota sao obrigatorios"}), 400
+        if not nota.get("itens"):
+            return jsonify({"erro": "nota.itens vazio"}), 400
+
+        # codigo numerico aleatorio (cNF) se o caller nao mandar
+        nota.setdefault("cnf", str(random.randint(10000000, 99999999)))
+
+        resultado = emitir_nfe(nota, cert_base64, cert_senha, ambiente)
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
