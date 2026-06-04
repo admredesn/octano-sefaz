@@ -62,46 +62,80 @@ def montar_chave(cuf, dh_emi, cnpj, modelo, serie, numero, tp_emis, cnf):
 # ---------------------------------------------------------------------------
 # 2) Grupos de imposto por item  (o coracao da regra de combustivel)
 # ---------------------------------------------------------------------------
-def _imposto_item(it):
+def _imposto_item(it, crt="3"):
     cst = str(it.get("cst_icms") or "").strip()
+    orig = it.get("origem", "0")
+    simples = str(crt) == "1"
 
     if cst == "61":
         # COMBUSTIVEL MONOFASICO (gasolina/diesel) - posto SUBSTITUIDO.
-        # Imposto ja cobrado anteriormente. qBCMono = litros, adRem = R$/L.
-        # ATENCAO: validar nomes das tags no XSD ATUAL. Em alguns leiautes da NT2023.001
-        # o grupo do substituido usa qBCMonoRet/adRemICMSRet/vICMSMonoRet (com "Ret").
+        # O grupo ICMS61 vale tambem para o Simples Nacional (monofasico).
         q = float(it["qCom"])
         adrem = float(it.get("aliq_icms_ad_rem") or 0)
         v = round(q * adrem, 2)
         icms = (
-            f"<ICMS61><orig>{it.get('origem','0')}</orig><CST>61</CST>"
+            f"<ICMS61><orig>{orig}</orig><CST>61</CST>"
             f"<qBCMonoRet>{q:.4f}</qBCMonoRet>"
             f"<adRemICMSRet>{adrem:.4f}</adRemICMSRet>"
             f"<vICMSMonoRet>{v:.2f}</vICMSMonoRet></ICMS61>"
         )
     elif cst == "60":
-        # ETANOL / GNV - ICMS-ST tradicional ja retido (CST 60).
-        icms = (
-            f"<ICMS60><orig>{it.get('origem','0')}</orig><CST>60</CST>"
-            f"<vBCSTRet>{float(it.get('vbc_st_ret',0)):.2f}</vBCSTRet>"
-            f"<pST>{float(it.get('aliq_icms',0)):.4f}</pST>"
-            f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMS60>"
-        )
+        # ETANOL / GNV - ICMS-ST ja retido. No Simples -> CSOSN 500.
+        if simples:
+            icms = (
+                f"<ICMSSN500><orig>{orig}</orig><CSOSN>500</CSOSN>"
+                f"<vBCSTRet>{float(it.get('vbc_st_ret',0)):.2f}</vBCSTRet>"
+                f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMSSN500>"
+            )
+        else:
+            icms = (
+                f"<ICMS60><orig>{orig}</orig><CST>60</CST>"
+                f"<vBCSTRet>{float(it.get('vbc_st_ret',0)):.2f}</vBCSTRet>"
+                f"<pST>{float(it.get('aliq_icms',0)):.4f}</pST>"
+                f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMS60>"
+            )
     else:
-        # tratamento normal (ex.: ARLA, conveniencia) - CST 00 simples
-        vprod = float(it["vProd"])
-        aliq = float(it.get("aliq_icms", 0))
-        vicms = round(vprod * aliq / 100, 2)
-        icms = (
-            f"<ICMS00><orig>{it.get('origem','0')}</orig><CST>00</CST>"
-            f"<modBC>3</modBC><vBC>{vprod:.2f}</vBC>"
-            f"<pICMS>{aliq:.4f}</pICMS><vICMS>{vicms:.2f}</vICMS></ICMS00>"
-        )
+        # demais (lubrificante, conveniencia, ARLA...).
+        if simples:
+            # Simples Nacional sem credito de ICMS -> CSOSN 102 (ICMSSN102).
+            csosn = it.get("csosn") or "102"
+            icms = (
+                f"<ICMSSN102><orig>{orig}</orig><CSOSN>{csosn}</CSOSN></ICMSSN102>"
+            )
+        else:
+            vprod = float(it["vProd"])
+            aliq = float(it.get("aliq_icms", 0))
+            vicms = round(vprod * aliq / 100, 2)
+            icms = (
+                f"<ICMS00><orig>{orig}</orig><CST>00</CST>"
+                f"<modBC>3</modBC><vBC>{vprod:.2f}</vBC>"
+                f"<pICMS>{aliq:.4f}</pICMS><vICMS>{vicms:.2f}</vICMS></ICMS00>"
+            )
 
-    cst_pis = it.get("cst_pis") or "04"
-    cst_cof = it.get("cst_cofins") or "04"
-    pis = f"<PIS><PISNT><CST>{cst_pis}</CST></PISNT></PIS>"
-    cof = f"<COFINS><COFINSNT><CST>{cst_cof}</CST></COFINSNT></COFINS>"
+    cst_pis = str(it.get("cst_pis") or "04")
+    cst_cof = str(it.get("cst_cofins") or "04")
+    vprod_pc = float(it["vProd"])
+
+    # CST 01/02 = tributado por aliquota -> grupo PISAliq/COFINSAliq (com vBC, pPIS, vPIS).
+    # Demais CST de operacao nao tributada (04,05,06,07,08,09) -> PISNT/COFINSNT.
+    if cst_pis in ("01", "02"):
+        ppis = float(it.get("aliq_pis") or 0)
+        vpis = round(vprod_pc * ppis / 100, 2)
+        pis = (f"<PIS><PISAliq><CST>{cst_pis}</CST>"
+               f"<vBC>{vprod_pc:.2f}</vBC><pPIS>{ppis:.4f}</pPIS>"
+               f"<vPIS>{vpis:.2f}</vPIS></PISAliq></PIS>")
+    else:
+        pis = f"<PIS><PISNT><CST>{cst_pis}</CST></PISNT></PIS>"
+
+    if cst_cof in ("01", "02"):
+        pcof = float(it.get("aliq_cofins") or 0)
+        vcof = round(vprod_pc * pcof / 100, 2)
+        cof = (f"<COFINS><COFINSAliq><CST>{cst_cof}</CST>"
+               f"<vBC>{vprod_pc:.2f}</vBC><pCOFINS>{pcof:.4f}</pCOFINS>"
+               f"<vCOFINS>{vcof:.2f}</vCOFINS></COFINSAliq></COFINS>")
+    else:
+        cof = f"<COFINS><COFINSNT><CST>{cst_cof}</CST></COFINSNT></COFINS>"
+
     return f"<imposto><ICMS>{icms}</ICMS>{pis}{cof}</imposto>"
 
 
@@ -118,7 +152,7 @@ def _comb_item(it):
     )
 
 
-def _det_item(it, n):
+def _det_item(it, n, crt="3"):
     return (
         f'<det nItem="{n}"><prod>'
         f"<cProd>{it['cProd']}</cProd>"
@@ -138,7 +172,7 @@ def _det_item(it, n):
         f"<indTot>1</indTot>"
         + _comb_item(it)
         + "</prod>"
-        + _imposto_item(it)
+        + _imposto_item(it, crt)
         + "</det>"
     )
 
@@ -168,12 +202,22 @@ def montar_infnfe(nota, ambiente):
     cdv = chave[-1]
 
     # itens + totais
-    dets = "".join(_det_item(it, i + 1) for i, it in enumerate(nota["itens"]))
+    crt_emit = str(emit.get("crt", "3"))
+    dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
     # ICMS proprio = 0 (CST 61/60). vICMSMono soma dos monofasicos:
     v_icms_mono = sum(
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
         for it in nota["itens"] if str(it.get("cst_icms")) == "61"
+    )
+    # totais de PIS/COFINS (somente itens tributados por aliquota, CST 01/02)
+    v_pis_tot = sum(
+        round(float(it["vProd"]) * float(it.get("aliq_pis") or 0) / 100, 2)
+        for it in nota["itens"] if str(it.get("cst_pis")) in ("01", "02")
+    )
+    v_cofins_tot = sum(
+        round(float(it["vProd"]) * float(it.get("aliq_cofins") or 0) / 100, 2)
+        for it in nota["itens"] if str(it.get("cst_cofins")) in ("01", "02")
     )
 
     # destinatario: CNPJ ou CPF
@@ -213,7 +257,7 @@ def montar_infnfe(nota, ambiente):
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
-        f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
+        f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
         f"<vNF>{v_prod:.2f}</vNF><vICMSMono>{v_icms_mono:.2f}</vICMSMono></ICMSTot></total>"
     )
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
