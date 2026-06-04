@@ -108,8 +108,14 @@ def _imposto_item(it, crt="3"):
                 f"<pICMS>{aliq:.4f}</pICMS><vICMS>{vicms:.2f}</vICMS></ICMS00>"
             )
 
+    # PIS/COFINS: grupo "Outr" exige CST de Outras Operacoes (ex.: 49, 99).
+    # O cadastro pode trazer CST 01 (leiaute antigo/PISAliq), invalido aqui -> força 49.
     cst_pis = str(it.get("cst_pis") or "49")
     cst_cof = str(it.get("cst_cofins") or "49")
+    if cst_pis in ("01", "02", "03"):
+        cst_pis = "49"
+    if cst_cof in ("01", "02", "03"):
+        cst_cof = "49"
     vprod_pc = float(it["vProd"])
 
     # PIS/COFINS: espelha o XML autorizado do posto -> grupo "Outr" (CST 49) zerado.
@@ -167,6 +173,7 @@ def _det_item(it, n, crt="3"):
         f"<xProd>{it['xProd']}</xProd>"
         f"<NCM>{it['ncm']}</NCM>"
         + (f"<CEST>{it['cest']}</CEST>" if it.get("cest") else "")
+        + (f"<indEscala>{it.get('ind_escala','S')}</indEscala>" if it.get("cest") else "")
         + f"<CFOP>{it['cfop']}</CFOP>"
         f"<uCom>{it['uCom']}</uCom>"
         f"<qCom>{float(it['qCom']):.4f}</qCom>"
