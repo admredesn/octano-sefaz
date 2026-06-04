@@ -317,33 +317,25 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     with open(cert_file, "rb") as cf, open(key_file, "rb") as kf:
         cert_data, key_data = cf.read(), kf.read()
 
+    # A SEFAZ aceita assinatura em SHA-1 e SHA-256. Usamos SHA-256 (o signxml
+    # bloqueia SHA-1 por padrao); a SEFAZ valida normalmente assinaturas SHA-256.
     signer = XMLSigner(
         method=methods.enveloped,
-        signature_algorithm="rsa-sha1",
-        digest_algorithm="sha1",
+        signature_algorithm="rsa-sha256",
+        digest_algorithm="sha256",
         c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     )
+    # A SEFAZ NAO aceita prefixo de namespace na assinatura (ex.: <ds:Signature>).
+    # A forma CORRETA e definir o namespace xmldsig como default ANTES de assinar,
+    # para que a assinatura seja calculada ja sobre a Signature sem prefixo.
+    # (Reconstruir a Signature DEPOIS de assinada quebra o DigestValue/SignatureValue.)
+    try:
+        signer.namespaces = {None: "http://www.w3.org/2000/09/xmldsig#"}
+    except Exception:
+        pass
+
     # assina referenciando o Id da infNFe; a Signature deve ficar como filha de <NFe>
     signed_inf = signer.sign(root, key=key_data, cert=cert_data, reference_uri=ref_uri)
-
-    # A SEFAZ NAO aceita prefixo de namespace na assinatura (ex.: <ds:Signature>).
-    # Reconstruimos a Signature com o namespace xmldsig como DEFAULT (sem prefixo).
-    DS = "http://www.w3.org/2000/09/xmldsig#"
-    sig = signed_inf.find(f"{{{DS}}}Signature")
-    if sig is not None:
-        def _rebuild(el):
-            local = el.tag.split("}", 1)[1] if "}" in el.tag else el.tag
-            novo = etree.Element(f"{{{DS}}}{local}", nsmap={None: DS})
-            for k, v in el.attrib.items():
-                novo.set(k, v)
-            novo.text = el.text
-            novo.tail = el.tail
-            for filho in el:
-                novo.append(_rebuild(filho))
-            return novo
-        nova_sig = _rebuild(sig)
-        parent = sig.getparent()
-        parent.replace(sig, nova_sig)
 
     return etree.tostring(signed_inf, encoding="unicode")
 
