@@ -397,13 +397,11 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
         #    Se o schema local nao casar com a raiz, apenas registramos e seguimos.
         aviso_xsd = None
         try:
-            # valida o XML ASSINADO (com Signature) — igual ao que a SEFAZ recebe.
-            erros = validar_xsd(xml_assinada)
+            # valida o XML SEM assinatura contra o XSD novo (PL_010b, com IBS/CBS).
+            erros = validar_xsd(xml_nfe)
             if erros:
-                # ignora o falso-positivo de Signature ausente (so ocorre em xml nao-assinado)
-                erros = [e for e in erros if "Signature" not in e and "infNFeSupl" not in e
-                         and "IBSCBS" not in e and "IBS" not in e and "CBS" not in e
-                         and "vTotTrib" not in e and "IPI" not in e]
+                # so ignora o falso-positivo de Signature ausente (xml ainda nao assinado)
+                erros = [e for e in erros if "Signature" not in e and "infNFeSupl" not in e]
                 if erros:
                     aviso_xsd = erros[:8]
                     print("AVISO validacao XSD local (nao-bloqueante):", aviso_xsd)
@@ -454,8 +452,8 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             "xmotivo": xmotivo,
             "protocolo": nprot,
             "aviso_xsd": aviso_xsd,
-            "xml_debug": (xml_assinada[:4000] if not autorizado else None),
-            "xml_assinado": xml_assinada if autorizado else None,
+            "xml_debug": xml_assinada,
+            "xml_assinado": xml_assinada,
         }
     finally:
         limpar_arquivos(cert_file, key_file)
