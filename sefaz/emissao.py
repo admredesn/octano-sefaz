@@ -252,6 +252,9 @@ def montar_infnfe(nota, ambiente):
         + (f"<IE>{dest['ie']}</IE>" if dest.get("ie") else "")
         + "</dest>"
     )
+    # vICMSMono so entra quando ha item monofasico (CST 61). Para os demais, omitir
+    # (senao o schema rejeita: 'vICMSMono nao esperado, esperado vTotTrib').
+    tag_mono = f"<vICMSMono>{v_icms_mono:.2f}</vICMSMono>" if v_icms_mono > 0 else ""
     total = (
         f"<total><ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
@@ -259,7 +262,7 @@ def montar_infnfe(nota, ambiente):
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF><vICMSMono>{v_icms_mono:.2f}</vICMSMono></ICMSTot></total>"
+        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}</ICMSTot></total>"
     )
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
     pag = "<pag><detPag><tPag>01</tPag><vPag>%.2f</vPag></detPag></pag>" % v_prod
