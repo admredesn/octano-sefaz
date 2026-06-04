@@ -315,8 +315,13 @@ _C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"  # C14N 1.0 inclusiva
 
 
 def _c14n_bytes(elem) -> bytes:
-    # Canonicalizacao C14N 1.0 inclusiva (exclusive=False), sem comentarios.
-    return etree.tostring(elem, method="c14n", exclusive=False, with_comments=False)
+    # Canonicalizacao C14N 1.0 inclusiva, sem comentarios.
+    # IMPORTANTE: usar etree.tostring(method="c14n") direto sobre um sub-elemento
+    # com namespace default herdado faz o lxml inserir xmlns="" nos filhos, o que
+    # ALTERA o digest e causa rejeicao 297. A forma correta e serializar o elemento
+    # (que mantem o xmlns do proprio elemento, sem xmlns="" nos filhos) e entao
+    # canonicalizar essa string.
+    return etree.canonicalize(etree.tostring(elem).decode("utf-8")).encode("utf-8")
 
 
 def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
@@ -376,7 +381,7 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     sig_tmp = root_tmp.find(ds("Signature"))
     root_tmp.remove(sig_tmp)
     inf_tmp = root_tmp.find(f"{{{NS}}}infNFe")
-    inf_c14n = etree.tostring(inf_tmp, method="c14n", exclusive=False, with_comments=False)
+    inf_c14n = _c14n_bytes(inf_tmp)
     digest = hashes.Hash(hashes.SHA1())
     digest.update(inf_c14n)
     dig_v.text = base64.b64encode(digest.finalize()).decode()
