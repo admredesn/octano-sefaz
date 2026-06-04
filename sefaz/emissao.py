@@ -318,15 +318,20 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
 # ---------------------------------------------------------------------------
 # 5) Validacao XSD (opcional; so roda se o schema existir)
 # ---------------------------------------------------------------------------
-def validar_xsd(xml_str: str, xsd_nome="leiauteNFe_v4.00.xsd"):
-    caminho = os.path.join(SCHEMAS_DIR, xsd_nome)
-    if not os.path.exists(caminho):
-        return None  # schema nao disponivel -> pula validacao (avisar no log)
-    schema = etree.XMLSchema(etree.parse(caminho))
-    doc = etree.fromstring(xml_str.encode("utf-8"))
-    if schema.validate(doc):
-        return []
-    return [str(e) for e in schema.error_log]
+def validar_xsd(xml_str: str, xsd_nome="nfe_v4.00.xsd"):
+    # tenta o nfe_v4.00.xsd (declara NFe como elemento global); cai para o leiaute se nao houver
+    for nome in (xsd_nome, "leiauteNFe_v4.00.xsd"):
+        caminho = os.path.join(SCHEMAS_DIR, nome)
+        if os.path.exists(caminho):
+            try:
+                schema = etree.XMLSchema(etree.parse(caminho))
+                doc = etree.fromstring(xml_str.encode("utf-8"))
+                if schema.validate(doc):
+                    return []
+                return [f"[{nome}] {e.message} (linha {e.line})" for e in schema.error_log]
+            except Exception as e:
+                return [f"[{nome}] erro ao validar: {e}"]
+    return None  # nenhum schema disponivel
 
 
 # ---------------------------------------------------------------------------
@@ -359,9 +364,10 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
         #    Se o schema local nao casar com a raiz, apenas registramos e seguimos.
         aviso_xsd = None
         try:
-            erros = validar_xsd(xml_assinada)
+            # valida o XML SEM assinatura (schema NFe puro) - aponta erro de conteudo
+            erros = validar_xsd(xml_nfe)
             if erros:
-                aviso_xsd = erros[:5]
+                aviso_xsd = erros[:8]
                 print("AVISO validacao XSD local (nao-bloqueante):", aviso_xsd)
         except Exception as e:
             print("AVISO: validacao XSD pulada:", str(e))
