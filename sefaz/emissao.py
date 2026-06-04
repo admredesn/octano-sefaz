@@ -266,16 +266,18 @@ def validar_xsd(xml_str: str, xsd_nome="leiauteNFe_v4.00.xsd"):
 # 6) Envio ao NFeAutorizacao4 (sincrono)
 # ---------------------------------------------------------------------------
 def _soap_autorizacao(xml_nfe_assinada, id_lote):
+    # SOAP 1.2: o corpo leva nfeDadosMsg (namespace do wsdl NFeAutorizacao4)
+    # contendo o enviNFe. O nome da operacao (nfeAutorizacaoLote) vai na 'action'
+    # do Content-Type, NAO como elemento do corpo.
+    wsdl_ns = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4"
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
-        '<soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
-        'xmlns:xsd="http://www.w3.org/2001/XMLSchema" '
+        '<soap12:Envelope '
         'xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body>'
-        '<nfeAutorizacaoLote xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4">'
-        '<nfeDadosMsg>'
+        f'<nfeDadosMsg xmlns="{wsdl_ns}">'
         f'<enviNFe versao="4.00" xmlns="{NS}"><idLote>{id_lote}</idLote>'
         f'<indSinc>1</indSinc>{xml_nfe_assinada}</enviNFe>'
-        '</nfeDadosMsg></nfeAutorizacaoLote></soap12:Body></soap12:Envelope>'
+        '</nfeDadosMsg></soap12:Body></soap12:Envelope>'
     )
 
 
@@ -300,9 +302,13 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
         # 4) envia
         url = URLS_AUTORIZACAO[ambiente]
         soap = _soap_autorizacao(xml_assinada, nota.get("id_lote", "1"))
+        # SOAP 1.2: a 'action' (metodo) vai DENTRO do Content-Type, senao a SEFAZ
+        # responde "Nao e possivel localizar o metodo de despacho".
+        action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote"
+        ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
         resp = requests.post(
             url, data=soap.encode("utf-8"),
-            headers={"Content-Type": "application/soap+xml; charset=utf-8"},
+            headers={"Content-Type": ctype},
             cert=(cert_file, key_file), timeout=60, verify=True,
         )
         if resp.status_code != 200:
