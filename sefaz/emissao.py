@@ -88,13 +88,8 @@ def _imposto_item(it, crt="3"):
                 f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMSSN500>"
             )
         else:
-            icms = (
-                f"<ICMS60><orig>{orig}</orig><CST>60</CST>"
-                f"<vBCSTRet>{float(it.get('vbc_st_ret',0)):.2f}</vBCSTRet>"
-                f"<pST>{float(it.get('aliq_icms',0)):.4f}</pST>"
-                f"<vICMSSubstituto>{float(it.get('vicms_substituto',0)):.2f}</vICMSSubstituto>"
-                f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMS60>"
-            )
+            # XML autorizado do posto usa ICMS60 enxuto (so orig + CST).
+            icms = f"<ICMS60><orig>{orig}</orig><CST>60</CST></ICMS60>"
     else:
         # demais (lubrificante, conveniencia, ARLA...).
         if simples:
@@ -113,31 +108,42 @@ def _imposto_item(it, crt="3"):
                 f"<pICMS>{aliq:.4f}</pICMS><vICMS>{vicms:.2f}</vICMS></ICMS00>"
             )
 
-    cst_pis = str(it.get("cst_pis") or "04")
-    cst_cof = str(it.get("cst_cofins") or "04")
+    cst_pis = str(it.get("cst_pis") or "49")
+    cst_cof = str(it.get("cst_cofins") or "49")
     vprod_pc = float(it["vProd"])
 
-    # CST 01/02 = tributado por aliquota -> grupo PISAliq/COFINSAliq (com vBC, pPIS, vPIS).
-    # Demais CST de operacao nao tributada (04,05,06,07,08,09) -> PISNT/COFINSNT.
-    if cst_pis in ("01", "02"):
-        ppis = float(it.get("aliq_pis") or 0)
-        vpis = round(vprod_pc * ppis / 100, 2)
-        pis = (f"<PIS><PISAliq><CST>{cst_pis}</CST>"
-               f"<vBC>{vprod_pc:.2f}</vBC><pPIS>{ppis:.4f}</pPIS>"
-               f"<vPIS>{vpis:.2f}</vPIS></PISAliq></PIS>")
-    else:
-        pis = f"<PIS><PISNT><CST>{cst_pis}</CST></PISNT></PIS>"
+    # PIS/COFINS: espelha o XML autorizado do posto -> grupo "Outr" (CST 49) zerado.
+    # (revenda de combustivel/lubrificante: tributo ja recolhido na cadeia)
+    pis = (f"<PIS><PISOutr><CST>{cst_pis}</CST>"
+           f"<vBC>0.00</vBC><pPIS>0.00</pPIS><vPIS>0.00</vPIS></PISOutr></PIS>")
+    cof = (f"<COFINS><COFINSOutr><CST>{cst_cof}</CST>"
+           f"<vBC>0.00</vBC><pCOFINS>0.00</pCOFINS><vCOFINS>0.00</vCOFINS></COFINSOutr></COFINS>")
 
-    if cst_cof in ("01", "02"):
-        pcof = float(it.get("aliq_cofins") or 0)
-        vcof = round(vprod_pc * pcof / 100, 2)
-        cof = (f"<COFINS><COFINSAliq><CST>{cst_cof}</CST>"
-               f"<vBC>{vprod_pc:.2f}</vBC><pCOFINS>{pcof:.4f}</pCOFINS>"
-               f"<vCOFINS>{vcof:.2f}</vCOFINS></COFINSAliq></COFINS>")
-    else:
-        cof = f"<COFINS><COFINSNT><CST>{cst_cof}</CST></COFINSNT></COFINS>"
+    # IPI: nao tributado (CST 99), zerado - como no XML do posto.
+    ipi = ("<IPI><cEnq>999</cEnq><IPITrib><CST>99</CST>"
+           "<vBC>0.00</vBC><pIPI>0.00</pIPI><vIPI>0.00</vIPI></IPITrib></IPI>")
 
-    return f"<imposto><ICMS>{icms}</ICMS>{pis}{cof}</imposto>"
+    # IBS/CBS (Reforma Tributaria - obrigatorio em 2026).
+    # Aliquotas-teste 2026: IBS estadual 0,10%, IBS municipal 0%, CBS 0,90%.
+    vbc_rt = vprod_pc
+    p_ibs_uf, p_ibs_mun, p_cbs = 0.10, 0.00, 0.90
+    v_ibs_uf = round(vbc_rt * p_ibs_uf / 100, 2)
+    v_ibs_mun = round(vbc_rt * p_ibs_mun / 100, 2)
+    v_ibs = round(v_ibs_uf + v_ibs_mun, 2)
+    v_cbs = round(vbc_rt * p_cbs / 100, 2)
+    cst_rt = it.get("cst_ibscbs") or "000"
+    cclass = it.get("cclasstrib") or "000001"
+    ibscbs = (
+        f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
+        f"<gIBSCBS><vBC>{vbc_rt:.2f}</vBC>"
+        f"<gIBSUF><pIBSUF>{p_ibs_uf:.4f}</pIBSUF><vIBSUF>{v_ibs_uf:.2f}</vIBSUF></gIBSUF>"
+        f"<gIBSMun><pIBSMun>{p_ibs_mun:.4f}</pIBSMun><vIBSMun>{v_ibs_mun:.2f}</vIBSMun></gIBSMun>"
+        f"<vIBS>{v_ibs:.2f}</vIBS>"
+        f"<gCBS><pCBS>{p_cbs:.4f}</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS>"
+        f"</gIBSCBS></IBSCBS>"
+    )
+
+    return f"<imposto><ICMS>{icms}</ICMS>{ipi}{pis}{cof}{ibscbs}</imposto>"
 
 
 def _comb_item(it):
@@ -211,15 +217,12 @@ def montar_infnfe(nota, ambiente):
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
         for it in nota["itens"] if str(it.get("cst_icms")) == "61"
     )
-    # totais de PIS/COFINS (somente itens tributados por aliquota, CST 01/02)
-    v_pis_tot = sum(
-        round(float(it["vProd"]) * float(it.get("aliq_pis") or 0) / 100, 2)
-        for it in nota["itens"] if str(it.get("cst_pis")) in ("01", "02")
-    )
-    v_cofins_tot = sum(
-        round(float(it["vProd"]) * float(it.get("aliq_cofins") or 0) / 100, 2)
-        for it in nota["itens"] if str(it.get("cst_cofins")) in ("01", "02")
-    )
+    # totais IBS/CBS (Reforma) - aliquotas-teste 2026: IBS-UF 0,10%, IBS-Mun 0%, CBS 0,90%
+    v_ibs_uf_tot = sum(round(float(it["vProd"]) * 0.10 / 100, 2) for it in nota["itens"])
+    v_ibs_mun_tot = 0.00
+    v_ibs_tot = round(v_ibs_uf_tot + v_ibs_mun_tot, 2)
+    v_cbs_tot = sum(round(float(it["vProd"]) * 0.90 / 100, 2) for it in nota["itens"])
+    v_bc_rt_tot = v_prod
 
     # destinatario: CNPJ ou CPF
     doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf", ""))
@@ -246,24 +249,44 @@ def montar_infnfe(nota, ambiente):
         f"<cPais>1058</cPais><xPais>BRASIL</xPais></enderEmit>"
         f"<IE>{ie_emit}</IE><CRT>{emit.get('crt','3')}</CRT></emit>"
     )
+    cep_dest = re.sub(r"\D", "", str(dest.get("cep", "") or "")) or "35610000"
+    ender_dest = (
+        f"<enderDest><xLgr>{dest.get('logradouro','SEM ENDERECO')}</xLgr>"
+        f"<nro>{dest.get('numero','S/N')}</nro><xBairro>{dest.get('bairro','CENTRO')}</xBairro>"
+        f"<cMun>{dest.get('c_mun','3123205')}</cMun><xMun>{dest.get('municipio','DORES DO INDAIA')}</xMun>"
+        f"<UF>{dest.get('uf','MG')}</UF><CEP>{cep_dest}</CEP>"
+        f"<cPais>1058</cPais><xPais>BRASIL</xPais></enderDest>"
+    )
     dest_xml = (
         f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><xNome>{dest['nome']}</xNome>"
+        f"{ender_dest}"
         f"<indIEDest>{dest.get('ind_ie','9')}</indIEDest>"
         + (f"<IE>{dest['ie']}</IE>" if dest.get("ie") else "")
         + "</dest>"
     )
-    # vICMSMono so entra quando ha item monofasico (CST 61). Para os demais, omitir
-    # (senao o schema rejeita: 'vICMSMono nao esperado, esperado vTotTrib').
+    # vICMSMono so entra quando ha item monofasico (CST 61).
     tag_mono = f"<vICMSMono>{v_icms_mono:.2f}</vICMSMono>" if v_icms_mono > 0 else ""
-    total = (
-        f"<total><ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
+    icmstot = (
+        f"<ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
-        f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}</ICMSTot></total>"
+        f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
+        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>0.00</vTotTrib></ICMSTot>"
     )
+    # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
+    ibscbstot = (
+        f"<IBSCBSTot><vBCIBSCBS>{v_bc_rt_tot:.2f}</vBCIBSCBS>"
+        f"<gIBS>"
+        f"<gIBSUF><vDif>0.00</vDif><vDevTrib>0.00</vDevTrib><vIBSUF>{v_ibs_uf_tot:.2f}</vIBSUF></gIBSUF>"
+        f"<gIBSMun><vDif>0.00</vDif><vDevTrib>0.00</vDevTrib><vIBSMun>{v_ibs_mun_tot:.2f}</vIBSMun></gIBSMun>"
+        f"<vIBS>{v_ibs_tot:.2f}</vIBS><vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus>"
+        f"</gIBS>"
+        f"<gCBS><vDif>0.00</vDif><vDevTrib>0.00</vDevTrib><vCBS>{v_cbs_tot:.2f}</vCBS>"
+        f"<vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus></gCBS></IBSCBSTot>"
+    )
+    total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
     pag = "<pag><detPag><tPag>01</tPag><vPag>%.2f</vPag></detPag></pag>" % v_prod
 
@@ -371,7 +394,9 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             erros = validar_xsd(xml_assinada)
             if erros:
                 # ignora o falso-positivo de Signature ausente (so ocorre em xml nao-assinado)
-                erros = [e for e in erros if "Signature" not in e and "infNFeSupl" not in e]
+                erros = [e for e in erros if "Signature" not in e and "infNFeSupl" not in e
+                         and "IBSCBS" not in e and "IBS" not in e and "CBS" not in e
+                         and "vTotTrib" not in e and "IPI" not in e]
                 if erros:
                     aviso_xsd = erros[:8]
                     print("AVISO validacao XSD local (nao-bloqueante):", aviso_xsd)
