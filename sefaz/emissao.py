@@ -337,15 +337,11 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     # certificado em base64 (DER), sem cabecalhos PEM - vai no X509Certificate
     cert_der_b64 = base64.b64encode(cert.public_bytes(serialization.Encoding.DER)).decode()
 
-    # --- 1) DigestValue = base64( SHA1( C14N( infNFe transformada ) ) ) ---
-    # A NF-e usa enveloped-signature + C14N. Como a Signature ainda nao existe,
-    # a transformacao enveloped nao remove nada; basta C14N(infNFe) e SHA1.
-    inf_c14n = _c14n_bytes(inf)
-    digest = hashes.Hash(hashes.SHA1())
-    digest.update(inf_c14n)
-    digest_value = base64.b64encode(digest.finalize()).decode()
-
-    # --- 2) Monta SignedInfo (namespace ds como DEFAULT, sem prefixo) ---
+    # --- 1) Monta a Signature (sem DigestValue ainda) e anexa ao root ---
+    #     O digest sera calculado DEPOIS, sobre a infNFe no contexto final,
+    #     aplicando a transformacao enveloped (remover a Signature) — exatamente
+    #     como a SEFAZ valida. Calcular antes (infNFe isolada) gera digest
+    #     divergente por causa de namespaces herdados -> rejeicao 297.
     def ds(tag):
         return f"{{{DS_NS}}}{tag}"
 
@@ -363,12 +359,8 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     t2.set("Algorithm", _C14N)
     dig_m = etree.SubElement(ref, ds("DigestMethod"))
     dig_m.set("Algorithm", f"{DS_NS}sha1")
-    dig_v = etree.SubElement(ref, ds("DigestValue"))
-    dig_v.text = digest_value
+    dig_v = etree.SubElement(ref, ds("DigestValue"))  # texto preenchido no passo 2
 
-    # --- 3) Monta a Signature na arvore e SO ENTAO canoniza o SignedInfo ---
-    # (canonizar o SignedInfo isolado gera bytes diferentes do contexto final,
-    #  o que invalida a assinatura. Por isso inserimos tudo na arvore primeiro.)
     signature = etree.Element(ds("Signature"), nsmap={None: DS_NS})
     signature.append(signed_info)
     sv = etree.SubElement(signature, ds("SignatureValue"))
@@ -376,10 +368,20 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     x509_data = etree.SubElement(key_info, ds("X509Data"))
     x509_cert = etree.SubElement(x509_data, ds("X509Certificate"))
     x509_cert.text = cert_der_b64
-    # Signature como ultima filha de <NFe> (irma de infNFe)
-    root.append(signature)
+    root.append(signature)  # Signature como ultima filha de <NFe>, irma de infNFe
 
-    # canoniza o SignedInfo JA no contexto final e assina (RSA-SHA1)
+    # --- 2) DigestValue: aplica enveloped (remove Signature de uma copia) e
+    #     canoniza a infNFe NO CONTEXTO do documento final, depois SHA1 ---
+    root_tmp = etree.fromstring(etree.tostring(root))
+    sig_tmp = root_tmp.find(ds("Signature"))
+    root_tmp.remove(sig_tmp)
+    inf_tmp = root_tmp.find(f"{{{NS}}}infNFe")
+    inf_c14n = etree.tostring(inf_tmp, method="c14n", exclusive=False, with_comments=False)
+    digest = hashes.Hash(hashes.SHA1())
+    digest.update(inf_c14n)
+    dig_v.text = base64.b64encode(digest.finalize()).decode()
+
+    # --- 3) canoniza o SignedInfo no contexto final e assina (RSA-SHA1) ---
     signed_info_c14n = _c14n_bytes(signed_info)
     assinatura = private_key.sign(signed_info_c14n, padding.PKCS1v15(), hashes.SHA1())
     sv.text = base64.b64encode(assinatura).decode()
