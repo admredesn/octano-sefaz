@@ -190,14 +190,16 @@ def montar_infnfe(nota, ambiente):
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
         f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
     )
+    cep_emit = re.sub(r"\D", "", emit.get("cep", ""))
+    ie_emit = re.sub(r"\D", "", emit.get("ie", ""))
     emit_xml = (
         f"<emit><CNPJ>{cnpj_emit}</CNPJ><xNome>{emit['nome']}</xNome>"
         f"<enderEmit><xLgr>{emit.get('logradouro','')}</xLgr>"
         f"<nro>{emit.get('numero','S/N')}</nro><xBairro>{emit.get('bairro','')}</xBairro>"
         f"<cMun>{emit.get('c_mun','3118601')}</cMun><xMun>{emit.get('municipio','')}</xMun>"
-        f"<UF>{emit.get('uf','MG')}</UF><CEP>{re.sub(r'\D','',emit.get('cep',''))}</CEP>"
+        f"<UF>{emit.get('uf','MG')}</UF><CEP>{cep_emit}</CEP>"
         f"<cPais>1058</cPais><xPais>BRASIL</xPais></enderEmit>"
-        f"<IE>{emit.get('ie','')}</IE><CRT>{emit.get('crt','3')}</CRT></emit>"
+        f"<IE>{ie_emit}</IE><CRT>{emit.get('crt','3')}</CRT></emit>"
     )
     dest_xml = (
         f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><xNome>{dest['nome']}</xNome>"
