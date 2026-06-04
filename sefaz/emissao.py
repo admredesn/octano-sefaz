@@ -92,6 +92,7 @@ def _imposto_item(it, crt="3"):
                 f"<ICMS60><orig>{orig}</orig><CST>60</CST>"
                 f"<vBCSTRet>{float(it.get('vbc_st_ret',0)):.2f}</vBCSTRet>"
                 f"<pST>{float(it.get('aliq_icms',0)):.4f}</pST>"
+                f"<vICMSSubstituto>{float(it.get('vicms_substituto',0)):.2f}</vICMSSubstituto>"
                 f"<vICMSSTRet>{float(it.get('vicms_st_ret',0)):.2f}</vICMSSTRet></ICMS60>"
             )
     else:
