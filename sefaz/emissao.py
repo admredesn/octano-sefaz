@@ -367,11 +367,14 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
         #    Se o schema local nao casar com a raiz, apenas registramos e seguimos.
         aviso_xsd = None
         try:
-            # valida o XML SEM assinatura (schema NFe puro) - aponta erro de conteudo
-            erros = validar_xsd(xml_nfe)
+            # valida o XML ASSINADO (com Signature) — igual ao que a SEFAZ recebe.
+            erros = validar_xsd(xml_assinada)
             if erros:
-                aviso_xsd = erros[:8]
-                print("AVISO validacao XSD local (nao-bloqueante):", aviso_xsd)
+                # ignora o falso-positivo de Signature ausente (so ocorre em xml nao-assinado)
+                erros = [e for e in erros if "Signature" not in e and "infNFeSupl" not in e]
+                if erros:
+                    aviso_xsd = erros[:8]
+                    print("AVISO validacao XSD local (nao-bloqueante):", aviso_xsd)
         except Exception as e:
             print("AVISO: validacao XSD pulada:", str(e))
 
