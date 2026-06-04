@@ -306,8 +306,9 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             cert=(cert_file, key_file), timeout=60, verify=True,
         )
         if resp.status_code != 200:
+            print("ERRO HTTP SEFAZ:", resp.status_code, "| corpo:", resp.text[:1500])
             return {"ok": False, "etapa": "http", "chave": chave,
-                    "status": resp.status_code, "detalhes": resp.text[:500]}
+                    "status": resp.status_code, "detalhes": resp.text[:800]}
 
         # 5) trata retorno (cStat 100 = autorizado; 104 lote processado -> ver protNFe)
         root = etree.fromstring(resp.content)
