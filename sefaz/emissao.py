@@ -245,6 +245,26 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
     )
     # assina referenciando o Id da infNFe; a Signature deve ficar como filha de <NFe>
     signed_inf = signer.sign(root, key=key_data, cert=cert_data, reference_uri=ref_uri)
+
+    # A SEFAZ NAO aceita prefixo de namespace na assinatura (ex.: <ds:Signature>).
+    # Reconstruimos a Signature com o namespace xmldsig como DEFAULT (sem prefixo).
+    DS = "http://www.w3.org/2000/09/xmldsig#"
+    sig = signed_inf.find(f"{{{DS}}}Signature")
+    if sig is not None:
+        def _rebuild(el):
+            local = el.tag.split("}", 1)[1] if "}" in el.tag else el.tag
+            novo = etree.Element(f"{{{DS}}}{local}", nsmap={None: DS})
+            for k, v in el.attrib.items():
+                novo.set(k, v)
+            novo.text = el.text
+            novo.tail = el.tail
+            for filho in el:
+                novo.append(_rebuild(filho))
+            return novo
+        nova_sig = _rebuild(sig)
+        parent = sig.getparent()
+        parent.replace(sig, nova_sig)
+
     return etree.tostring(signed_inf, encoding="unicode")
 
 
