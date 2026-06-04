@@ -195,7 +195,7 @@ def montar_infnfe(nota, ambiente):
         f"<enderEmit><xLgr>{emit.get('logradouro','')}</xLgr>"
         f"<nro>{emit.get('numero','S/N')}</nro><xBairro>{emit.get('bairro','')}</xBairro>"
         f"<cMun>{emit.get('c_mun','3118601')}</cMun><xMun>{emit.get('municipio','')}</xMun>"
-        f"<UF>{emit.get('uf','MG')}</UF><CEP>{re.sub(r'D','',emit.get('cep',''))}</CEP>"
+        f"<UF>{emit.get('uf','MG')}</UF><CEP>{re.sub(r'\D','',emit.get('cep',''))}</CEP>"
         f"<cPais>1058</cPais><xPais>BRASIL</xPais></enderEmit>"
         f"<IE>{emit.get('ie','')}</IE><CRT>{emit.get('crt','3')}</CRT></emit>"
     )
@@ -363,6 +363,7 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             "xmotivo": xmotivo,
             "protocolo": nprot,
             "aviso_xsd": aviso_xsd,
+            "xml_debug": (xml_assinada[:4000] if not autorizado else None),
             "xml_assinado": xml_assinada if autorizado else None,
         }
     finally:
