@@ -319,8 +319,8 @@ def assinar_nfe(xml_nfe: str, cert_file: str, key_file: str) -> str:
 
     signer = XMLSigner(
         method=methods.enveloped,
-        signature_algorithm="rsa-sha256",
-        digest_algorithm="sha256",
+        signature_algorithm="rsa-sha1",
+        digest_algorithm="sha1",
         c14n_algorithm="http://www.w3.org/TR/2001/REC-xml-c14n-20010315",
     )
     # assina referenciando o Id da infNFe; a Signature deve ficar como filha de <NFe>
