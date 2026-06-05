@@ -15,6 +15,30 @@ CORS(app, origins="*")
 def health():
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0"})
 
+@app.route("/cnpj/<cnpj>", methods=["GET"])
+def consultar_cnpj(cnpj):
+    """Consulta dados publicos de um CNPJ via BrasilAPI (proxy servidor-a-servidor
+    para evitar bloqueio de CORS no navegador). Retorna o JSON da BrasilAPI."""
+    import requests
+    try:
+        cnpj_limpo = "".join(ch for ch in (cnpj or "") if ch.isdigit())
+        if len(cnpj_limpo) != 14:
+            return jsonify({"erro": "CNPJ deve ter 14 digitos"}), 400
+        r = requests.get(
+            "https://brasilapi.com.br/api/cnpj/v1/" + cnpj_limpo,
+            timeout=15,
+            headers={"User-Agent": "Octano-Sistemas/1.0"},
+        )
+        if r.status_code == 404:
+            return jsonify({"erro": "CNPJ nao encontrado"}), 404
+        if r.status_code != 200:
+            return jsonify({"erro": "Falha na consulta", "status": r.status_code}), 502
+        return jsonify(r.json())
+    except requests.exceptions.Timeout:
+        return jsonify({"erro": "Tempo de consulta esgotado"}), 504
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
 @app.route("/manifestar", methods=["POST"])
 def manifestar():
     """Consulta NF-es emitidas contra o CNPJ na SEFAZ (DistDFe)"""
