@@ -170,5 +170,32 @@ def cancelar():
 
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+@app.route("/danfe", methods=["POST"])
+def danfe():
+    """Gera o DANFE (PDF) a partir do XML completo (nfeProc) da NF-e autorizada.
+    Recebe {"xml": "<nfeProc...>"} e devolve o PDF binario."""
+    try:
+        from flask import Response
+        from brazilfiscalreport.danfe import Danfe
+        dados = request.get_json()
+        xml = dados.get("xml")
+        if not xml:
+            return jsonify({"erro": "xml (nfeProc) e obrigatorio"}), 400
+        # a lib exige o nfeProc (NFe + protNFe). Se vier so a <NFe>, nao gera.
+        if "infProt" not in xml and "protNFe" not in xml:
+            return jsonify({"erro": "XML sem protocolo (protNFe). Envie o nfeProc completo da nota autorizada."}), 400
+
+        danfe = Danfe(xml=xml)
+        # FPDF2: output() sem argumento retorna o bytearray do PDF.
+        pdf_data = bytes(danfe.output())
+
+        return Response(
+            pdf_data,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=danfe.pdf"},
+        )
+    except Exception as e:
+        return jsonify({"erro": "Falha ao gerar DANFE: " + str(e)}), 500
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
