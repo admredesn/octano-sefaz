@@ -519,6 +519,20 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
                 nprot = inf_prot.findtext(f"{{{NS}}}nProt")
 
         autorizado = (cstat_nfe == "100")
+
+        # Monta o nfeProc completo (NFe assinada + protNFe) - este e o XML de
+        # DISTRIBUICAO oficial, o que vale como documento fiscal e o que o DANFE
+        # precisa para ser gerado. So existe quando autorizado (tem protNFe).
+        nfe_proc = None
+        if autorizado and prot is not None:
+            prot_xml = etree.tostring(prot, encoding="unicode")
+            nfe_proc = (
+                f'<?xml version="1.0" encoding="UTF-8"?>'
+                f'<nfeProc versao="4.00" xmlns="{NS}">'
+                f'{xml_assinada}{prot_xml}'
+                f'</nfeProc>'
+            )
+
         return {
             "ok": autorizado,
             "etapa": "sefaz",
@@ -530,6 +544,7 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             "aviso_xsd": aviso_xsd,
             "xml_debug": xml_assinada,
             "xml_assinado": xml_assinada,
+            "nfe_proc": nfe_proc,
         }
     finally:
         limpar_arquivos(cert_file, key_file)
