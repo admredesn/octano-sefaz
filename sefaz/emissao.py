@@ -118,36 +118,57 @@ def _imposto_item(it, crt="3"):
         cst_cof = "49"
     vprod_pc = float(it["vProd"])
 
-    # PIS/COFINS: espelha o XML autorizado do posto -> grupo "Outr" (CST 49) zerado.
-    # (revenda de combustivel/lubrificante: tributo ja recolhido na cadeia)
-    pis = (f"<PIS><PISOutr><CST>{cst_pis}</CST>"
-           f"<vBC>0.00</vBC><pPIS>0.00</pPIS><vPIS>0.00</vPIS></PISOutr></PIS>")
-    cof = (f"<COFINS><COFINSOutr><CST>{cst_cof}</CST>"
-           f"<vBC>0.00</vBC><pCOFINS>0.00</pCOFINS><vCOFINS>0.00</vCOFINS></COFINSOutr></COFINS>")
+    # Combustivel monofasico (CST ICMS 61): PIS/COFINS NAO-TRIBUTADO CST 04
+    # (grupo PISNT/COFINSNT, sem vBC). Ver secao 2.2 da referencia.
+    if cst == "61":
+        pis = "<PIS><PISNT><CST>04</CST></PISNT></PIS>"
+        cof = "<COFINS><COFINSNT><CST>04</CST></COFINSNT></COFINS>"
+    else:
+        # demais: espelha o XML autorizado do posto -> grupo "Outr" (CST 49) zerado.
+        # (revenda de lubrificante: tributo ja recolhido na cadeia)
+        pis = (f"<PIS><PISOutr><CST>{cst_pis}</CST>"
+               f"<vBC>0.00</vBC><pPIS>0.00</pPIS><vPIS>0.00</vPIS></PISOutr></PIS>")
+        cof = (f"<COFINS><COFINSOutr><CST>{cst_cof}</CST>"
+               f"<vBC>0.00</vBC><pCOFINS>0.00</pCOFINS><vCOFINS>0.00</vCOFINS></COFINSOutr></COFINS>")
 
     # IPI: nao tributado (CST 99), zerado - como no XML do posto.
     ipi = ("<IPI><cEnq>999</cEnq><IPITrib><CST>99</CST>"
            "<vBC>0.00</vBC><pIPI>0.00</pIPI><vIPI>0.00</vIPI></IPITrib></IPI>")
 
     # IBS/CBS (Reforma Tributaria - obrigatorio em 2026).
-    # Aliquotas-teste 2026: IBS estadual 0,10%, IBS municipal 0%, CBS 0,90%.
-    vbc_rt = vprod_pc
-    p_ibs_uf, p_ibs_mun, p_cbs = 0.10, 0.00, 0.90
-    v_ibs_uf = round(vbc_rt * p_ibs_uf / 100, 2)
-    v_ibs_mun = round(vbc_rt * p_ibs_mun / 100, 2)
-    v_ibs = round(v_ibs_uf + v_ibs_mun, 2)
-    v_cbs = round(vbc_rt * p_cbs / 100, 2)
-    cst_rt = it.get("cst_ibscbs") or "000"
-    cclass = it.get("cclasstrib") or "000001"
-    ibscbs = (
-        f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
-        f"<gIBSCBS><vBC>{vbc_rt:.2f}</vBC>"
-        f"<gIBSUF><pIBSUF>{p_ibs_uf:.4f}</pIBSUF><vIBSUF>{v_ibs_uf:.2f}</vIBSUF></gIBSUF>"
-        f"<gIBSMun><pIBSMun>{p_ibs_mun:.4f}</pIBSMun><vIBSMun>{v_ibs_mun:.2f}</vIBSMun></gIBSMun>"
-        f"<vIBS>{v_ibs:.2f}</vIBS>"
-        f"<gCBS><pCBS>{p_cbs:.4f}</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS>"
-        f"</gIBSCBS></IBSCBS>"
-    )
+    if cst == "61":
+        # COMBUSTIVEL MONOFASICO -> CST 620 + gIBSCBSMono/gMonoRet (secao 2.2).
+        # Posto e substituido (tributo retido na cadeia) -> valores zerados.
+        cst_rt = it.get("cst_ibscbs") or "620"
+        cclass = it.get("cclasstrib") or "620006"
+        ibscbs = (
+            f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
+            f"<gIBSCBSMono>"
+            f"<gMonoRet><qBCMonoRet>0.0000</qBCMonoRet>"
+            f"<adRemIBSRet>0.0000</adRemIBSRet><vIBSMonoRet>0.00</vIBSMonoRet>"
+            f"<adRemCBSRet>0.0000</adRemCBSRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet>"
+            f"<vTotIBSMonoItem>0.00</vTotIBSMonoItem><vTotCBSMonoItem>0.00</vTotCBSMonoItem>"
+            f"</gIBSCBSMono></IBSCBS>"
+        )
+    else:
+        # Aliquotas-teste 2026: IBS estadual 0,10%, IBS municipal 0%, CBS 0,90%.
+        vbc_rt = vprod_pc
+        p_ibs_uf, p_ibs_mun, p_cbs = 0.10, 0.00, 0.90
+        v_ibs_uf = round(vbc_rt * p_ibs_uf / 100, 2)
+        v_ibs_mun = round(vbc_rt * p_ibs_mun / 100, 2)
+        v_ibs = round(v_ibs_uf + v_ibs_mun, 2)
+        v_cbs = round(vbc_rt * p_cbs / 100, 2)
+        cst_rt = it.get("cst_ibscbs") or "000"
+        cclass = it.get("cclasstrib") or "000001"
+        ibscbs = (
+            f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
+            f"<gIBSCBS><vBC>{vbc_rt:.2f}</vBC>"
+            f"<gIBSUF><pIBSUF>{p_ibs_uf:.4f}</pIBSUF><vIBSUF>{v_ibs_uf:.2f}</vIBSUF></gIBSUF>"
+            f"<gIBSMun><pIBSMun>{p_ibs_mun:.4f}</pIBSMun><vIBSMun>{v_ibs_mun:.2f}</vIBSMun></gIBSMun>"
+            f"<vIBS>{v_ibs:.2f}</vIBS>"
+            f"<gCBS><pCBS>{p_cbs:.4f}</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS>"
+            f"</gIBSCBS></IBSCBS>"
+        )
 
     return f"<imposto><ICMS>{icms}</ICMS>{ipi}{pis}{cof}{ibscbs}</imposto>"
 
@@ -225,11 +246,14 @@ def montar_infnfe(nota, ambiente):
         for it in nota["itens"] if str(it.get("cst_icms")) == "61"
     )
     # totais IBS/CBS (Reforma) - aliquotas-teste 2026: IBS-UF 0,10%, IBS-Mun 0%, CBS 0,90%
-    v_ibs_uf_tot = sum(round(float(it["vProd"]) * 0.10 / 100, 2) for it in nota["itens"])
+    # Itens monofasicos (CST 61) NAO entram no gIBS/gCBS; entram no gMono (zerados).
+    nao_mono = [it for it in nota["itens"] if str(it.get("cst_icms")) != "61"]
+    tem_mono = any(str(it.get("cst_icms")) == "61" for it in nota["itens"])
+    v_ibs_uf_tot = sum(round(float(it["vProd"]) * 0.10 / 100, 2) for it in nao_mono)
     v_ibs_mun_tot = 0.00
     v_ibs_tot = round(v_ibs_uf_tot + v_ibs_mun_tot, 2)
-    v_cbs_tot = sum(round(float(it["vProd"]) * 0.90 / 100, 2) for it in nota["itens"])
-    v_bc_rt_tot = v_prod
+    v_cbs_tot = sum(round(float(it["vProd"]) * 0.90 / 100, 2) for it in nao_mono)
+    v_bc_rt_tot = sum(float(it["vProd"]) for it in nao_mono)
 
     # destinatario: CNPJ ou CPF
     doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf", ""))
@@ -283,6 +307,11 @@ def montar_infnfe(nota, ambiente):
         f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>0.00</vTotTrib></ICMSTot>"
     )
     # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
+    tag_gmono = (
+        "<gMono><vIBSMono>0.00</vIBSMono><vCBSMono>0.00</vCBSMono>"
+        "<vIBSMonoReten>0.00</vIBSMonoReten><vCBSMonoReten>0.00</vCBSMonoReten>"
+        "<vIBSMonoRet>0.00</vIBSMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMono>"
+    ) if tem_mono else ""
     ibscbstot = (
         f"<IBSCBSTot><vBCIBSCBS>{v_bc_rt_tot:.2f}</vBCIBSCBS>"
         f"<gIBS>"
@@ -291,7 +320,8 @@ def montar_infnfe(nota, ambiente):
         f"<vIBS>{v_ibs_tot:.2f}</vIBS><vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus>"
         f"</gIBS>"
         f"<gCBS><vDif>0.00</vDif><vDevTrib>0.00</vDevTrib><vCBS>{v_cbs_tot:.2f}</vCBS>"
-        f"<vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus></gCBS></IBSCBSTot>"
+        f"<vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus></gCBS>"
+        f"{tag_gmono}</IBSCBSTot>"
     )
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
