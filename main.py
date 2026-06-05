@@ -147,6 +147,28 @@ def emitir():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
-if __name__ == "__main__":
+@app.route("/cancelar", methods=["POST"])
+def cancelar():
+    """Cancela uma NF-e modelo 55 autorizada (evento 110111) na SEFAZ-MG."""
+    try:
+        from sefaz.cancelamento import cancelar_nfe
+        dados = request.get_json()
+        chave = dados.get("chave")
+        protocolo = dados.get("protocolo")
+        justificativa = dados.get("justificativa")
+        cnpj = dados.get("cnpj", "")
+        cert_base64 = dados.get("cert_base64")
+        cert_senha = dados.get("cert_senha")
+        ambiente = dados.get("ambiente", "homologacao")
+
+        if not all([chave, protocolo, justificativa, cert_base64, cert_senha]):
+            return jsonify({"erro": "chave, protocolo, justificativa, cert_base64 e cert_senha sao obrigatorios"}), 400
+
+        resultado = cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha, ambiente)
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
