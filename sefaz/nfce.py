@@ -282,6 +282,22 @@ def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="h
         #  inserimos o supl ANTES da <Signature>.
         xml_final = xml_assinada.replace("<Signature", supl + "<Signature", 1)
 
+        # validacao XSD local: se o XML nao bate com o schema, retorna o erro EXATO
+        # (elemento/linha) em vez de depender do 215 generico da SEFAZ.
+        if nota.get("validar_xsd"):
+            import os
+            xsd_path = os.path.join(os.path.dirname(__file__), "schemas", "nfe_v4.00.xsd")
+            if os.path.isfile(xsd_path):
+                try:
+                    schema = etree.XMLSchema(etree.parse(xsd_path))
+                    doc = etree.fromstring(xml_final.encode("utf-8"))
+                    if not schema.validate(doc):
+                        erros = [f"linha {e.line}: {e.message}" for e in schema.error_log][:5]
+                        return {"ok": False, "etapa": "xsd", "chave": chave,
+                                "erro_xsd": erros, "xml_assinado": xml_final}
+                except Exception as ex:
+                    return {"ok": False, "etapa": "xsd_erro", "erro": str(ex), "xml_assinado": xml_final}
+
         url = URLS_AUTORIZACAO_NFCE[ambiente]
         soap = _soap_autorizacao_nfce(xml_final)
         action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote"
