@@ -113,18 +113,18 @@ URL_CONSULTA = {
 
 
 def _gerar_qrcode(chave, tp_amb, csc_id, csc, ambiente, dh_emi_hex=None):
-    """Monta a URL do QR Code da NFC-e (modelo ONLINE, versao 2 do QR Code).
-    Para emissao normal (online), os parametros sao apenas chave/versao/ambiente/idCSC
-    + o hash SHA-1 (cHashQRCode) calculado sobre a string desses parametros + CSC.
+    """Monta a URL do QR Code da NFC-e no formato EXATO dos cupons autorizados de MG:
+        ...qrcode.xhtml?p=<chave>|<versaoQR>|<tpAmb>|<cIdToken>|<HASH>
+    onde HASH = SHA1( "<chave>|<versaoQR>|<tpAmb>|<cIdToken>" + CSC ).hexdigest().upper()
+    (modelo ONLINE, versao 2 do QR Code).
     """
     base = URL_QRCODE[ambiente]
     versao = "2"
-    # parametros (modelo online): chave|versao|ambiente|idCSC
-    params = f"chNFe={chave}&nVersao={versao}&tpAmb={tp_amb}&cIdToken={csc_id}"
-    # string para hash = params (sem o &cHashQRCode) + CSC
-    str_hash = params + csc
-    chash = hashlib.sha1(str_hash.encode("utf-8")).hexdigest().upper()
-    qr = f"{base}?{params}&cHashQRCode={chash}"
+    # cIdToken sem zeros a esquerda (cupons reais usam "1", nao "000001")
+    id_token = str(csc_id).lstrip("0") or "0"
+    dados = f"{chave}|{versao}|{tp_amb}|{id_token}"
+    chash = hashlib.sha1((dados + csc).encode("utf-8")).hexdigest().upper()
+    qr = f"{base}?p={dados}|{chash}"
     return qr
 
 
