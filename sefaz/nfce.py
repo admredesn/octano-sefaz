@@ -108,7 +108,7 @@ URL_QRCODE = {
 # URL que vai no campo urlChave (consulta por chave) - exibida no DANFE
 URL_CONSULTA = {
     "producao":    "https://portalsped.fazenda.mg.gov.br/portalnfce",
-    "homologacao": "https://portalsped.fazenda.mg.gov.br/portalnfce",
+    "homologacao": "https://hportalsped.fazenda.mg.gov.br/portalnfce",
 }
 
 
