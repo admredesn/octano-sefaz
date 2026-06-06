@@ -148,7 +148,11 @@ def montar_infnfce(nota, empresa, ambiente):
     cdv = chave[-1]
 
     # itens (montagem propria da NFC-e, espelhando os cupons autorizados)
-    dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(nota["itens"]))
+    # Em homologacao, a SEFAZ exige que o 1o item tenha esta descricao fixa (cStat 373).
+    itens_emit = [dict(it) for it in nota["itens"]]
+    if tp_amb == "2" and itens_emit:
+        itens_emit[0]["xProd"] = "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+    dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(itens_emit))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
     v_icms_mono = sum(
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
