@@ -175,7 +175,7 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<cMunFG>{emit.get('c_mun','3123205')}</cMunFG>"
         f"<tpImp>4</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
-        f"<indPres>1</indPres><indIntermed>0</indIntermed><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
+        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
     )
     cep_emit = re.sub(r"\D", "", emit.get("cep", "") or "")
     ie_emit = re.sub(r"\D", "", emit.get("ie", "") or "")
@@ -197,11 +197,12 @@ def montar_infnfce(nota, empresa, ambiente):
         tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
         dest_xml = f"<dest><{tag_doc}>{doc_dest}</{tag_doc}></dest>"
 
+    tag_qbcmono = f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>" if q_bc_mono > 0 else ""
     icmstot = (
         f"<ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
-        f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>"
+        f"{tag_qbcmono}"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
@@ -240,9 +241,12 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<fone>{rt.get('fone','')}</fone></infRespTec>"
     )
 
+    # informacao adicional (opcional) - texto livre
+    inf_adic = "<infAdic><infCpl>Documento emitido por ME ou EPP optante. NFC-e</infCpl></infAdic>"
+
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
-        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_resptec}</infNFe>"
+        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_adic}{inf_resptec}</infNFe>"
     )
     nfe = f'<NFe xmlns="{NS}">{inf}</NFe>'
     return nfe, chave, tp_amb
