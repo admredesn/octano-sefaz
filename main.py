@@ -171,6 +171,35 @@ def cancelar():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
+@app.route("/emitir-nfce", methods=["POST"])
+def emitir_nfce_rota():
+    """Autoriza uma NFC-e modelo 65 na SEFAZ-MG (com QR Code via CSC)."""
+    try:
+        from sefaz.nfce import emitir_nfce
+        import random
+        dados = request.get_json()
+        cert_base64 = dados.get("cert_base64")
+        cert_senha = dados.get("cert_senha")
+        ambiente = dados.get("ambiente", "homologacao")
+        nota = dados.get("nota")
+        empresa = dados.get("empresa")
+        csc = dados.get("csc")
+        csc_id = dados.get("csc_id")
+
+        if not all([cert_base64, cert_senha, nota, empresa]):
+            return jsonify({"erro": "cert_base64, cert_senha, nota e empresa sao obrigatorios"}), 400
+        if not csc or not csc_id:
+            return jsonify({"erro": "csc e csc_id sao obrigatorios para NFC-e"}), 400
+        if not nota.get("itens"):
+            return jsonify({"erro": "nota.itens vazio"}), 400
+
+        nota.setdefault("cnf", str(random.randint(10000000, 99999999)))
+        resultado = emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente)
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
 @app.route("/danfe", methods=["POST"])
 def danfe():
     """Gera o DANFE (PDF) a partir do XML completo (nfeProc) da NF-e autorizada.
