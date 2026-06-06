@@ -98,7 +98,7 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<cMunFG>{emit.get('c_mun','3123205')}</cMunFG>"
         f"<tpImp>4</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
-        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
+        f"<indPres>1</indPres><indIntermed>0</indIntermed><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
     )
     cep_emit = re.sub(r"\D", "", emit.get("cep", "") or "")
     ie_emit = re.sub(r"\D", "", emit.get("ie", "") or "")
@@ -243,6 +243,7 @@ def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="h
             "qrcode": qr,
             "xml_assinado": xml_final,
             "nfe_proc": nfe_proc,
+            "sefaz_raw": resp.text[:2000] if not autorizado else None,
         }
     finally:
         limpar_arquivos(cert_file, key_file)
