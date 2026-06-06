@@ -18,8 +18,82 @@ import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
 from .emissao import (
-    NS, UF_CODIGO, montar_chave, _det_item, assinar_nfe,
+    NS, UF_CODIGO, montar_chave, assinar_nfe,
 )
+
+
+def _imposto_item_nfce(it):
+    """Imposto do item da NFC-e, espelhando EXATAMENTE os cupons autorizados do posto.
+    Diferencas vs modelo 55: SEM <IPI>; PIS/COFINS no grupo Aliq (CST 01) com valor real.
+    """
+    cst = str(it.get("cst_icms") or "").strip()
+    orig = it.get("origem", "0")
+    vprod = float(it["vProd"])
+
+    if cst == "61":
+        # combustivel monofasico
+        q = float(it["qCom"]); adrem = float(it.get("aliq_icms_ad_rem") or 0)
+        v = round(q * adrem, 2)
+        icms = (f"<ICMS><ICMS61><orig>{orig}</orig><CST>61</CST>"
+                f"<qBCMonoRet>{q:.4f}</qBCMonoRet><adRemICMSRet>{adrem:.4f}</adRemICMSRet>"
+                f"<vICMSMonoRet>{v:.2f}</vICMSMonoRet></ICMS61></ICMS>")
+        # PIS/COFINS nao-tributado (combustivel) + IBSCBS monofasico (CST 620)
+        pis = "<PIS><PISNT><CST>04</CST></PISNT></PIS>"
+        cof = "<COFINS><COFINSNT><CST>04</CST></COFINSNT></COFINS>"
+        ibscbs = ("<IBSCBS><CST>620</CST><cClassTrib>620006</cClassTrib>"
+                  "<gIBSCBSMono><vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
+                  "<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>")
+    else:
+        # CST 60 (ICMS-ST ja retido) - espelha o cupom de loja autorizado
+        icms = f"<ICMS><ICMS60><orig>{orig}</orig><CST>60</CST></ICMS60></ICMS>"
+        # PIS/COFINS no grupo Aliq (CST 01), como no cupom real do lubrificante
+        ppis = float(it.get("aliq_pis") or 1.65)
+        pcof = float(it.get("aliq_cofins") or 7.60)
+        vpis = round(vprod * ppis / 100, 2)
+        vcof = round(vprod * pcof / 100, 2)
+        pis = (f"<PIS><PISAliq><CST>01</CST><vBC>{vprod:.2f}</vBC>"
+               f"<pPIS>{ppis:.4f}</pPIS><vPIS>{vpis:.2f}</vPIS></PISAliq></PIS>")
+        cof = (f"<COFINS><COFINSAliq><CST>01</CST><vBC>{vprod:.2f}</vBC>"
+               f"<pCOFINS>{pcof:.4f}</pCOFINS><vCOFINS>{vcof:.2f}</vCOFINS></COFINSAliq></COFINS>")
+        # IBSCBS regular (CST 000), aliquotas-teste 2026 (IBS-UF 0,10%, CBS 0,90%)
+        v_ibs_uf = round(vprod * 0.10 / 100, 2)
+        v_cbs = round(vprod * 0.90 / 100, 2)
+        ibscbs = (f"<IBSCBS><CST>000</CST><cClassTrib>000001</cClassTrib>"
+                  f"<gIBSCBS><vBC>{vprod:.2f}</vBC>"
+                  f"<gIBSUF><pIBSUF>0.1000</pIBSUF><vIBSUF>{v_ibs_uf:.2f}</vIBSUF></gIBSUF>"
+                  f"<gIBSMun><pIBSMun>0.0000</pIBSMun><vIBSMun>0.00</vIBSMun></gIBSMun>"
+                  f"<vIBS>{v_ibs_uf:.2f}</vIBS>"
+                  f"<gCBS><pCBS>0.9000</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS></gIBSCBS></IBSCBS>")
+    return f"<imposto>{icms}{pis}{cof}{ibscbs}</imposto>"
+
+
+def _det_item_nfce(it, n, cnpj_emit):
+    """Item (det) da NFC-e espelhando os cupons autorizados: com <comb> e <CNPJFab>,
+    SEM IPI. O posto trata combustivel E lubrificante com grupo <comb> (cProdANP)."""
+    cest = it.get("cest")
+    tem_anp = bool(it.get("cod_anp"))
+    comb = ""
+    if tem_anp:
+        comb = (f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
+                f"<descANP>{it.get('desc_anp', it['xProd'])[:95]}</descANP>"
+                f"<UFCons>{it.get('uf_cons','MG')}</UFCons></comb>")
+    prod = (
+        f'<det nItem="{n}"><prod>'
+        f"<cProd>{it['cProd']}</cProd><cEAN>{it.get('cEAN','SEM GTIN')}</cEAN>"
+        f"<xProd>{it['xProd']}</xProd><NCM>{it['ncm']}</NCM>"
+        + (f"<CEST>{cest}</CEST><indEscala>N</indEscala>" if cest else "")
+        + f"<CNPJFab>{cnpj_emit}</CNPJFab>"
+        f"<CFOP>{it['cfop']}</CFOP><uCom>{it['uCom']}</uCom>"
+        f"<qCom>{float(it['qCom']):.4f}</qCom><vUnCom>{float(it['vUnCom']):.10f}</vUnCom>"
+        f"<vProd>{float(it['vProd']):.2f}</vProd>"
+        f"<cEANTrib>{it.get('cEANTrib','SEM GTIN')}</cEANTrib>"
+        f"<uTrib>{it.get('uTrib', it['uCom'])}</uTrib>"
+        f"<qTrib>{float(it['qCom']):.4f}</qTrib><vUnTrib>{float(it['vUnCom']):.10f}</vUnTrib>"
+        f"<indTot>1</indTot>{comb}</prod>"
+        + _imposto_item_nfce(it)
+        + "</det>"
+    )
+    return prod
 
 # Webservice de Autorizacao da NFC-e SEFAZ-MG (modelo 65) - autorizador proprio.
 URLS_AUTORIZACAO_NFCE = {
@@ -73,16 +147,19 @@ def montar_infnfce(nota, empresa, ambiente):
     cnf_fmt = str(cnf).zfill(8)
     cdv = chave[-1]
 
-    # itens (reusa o _det_item do modelo 55: impostos, combustivel, IBS/CBS)
-    crt_emit = str(emit.get("crt", "3"))
-    dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))
+    # itens (montagem propria da NFC-e, espelhando os cupons autorizados)
+    dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(nota["itens"]))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
     v_icms_mono = sum(
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
         for it in nota["itens"] if str(it.get("cst_icms")) == "61"
     )
     nao_mono = [it for it in nota["itens"] if str(it.get("cst_icms")) != "61"]
-    tem_mono = any(str(it.get("cst_icms")) == "61" for it in nota["itens"])
+    mono = [it for it in nota["itens"] if str(it.get("cst_icms")) == "61"]
+    tem_mono = len(mono) > 0
+    v_pis_tot = sum(round(float(it["vProd"]) * float(it.get("aliq_pis") or 1.65) / 100, 2) for it in nao_mono)
+    v_cofins_tot = sum(round(float(it["vProd"]) * float(it.get("aliq_cofins") or 7.60) / 100, 2) for it in nao_mono)
+    q_bc_mono = sum(float(it["qCom"]) for it in mono)
     v_ibs_uf_tot = sum(round(float(it["vProd"]) * 0.10 / 100, 2) for it in nao_mono)
     v_ibs_mun_tot = 0.00
     v_ibs_tot = round(v_ibs_uf_tot + v_ibs_mun_tot, 2)
@@ -104,6 +181,7 @@ def montar_infnfce(nota, empresa, ambiente):
     ie_emit = re.sub(r"\D", "", emit.get("ie", "") or "")
     emit_xml = (
         f"<emit><CNPJ>{cnpj_emit}</CNPJ><xNome>{emit['nome']}</xNome>"
+        f"<xFant>{emit.get('nome_fantasia', emit['nome'])}</xFant>"
         f"<enderEmit><xLgr>{emit.get('logradouro','')}</xLgr>"
         f"<nro>{emit.get('numero','S/N')}</nro><xBairro>{emit.get('bairro','')}</xBairro>"
         f"<cMun>{emit.get('c_mun','3123205')}</cMun><xMun>{emit.get('municipio','')}</xMun>"
@@ -119,21 +197,17 @@ def montar_infnfce(nota, empresa, ambiente):
         tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
         dest_xml = f"<dest><{tag_doc}>{doc_dest}</{tag_doc}></dest>"
 
-    tag_mono = f"<vICMSMono>{v_icms_mono:.2f}</vICMSMono>" if v_icms_mono > 0 else ""
     icmstot = (
         f"<ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
+        f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
-        f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>0.00</vTotTrib></ICMSTot>"
+        f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
+        f"<vNF>{v_prod:.2f}</vNF></ICMSTot>"
     )
-    tag_gmono = (
-        "<gMono><vIBSMono>0.00</vIBSMono><vCBSMono>0.00</vCBSMono>"
-        "<vIBSMonoReten>0.00</vIBSMonoReten><vCBSMonoReten>0.00</vCBSMonoReten>"
-        "<vIBSMonoRet>0.00</vIBSMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMono>"
-    ) if tem_mono else ""
+    # IBSCBSTot espelhando o cupom de loja autorizado
     ibscbstot = (
         f"<IBSCBSTot><vBCIBSCBS>{v_bc_rt_tot:.2f}</vBCIBSCBS>"
         f"<gIBS>"
@@ -142,19 +216,33 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<vIBS>{v_ibs_tot:.2f}</vIBS><vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus>"
         f"</gIBS>"
         f"<gCBS><vDif>0.00</vDif><vDevTrib>0.00</vDevTrib><vCBS>{v_cbs_tot:.2f}</vCBS>"
-        f"<vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus></gCBS>"
-        f"{tag_gmono}</IBSCBSTot>"
+        f"<vCredPres>0.00</vCredPres><vCredPresCondSus>0.00</vCredPresCondSus></gCBS></IBSCBSTot>"
     )
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>9</modFrete></transp>"
 
-    # pagamento: tPag (01=dinheiro,02=cheque,03=cartao credito,04=debito,17=PIX...)
+    # pagamento: cartao (03/04) exige grupo <card> com tpIntegra
     tpag = nota.get("forma_pagamento", "01")
-    pag = f"<pag><detPag><tPag>{tpag}</tPag><vPag>{v_prod:.2f}</vPag></detPag></pag>"
+    card = "<card><tpIntegra>2</tpIntegra></card>" if tpag in ("03", "04") else ""
+    pag = f"<pag><detPag><tPag>{tpag}</tPag><vPag>{v_prod:.2f}</vPag>{card}</detPag></pag>"
+
+    # responsavel tecnico (obrigatorio na NFC-e)
+    rt = nota.get("resp_tec") or {
+        "cnpj": "60943666000105",
+        "contato": "FC CONTABIL",
+        "email": "fcccontabil01@gmail.com",
+        "fone": "3133867015",
+    }
+    inf_resptec = (
+        f"<infRespTec><CNPJ>{rt.get('cnpj','')}</CNPJ>"
+        f"<xContato>{rt.get('contato','')}</xContato>"
+        f"<email>{rt.get('email','')}</email>"
+        f"<fone>{rt.get('fone','')}</fone></infRespTec>"
+    )
 
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
-        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}</infNFe>"
+        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_resptec}</infNFe>"
     )
     nfe = f'<NFe xmlns="{NS}">{inf}</NFe>'
     return nfe, chave, tp_amb
