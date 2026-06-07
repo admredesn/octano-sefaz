@@ -238,6 +238,7 @@ def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha,
             "xmotivo": xmotivo,
             "protocolo_cancelamento": n_prot_evt,
             "xml_evento": xml_assinado,
+            "sefaz_raw": resp.text[:2000] if not cancelado else None,
         }
     finally:
         limpar_arquivos(cert_file, key_file)
