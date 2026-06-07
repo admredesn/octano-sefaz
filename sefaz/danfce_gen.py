@@ -1,13 +1,7 @@
 """
-sefaz/danfce_gen.py  -  Gera o DANFCE (cupom da NFC-e) em PDF formato 80mm.
-
-Layout fiel ao cupom convencional (DANFCE padrao SEFAZ-MG).
-A brazilfiscalreport NAO gera DANFCE; montamos com fpdf2 + qrcode.
-Le os dados direto do XML autorizado (nfeProc).
-
-Camada 1: layout completo com dados do XML.
-- Encerrante (combustivel) lido do XML.
-- Linha de tributos (IBPT) e Vendedor/Operador: placeholders, recebem dados depois.
+sefaz/danfce_gen.py  -  DANFCE (cupom da NFC-e) em PDF 80mm, layout fiel ao convencional.
+Gerador proprio com fpdf2 + qrcode (a brazilfiscalreport nao gera DANFCE).
+Le os dados do XML autorizado (nfeProc).
 """
 
 import re
@@ -54,14 +48,10 @@ def _fmt_cnpj(c):
 
 def _fmt_cep(c):
     c = re.sub(r"\D", "", c or "")
-    if len(c) == 8:
-        return f"{c[:5]}-{c[5:]}"
-    return c
+    return f"{c[:5]}-{c[5:]}" if len(c) == 8 else c
 
 
 def gerar_danfce_pdf(xml_proc, extras=None):
-    """Recebe o nfeProc (str) e devolve os bytes do PDF do cupom 80mm.
-    extras (opcional): dict com 'vendedor', 'operador', 'turno', 'tributos' (IBPT)."""
     from fpdf import FPDF
     import qrcode
     import io
@@ -95,7 +85,6 @@ def gerar_danfce_pdf(xml_proc, extras=None):
     tp_amb = _txt(ide, "tpAmb")
 
     v_nf = _txt(total, "vNF")
-    v_prod = _txt(total, "vProd")
     v_desc = _txt(total, "vDesc")
     v_trib = _txt(total, "vTotTrib")
 
@@ -109,43 +98,48 @@ def gerar_danfce_pdf(xml_proc, extras=None):
     dets = root.findall(f".//{{{NS}}}det")
 
     # ---- PDF 80mm ----
-    largura = 80
-    pdf = FPDF(orientation="P", unit="mm", format=(largura, 400))
+    LARG = 80
+    ML = 3
+    XU = LARG - 2 * ML
+    pdf = FPDF(orientation="P", unit="mm", format=(LARG, 500))
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
-    ml = 3
-    pdf.set_margins(ml, 4, ml)
-    xu = largura - 2 * ml  # largura util
+    pdf.set_margins(ML, 4, ML)
+    pdf.set_x(ML)
+    F = "Courier"
 
-    FONT = "Courier"
-    LARG_CHARS = 46  # caracteres por linha em Courier 7
-
+    # helpers consistentes: cada um comeca/termina o cursor em X=ML, com ln=1
     def C(txt, size=7, style="", h=3.0):
-        pdf.set_font(FONT, style, size)
-        pdf.multi_cell(xu, h, txt, align="C")
-
+        pdf.set_x(ML); pdf.set_font(F, style, size)
+        pdf.multi_cell(XU, h, txt, align="C")
     def L(txt, size=7, style="", h=3.0):
-        pdf.set_font(FONT, style, size)
-        pdf.multi_cell(xu, h, txt, align="L")
-
-    def LR(esq, dir_, size=7, style="", h=3.2):
-        pdf.set_font(FONT, style, size)
-        pdf.cell(xu * 0.6, h, esq, align="L")
-        pdf.cell(xu * 0.4, h, dir_, align="R", ln=1)
-
-    def sep():
-        pdf.set_font(FONT, "", 7)
-        pdf.cell(xu, 2.6, "-" * LARG_CHARS, ln=1, align="C")
+        pdf.set_x(ML); pdf.set_font(F, style, size)
+        pdf.multi_cell(XU, h, txt, align="L")
+    def DOIS(esq, dir_, size=7, style="", h=3.4, frac=0.6):
+        pdf.set_x(ML); pdf.set_font(F, style, size)
+        pdf.cell(XU * frac, h, esq, align="L")
+        pdf.cell(XU * (1 - frac), h, dir_, align="R")
+        pdf.ln(h)
+    def SEP():
+        pdf.set_x(ML); pdf.set_font(F, "", 7)
+        pdf.cell(XU, 2.6, "-" * 46, align="C"); pdf.ln(2.6)
 
     # ===== CABECALHO =====
-    C(f"CNPJ: {emit_cnpj} {emit_nome}", size=7, style="B", h=3.2)
-    C(f"{emit_lgr}, {emit_nro} {emit_bairro} {emit_mun}-{emit_uf} {emit_cep}", size=6)
+    C(f"CNPJ: {emit_cnpj}", size=7, style="B", h=3.0)
+    C(emit_nome, size=7, style="B", h=3.2)
+    if emit_lgr:
+        C(f"{emit_lgr}, {emit_nro} {emit_bairro}", size=6)
+        C(f"{emit_mun}-{emit_uf} {emit_cep}", size=6)
     C(f"I.E.: {emit_ie}", size=6)
-    C("Documento Auxiliar da Nota Fiscal de Consumidor Eletronica", size=6, h=3.0)
+    SEP()
+    C("Documento Auxiliar da Nota Fiscal", size=6, h=2.8)
+    C("de Consumidor Eletronica", size=6, h=2.8)
+    SEP()
 
     # ===== ITENS =====
-    pdf.set_font(FONT, "", 6)
-    pdf.cell(xu, 3, "# Codigo Descricao  Qtde Un Valor unit. Valor total", ln=1)
+    L("# Codigo Descricao", size=6, h=2.8)
+    L("  Qtde Un X Valor unit. = Valor total", size=6, h=2.8)
+    SEP()
     for idx, d in enumerate(dets, 1):
         prod = d.find(f"{{{NS}}}prod")
         cprod = _txt(prod, "cProd")
@@ -154,59 +148,54 @@ def gerar_danfce_pdf(xml_proc, extras=None):
         vun = _moeda(_txt(prod, "vUnCom"))
         vprod = _moeda(_txt(prod, "vProd"))
         ucom = _txt(prod, "uCom")
-        # linha 1: seq + codigo + descricao
-        pdf.set_font(FONT, "", 6)
-        pdf.multi_cell(xu, 3, f"{str(idx).zfill(3)} {cprod} {xprod}", align="L")
-        # linha 2: qtd x unit ........ total (alinhado a direita)
-        pdf.cell(xu * 0.55, 3, f"   {qcom} {ucom} X {vun}", align="L")
-        pdf.cell(xu * 0.45, 3, vprod, align="R", ln=1)
+        L(f"{str(idx).zfill(3)} {cprod} {xprod}", size=6, h=2.9)
+        DOIS(f"   {qcom} {ucom} X {vun}", vprod, size=6, h=2.9, frac=0.6)
+    SEP()
 
     # ===== TOTAIS =====
-    LR("Qtde. total de itens", str(len(dets)).zfill(3), size=7)
-    pdf.set_font(FONT, "B", 9)
-    pdf.cell(xu * 0.5, 4.5, "Valor total R$", align="L")
-    pdf.cell(xu * 0.5, 4.5, _moeda(v_nf), align="R", ln=1)
+    DOIS("Qtde. total de itens", str(len(dets)).zfill(3), size=7, h=3.2)
+    DOIS("Valor total R$", _moeda(v_nf), size=9, style="B", h=4.5, frac=0.5)
     if v_desc and float(v_desc or 0) > 0:
-        LR("Desconto R$", _moeda(v_desc), size=7)
+        DOIS("Desconto R$", _moeda(v_desc), size=7, h=3.2)
 
     # ===== PAGAMENTO =====
-    pdf.set_font(FONT, "", 7)
-    pdf.cell(xu * 0.5, 3.4, "FORMA DE PAGAMENTO", align="L")
-    pdf.cell(xu * 0.5, 3.4, "VALOR PAGO R$", align="R", ln=1)
+    DOIS("FORMA DE PAGAMENTO", "VALOR PAGO R$", size=7, h=3.2, frac=0.5)
     FORMAS = {"01": "Dinheiro", "02": "Cheque", "03": "Cartao Credito",
               "04": "Cartao Debito", "05": "Credito Loja", "15": "Boleto",
               "17": "PIX", "99": "Outros"}
     for p in root.findall(f".//{{{NS}}}detPag"):
-        LR(FORMAS.get(_txt(p, "tPag"), "Pagamento"), _moeda(_txt(p, "vPag")), size=7)
+        DOIS(FORMAS.get(_txt(p, "tPag"), "Pagamento"), _moeda(_txt(p, "vPag")), size=7, h=3.2)
+    SEP()
 
     # ===== CHAVE / CONSULTA =====
-    C("Consulte pela Chave de Acesso em", size=6)
-    C(url_chave, size=5)
+    C("Consulte pela Chave de Acesso em", size=6, h=2.8)
+    C(url_chave, size=5, h=2.6)
     chave_fmt = " ".join(chave[i:i+4] for i in range(0, len(chave), 4))
-    C(chave_fmt, size=6)
+    C(chave_fmt, size=6, h=2.8)
     if cpf_dest:
-        C(f"CONSUMIDOR CPF/CNPJ: {cpf_dest}", size=6)
+        C(f"CONSUMIDOR CPF/CNPJ: {cpf_dest}", size=6, h=2.8)
     else:
-        C("CONSUMIDOR NAO IDENTIFICADO", size=6)
-
+        C("CONSUMIDOR NAO IDENTIFICADO", size=6, h=2.8)
     if tp_amb == "2":
-        C("*** HOMOLOGACAO - SEM VALOR FISCAL ***", size=6, style="B")
+        C("*** HOMOLOGACAO - SEM VALOR FISCAL ***", size=6, style="B", h=3.0)
+    SEP()
 
     # ===== DADOS NFC-e =====
-    C(f"NFC-e n {numero} Serie {serie} {dh_emi}", size=6)
-    C(f"Protocolo de Autorizacao: {n_prot}", size=6)
-    C(f"Data de Autorizacao {dh_recb}", size=6)
+    C(f"NFC-e n {numero} Serie {serie}", size=6, h=2.8)
+    C(dh_emi, size=6, h=2.8)
+    C(f"Protocolo de Autorizacao: {n_prot}", size=6, h=2.8)
+    C(f"Data de Autorizacao {dh_recb}", size=6, h=2.8)
 
     # ===== QR CODE =====
     if qr_code:
         img = qrcode.make(qr_code)
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        qr_size = 36
+        buf = io.BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+        qs = 34
         pdf.ln(1)
-        pdf.image(buf, x=(largura - qr_size) / 2, y=pdf.get_y(), w=qr_size, h=qr_size)
-        pdf.ln(qr_size + 1)
+        y = pdf.get_y()
+        pdf.image(buf, x=(LARG - qs) / 2, y=y, w=qs, h=qs)
+        pdf.set_y(y + qs + 2)
+    SEP()
 
     # ===== ENCERRANTE (combustivel) =====
     enc_partes = []
@@ -219,30 +208,24 @@ def gerar_danfce_pdf(xml_proc, extras=None):
                 f"vEncFin:{_txt(enc,'vEncFin')}"
             )
     if enc_partes:
-        L(" ".join(enc_partes), size=5, h=2.6)
+        L(" ".join(enc_partes), size=5, h=2.5)
 
     # ===== TRIBUTOS (IBPT) =====
-    # Camada 1: usa vTotTrib do XML se houver; extras pode trazer detalhado depois.
     trib = extras.get("tributos")
     if trib:
-        L(trib, size=5, h=2.6)
+        L(trib, size=5, h=2.5)
     elif v_trib and float(v_trib or 0) > 0:
         pct = (float(v_trib) / float(v_nf) * 100) if float(v_nf or 0) else 0
-        L(f"Val. Aprox. Tributos: R${_moeda(v_trib)}({pct:.2f}%) Fonte IBPT", size=5, h=2.6)
+        L(f"Val. Aprox. Tributos: R${_moeda(v_trib)}({pct:.2f}%) Fonte IBPT", size=5, h=2.5)
 
     # ===== VENDEDOR / OPERADOR =====
-    vend = extras.get("vendedor")
-    oper = extras.get("operador")
-    turno = extras.get("turno")
+    vend = extras.get("vendedor"); oper = extras.get("operador"); turno = extras.get("turno")
     if vend or oper:
         linha = ""
-        if vend:
-            linha += f"Vendedor: {vend} "
-        if oper:
-            linha += f"Operador: {oper}"
-        if turno:
-            linha += f" Turno:{turno}"
-        L(linha, size=5, h=2.6)
+        if vend: linha += f"Vendedor: {vend} "
+        if oper: linha += f"Operador: {oper}"
+        if turno: linha += f" Turno:{turno}"
+        L(linha, size=5, h=2.5)
 
     out = pdf.output()
     return bytes(out)
