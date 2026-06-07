@@ -171,6 +171,29 @@ def cancelar():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
+@app.route("/cancelar-nfce", methods=["POST"])
+def cancelar_nfce_rota():
+    """Cancela uma NFC-e (modelo 65) autorizada via evento 110111 na SEFAZ-MG."""
+    try:
+        from sefaz.cancelamento import cancelar_nfe
+        dados = request.get_json()
+        chave = dados.get("chave")
+        protocolo = dados.get("protocolo")
+        justificativa = dados.get("justificativa")
+        cnpj = dados.get("cnpj", "")
+        cert_base64 = dados.get("cert_base64")
+        cert_senha = dados.get("cert_senha")
+        ambiente = dados.get("ambiente", "homologacao")
+
+        if not all([chave, protocolo, justificativa, cert_base64, cert_senha]):
+            return jsonify({"erro": "chave, protocolo, justificativa, cert_base64 e cert_senha sao obrigatorios"}), 400
+
+        resultado = cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha, ambiente, modelo="65")
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
 @app.route("/emitir-nfce", methods=["POST"])
 def emitir_nfce_rota():
     """Autoriza uma NFC-e modelo 65 na SEFAZ-MG (com QR Code via CSC)."""
@@ -199,6 +222,34 @@ def emitir_nfce_rota():
         return jsonify(resultado), codigo
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
+@app.route("/danfce", methods=["POST"])
+def danfce():
+    """Gera o DANFCE (cupom PDF) da NFC-e a partir do nfeProc autorizado.
+    Recebe {"xml": "<nfeProc...>"} e devolve o PDF binario (formato cupom)."""
+    try:
+        from flask import Response
+        dados = request.get_json()
+        xml = dados.get("xml")
+        if not xml:
+            return jsonify({"erro": "xml (nfeProc) e obrigatorio"}), 400
+        if "infProt" not in xml and "protNFe" not in xml:
+            return jsonify({"erro": "XML sem protocolo (protNFe). Envie o nfeProc completo da NFC-e autorizada."}), 400
+        # a NFC-e usa a classe Danfce da brazilfiscalreport.
+        try:
+            from brazilfiscalreport.danfce import Danfce
+        except Exception:
+            from brazilfiscalreport.dacte import Dacte  # fallback defensivo (nao usado)
+            return jsonify({"erro": "Modulo Danfce indisponivel nesta versao da brazilfiscalreport."}), 500
+        danfce_doc = Danfce(xml=xml)
+        pdf_data = bytes(danfce_doc.output())
+        return Response(
+            pdf_data,
+            mimetype="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=danfce.pdf"},
+        )
+    except Exception as e:
+        return jsonify({"erro": "Falha ao gerar DANFCE: " + str(e)}), 500
 
 @app.route("/danfe", methods=["POST"])
 def danfe():
