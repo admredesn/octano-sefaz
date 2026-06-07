@@ -36,8 +36,8 @@ URLS_EVENTO = {
     "homologacao": "https://hnfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
 }
 URLS_EVENTO_NFCE = {
-    "producao":    "https://nfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
-    "homologacao": "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
+    "producao":    "https://nfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
+    "homologacao": "https://hnfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
 }
 
 TP_EVENTO_CANCELAMENTO = "110111"
