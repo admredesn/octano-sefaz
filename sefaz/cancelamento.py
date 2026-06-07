@@ -19,7 +19,7 @@ Regras SEFAZ:
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from lxml import etree
 import requests
 
@@ -168,9 +168,10 @@ def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha,
     try:
         tp_amb = "1" if ambiente == "producao" else "2"
         c_orgao = chave[0:2]  # cUF = 2 primeiros digitos da chave (MG=31)
-        dh_evento = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
-        # formata o offset de -0300 para -03:00
-        dh_evento = dh_evento[:-2] + ":" + dh_evento[-2:]
+        # horario de Brasilia fixo (-03:00). O servidor roda em UTC, entao nao
+        # podemos depender de astimezone() (mantém UTC e gera dhEvento no futuro).
+        dh = datetime.now(timezone(timedelta(hours=-3)))
+        dh_evento = dh.strftime("%Y-%m-%dT%H:%M:%S-03:00")
         n_seq = "1"
         id_evento = f"ID{TP_EVENTO_CANCELAMENTO}{chave}{n_seq.zfill(2)}"
 
