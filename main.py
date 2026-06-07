@@ -225,24 +225,18 @@ def emitir_nfce_rota():
 
 @app.route("/danfce", methods=["POST"])
 def danfce():
-    """Gera o DANFCE (cupom PDF) da NFC-e a partir do nfeProc autorizado.
-    Recebe {"xml": "<nfeProc...>"} e devolve o PDF binario (formato cupom)."""
+    """Gera o DANFCE (cupom 80mm em PDF) da NFC-e a partir do nfeProc autorizado.
+    Gerador proprio (a brazilfiscalreport nao suporta DANFCE)."""
     try:
         from flask import Response
+        from sefaz.danfce_gen import gerar_danfce_pdf
         dados = request.get_json()
         xml = dados.get("xml")
         if not xml:
             return jsonify({"erro": "xml (nfeProc) e obrigatorio"}), 400
         if "infProt" not in xml and "protNFe" not in xml:
             return jsonify({"erro": "XML sem protocolo (protNFe). Envie o nfeProc completo da NFC-e autorizada."}), 400
-        # a NFC-e usa a classe Danfce da brazilfiscalreport.
-        try:
-            from brazilfiscalreport.danfce import Danfce
-        except Exception:
-            from brazilfiscalreport.dacte import Dacte  # fallback defensivo (nao usado)
-            return jsonify({"erro": "Modulo Danfce indisponivel nesta versao da brazilfiscalreport."}), 500
-        danfce_doc = Danfce(xml=xml)
-        pdf_data = bytes(danfce_doc.output())
+        pdf_data = gerar_danfce_pdf(xml)
         return Response(
             pdf_data,
             mimetype="application/pdf",
