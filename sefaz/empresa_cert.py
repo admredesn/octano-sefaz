@@ -15,6 +15,7 @@ import json
 import base64
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from .cripto import decifrar
 
@@ -41,7 +42,9 @@ def _rest_get(path, params=""):
 def _storage_download(caminho):
     """Baixa um arquivo do bucket octano-certs e devolve em base64."""
     url, key = _supabase_conf()
-    full = f"{url}/storage/v1/object/octano-certs/{caminho}"
+    # o caminho pode conter espacos/caracteres especiais (nome do arquivo) -> encode
+    caminho_enc = urllib.parse.quote(caminho, safe="/")
+    full = f"{url}/storage/v1/object/octano-certs/{caminho_enc}"
     req = urllib.request.Request(full)
     req.add_header("apikey", key)
     req.add_header("Authorization", f"Bearer {key}")
