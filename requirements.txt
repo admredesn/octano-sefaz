@@ -8,3 +8,4 @@ supabase==2.5.0
 python-dotenv==1.0.1
 gunicorn==22.0.0
 brazilfiscalreport
+qrcode==7.4.2
