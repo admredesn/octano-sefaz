@@ -15,21 +15,6 @@ CORS(app, origins="*")
 def health():
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0"})
 
-@app.route("/diag-env", methods=["GET"])
-def diag_env():
-    """Diagnostico TEMPORARIO: diz se as variaveis existem (sem expor valores)."""
-    import os as _os
-    def tem(n):
-        v = _os.environ.get(n)
-        return {"existe": bool(v), "tamanho": len(v) if v else 0}
-    return jsonify({
-        "SUPABASE_URL": tem("SUPABASE_URL"),
-        "SUPABASE_SERVICE_KEY": tem("SUPABASE_SERVICE_KEY"),
-        "CHAVE_MESTRA": tem("CHAVE_MESTRA"),
-        "PORT": tem("PORT"),
-        "total_vars": len(_os.environ),
-    })
-
 @app.route("/cnpj/<cnpj>", methods=["GET"])
 def consultar_cnpj(cnpj):
     """Consulta dados publicos de um CNPJ via BrasilAPI (proxy servidor-a-servidor
