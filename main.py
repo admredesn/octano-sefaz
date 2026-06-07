@@ -223,6 +223,99 @@ def emitir_nfce_rota():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
+@app.route("/cadastrar-cert", methods=["POST"])
+def cadastrar_cert():
+    """Cifra a senha do certificado de uma empresa e grava no banco.
+    Recebe {empresa_id, senha}. Usado no cadastro (retaguarda). Unica rota que
+    recebe a senha em texto, e so o gerente a usa ao cadastrar o certificado."""
+    try:
+        from sefaz.cripto import cifrar
+        import urllib.request, urllib.error
+        dados = request.get_json()
+        empresa_id = dados.get("empresa_id")
+        senha = dados.get("senha")
+        if not empresa_id or senha is None:
+            return jsonify({"erro": "empresa_id e senha sao obrigatorios"}), 400
+
+        senha_cifrada = cifrar(senha)
+
+        # grava via REST (service key)
+        url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
+        key = os.environ.get("SUPABASE_SERVICE_KEY", "").strip()
+        if not url or not key:
+            return jsonify({"erro": "SUPABASE_URL / SUPABASE_SERVICE_KEY nao configurados"}), 500
+        body = json.dumps({"cert_senha_cifrada": senha_cifrada}).encode()
+        req = urllib.request.Request(
+            f"{url}/rest/v1/oct_empresas?id=eq.{empresa_id}",
+            data=body, method="PATCH",
+        )
+        req.add_header("apikey", key)
+        req.add_header("Authorization", f"Bearer {key}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Prefer", "return=minimal")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            ok = r.status in (200, 204)
+        return jsonify({"ok": ok}), (200 if ok else 422)
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+@app.route("/emitir-nfce-empresa", methods=["POST"])
+def emitir_nfce_empresa():
+    """Emite NFC-e usando o certificado/senha guardados no servidor (por empresa_id).
+    O cliente (PDV/retaguarda) NAO envia cert nem senha - so empresa_id + nota + empresa."""
+    try:
+        from sefaz.nfce import emitir_nfce
+        from sefaz.empresa_cert import carregar_empresa
+        import random
+        dados = request.get_json()
+        empresa_id = dados.get("empresa_id")
+        ambiente = dados.get("ambiente", "homologacao")
+        nota = dados.get("nota")
+        empresa = dados.get("empresa")
+        if not empresa_id or not nota or not empresa:
+            return jsonify({"erro": "empresa_id, nota e empresa sao obrigatorios"}), 400
+        if not nota.get("itens"):
+            return jsonify({"erro": "nota.itens vazio"}), 400
+
+        ctx = carregar_empresa(empresa_id)
+        csc = ctx.get("csc"); csc_id = ctx.get("csc_id")
+        if not csc or not csc_id:
+            return jsonify({"erro": "csc e csc_id nao cadastrados para a empresa"}), 422
+
+        nota.setdefault("cnf", str(random.randint(10000000, 99999999)))
+        resultado = emitir_nfce(nota, empresa, ctx["cert_base64"], ctx["cert_senha"], csc, csc_id, ambiente)
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
+@app.route("/cancelar-nfce-empresa", methods=["POST"])
+def cancelar_nfce_empresa():
+    """Cancela NFC-e (evento 110111) usando cert/senha do servidor (por empresa_id)."""
+    try:
+        from sefaz.cancelamento import cancelar_nfe
+        from sefaz.empresa_cert import carregar_empresa
+        dados = request.get_json()
+        empresa_id = dados.get("empresa_id")
+        chave = dados.get("chave")
+        protocolo = dados.get("protocolo")
+        justificativa = dados.get("justificativa")
+        ambiente = dados.get("ambiente", "homologacao")
+        if not all([empresa_id, chave, protocolo, justificativa]):
+            return jsonify({"erro": "empresa_id, chave, protocolo e justificativa sao obrigatorios"}), 400
+
+        ctx = carregar_empresa(empresa_id)
+        cnpj = (ctx["empresa"].get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+        resultado = cancelar_nfe(chave, protocolo, justificativa, cnpj,
+                                 ctx["cert_base64"], ctx["cert_senha"], ambiente, modelo="65")
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
 @app.route("/danfce", methods=["POST"])
 def danfce():
     """Gera o DANFCE (cupom 80mm em PDF) da NFC-e a partir do nfeProc autorizado.
