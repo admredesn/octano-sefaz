@@ -30,9 +30,14 @@ DS_NS = "http://www.w3.org/2000/09/xmldsig#"
 _C14N = "http://www.w3.org/TR/2001/REC-xml-c14n-20010315"  # C14N 1.0 inclusiva
 
 # MG usa autorizador proprio tambem para eventos (confirmado no portal SPED-MG).
+# NF-e (mod 55) e NFC-e (mod 65) tem endpoints de evento diferentes.
 URLS_EVENTO = {
     "producao":    "https://nfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
     "homologacao": "https://hnfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
+}
+URLS_EVENTO_NFCE = {
+    "producao":    "https://nfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
+    "homologacao": "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
 }
 
 TP_EVENTO_CANCELAMENTO = "110111"
@@ -125,17 +130,18 @@ def _soap_evento(xml_envevento_assinado):
     )
 
 
-def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha, ambiente="homologacao"):
-    """Cancela uma NF-e autorizada via evento 110111.
+def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha, ambiente="homologacao", modelo="55"):
+    """Cancela uma NF-e (mod 55) ou NFC-e (mod 65) autorizada via evento 110111.
 
     Parametros:
-      chave        - chave de acesso (44 digitos) da NF-e a cancelar
+      chave        - chave de acesso (44 digitos) da nota a cancelar
       protocolo    - nProt da AUTORIZACAO original (obrigatorio)
       justificativa- texto entre 15 e 255 caracteres
       cnpj         - CNPJ do emitente (so digitos)
       cert_base64  - certificado A1 em base64
       cert_senha   - senha do certificado
       ambiente     - 'homologacao' ou 'producao'
+      modelo       - '55' (NF-e) ou '65' (NFC-e) - escolhe o endpoint de evento
     """
     # --- validacoes locais (antes de gastar chamada na SEFAZ) ---
     chave = re.sub(r"\D", "", chave or "")
@@ -188,7 +194,7 @@ def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha,
 
         xml_assinado = _assinar_evento(xml_evento, cert_file, key_file)
 
-        url = URLS_EVENTO[ambiente]
+        url = URLS_EVENTO_NFCE[ambiente] if str(modelo) == "65" else URLS_EVENTO[ambiente]
         soap = _soap_evento(xml_assinado)
         action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento"
         ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
