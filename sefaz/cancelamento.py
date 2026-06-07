@@ -177,10 +177,11 @@ def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha,
         # escapa caracteres XML na justificativa
         just_xml = (just.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
 
+        tag_evento = f'<evento versao="1.00" xmlns="{NS}">' if str(modelo) == "65" else '<evento versao="1.00">'
         xml_evento = (
             f'<envEvento versao="1.00" xmlns="{NS}">'
             f'<idLote>1</idLote>'
-            f'<evento versao="1.00">'
+            f'{tag_evento}'
             f'<infEvento Id="{id_evento}">'
             f'<cOrgao>{c_orgao}</cOrgao>'
             f'<tpAmb>{tp_amb}</tpAmb>'
