@@ -236,7 +236,7 @@ def danfce():
             return jsonify({"erro": "xml (nfeProc) e obrigatorio"}), 400
         if "infProt" not in xml and "protNFe" not in xml:
             return jsonify({"erro": "XML sem protocolo (protNFe). Envie o nfeProc completo da NFC-e autorizada."}), 400
-        pdf_data = gerar_danfce_pdf(xml)
+        pdf_data = gerar_danfce_pdf(xml, extras=dados.get("extras"))
         return Response(
             pdf_data,
             mimetype="application/pdf",
