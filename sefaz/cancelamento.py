@@ -36,8 +36,8 @@ URLS_EVENTO = {
     "homologacao": "https://hnfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
 }
 URLS_EVENTO_NFCE = {
-    "producao":    "https://nfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
-    "homologacao": "https://hnfe.fazenda.mg.gov.br/nfe2/services/NFeRecepcaoEvento4",
+    "producao":    "https://nfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
+    "homologacao": "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeRecepcaoEvento4",
 }
 
 TP_EVENTO_CANCELAMENTO = "110111"
@@ -119,12 +119,20 @@ def _assinar_evento(xml_evento: str, cert_file: str, key_file: str) -> str:
     return etree.tostring(root, encoding="unicode")
 
 
-def _soap_evento(xml_envevento_assinado):
+def _soap_evento(xml_envevento_assinado, cuf=None):
     wsdl_ns = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4"
+    header = ""
+    if cuf:
+        header = (
+            '<soap12:Header>'
+            f'<nfeCabecMsg xmlns="{wsdl_ns}"><cUF>{cuf}</cUF><versaoDados>1.00</versaoDados></nfeCabecMsg>'
+            '</soap12:Header>'
+        )
     return (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<soap12:Envelope '
-        'xmlns:soap12="http://www.w3.org/2003/05/soap-envelope"><soap12:Body>'
+        'xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">'
+        f'{header}<soap12:Body>'
         f'<nfeDadosMsg xmlns="{wsdl_ns}">{xml_envevento_assinado}</nfeDadosMsg>'
         '</soap12:Body></soap12:Envelope>'
     )
@@ -195,7 +203,7 @@ def cancelar_nfe(chave, protocolo, justificativa, cnpj, cert_base64, cert_senha,
         xml_assinado = _assinar_evento(xml_evento, cert_file, key_file)
 
         url = URLS_EVENTO_NFCE[ambiente] if str(modelo) == "65" else URLS_EVENTO[ambiente]
-        soap = _soap_evento(xml_assinado)
+        soap = _soap_evento(xml_assinado, cuf=c_orgao if str(modelo) == "65" else None)
         action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4/nfeRecepcaoEvento"
         ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
         resp = requests.post(
