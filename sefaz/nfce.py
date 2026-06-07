@@ -199,7 +199,8 @@ def montar_infnfce(nota, empresa, ambiente):
     dest_xml = ""
     if doc_dest:
         tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
-        dest_xml = f"<dest><{tag_doc}>{doc_dest}</{tag_doc}></dest>"
+        # indIEDest=9 (nao contribuinte) e obrigatorio no <dest> da NFC-e
+        dest_xml = f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><indIEDest>9</indIEDest></dest>"
 
     tag_qbcmono = f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>" if q_bc_mono > 0 else ""
     icmstot = (
