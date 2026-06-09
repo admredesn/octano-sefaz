@@ -43,6 +43,30 @@ def _imposto_item_nfce(it):
         ibscbs = ("<IBSCBS><CST>620</CST><cClassTrib>620006</cClassTrib>"
                   "<gIBSCBSMono><vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
                   "<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>")
+    elif cst == "00" or cst == "000":
+        # CST 00 - tributacao integral do ICMS (produto da loja tributado, ex. aditivos).
+        # Destaca vBC, pICMS e vICMS com a aliquota cadastrada (ex. 18%).
+        p_icms = float(it.get("aliq_icms") or 0)
+        v_icms = round(vprod * p_icms / 100, 2)
+        icms = (f"<ICMS><ICMS00><orig>{orig}</orig><CST>00</CST>"
+                f"<modBC>3</modBC><vBC>{vprod:.2f}</vBC>"
+                f"<pICMS>{p_icms:.4f}</pICMS><vICMS>{v_icms:.2f}</vICMS></ICMS00></ICMS>")
+        ppis = float(it.get("aliq_pis") or 1.65)
+        pcof = float(it.get("aliq_cofins") or 7.60)
+        vpis = round(vprod * ppis / 100, 2)
+        vcof = round(vprod * pcof / 100, 2)
+        pis = (f"<PIS><PISAliq><CST>01</CST><vBC>{vprod:.2f}</vBC>"
+               f"<pPIS>{ppis:.4f}</pPIS><vPIS>{vpis:.2f}</vPIS></PISAliq></PIS>")
+        cof = (f"<COFINS><COFINSAliq><CST>01</CST><vBC>{vprod:.2f}</vBC>"
+               f"<pCOFINS>{pcof:.4f}</pCOFINS><vCOFINS>{vcof:.2f}</vCOFINS></COFINSAliq></COFINS>")
+        v_ibs_uf = round(vprod * 0.10 / 100, 2)
+        v_cbs = round(vprod * 0.90 / 100, 2)
+        ibscbs = (f"<IBSCBS><CST>000</CST><cClassTrib>000001</cClassTrib>"
+                  f"<gIBSCBS><vBC>{vprod:.2f}</vBC>"
+                  f"<gIBSUF><pIBSUF>0.1000</pIBSUF><vIBSUF>{v_ibs_uf:.2f}</vIBSUF></gIBSUF>"
+                  f"<gIBSMun><pIBSMun>0.0000</pIBSMun><vIBSMun>0.00</vIBSMun></gIBSMun>"
+                  f"<vIBS>{v_ibs_uf:.2f}</vIBS>"
+                  f"<gCBS><pCBS>0.9000</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS></gIBSCBS></IBSCBS>")
     else:
         # CST 60 (ICMS-ST ja retido) - espelha o cupom de loja autorizado
         icms = f"<ICMS><ICMS60><orig>{orig}</orig><CST>60</CST></ICMS60></ICMS>"
