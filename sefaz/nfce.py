@@ -229,6 +229,15 @@ def montar_infnfce(nota, empresa, ambiente):
     v_cbs_tot = sum(round(float(it["vProd"]) * 0.90 / 100, 2) for it in nao_mono)
     v_bc_rt_tot = sum(float(it["vProd"]) for it in nao_mono)
 
+    # Totais de ICMS dos itens com CST 00 (tributacao integral): soma vBC e vICMS.
+    # Itens CST 60 (ST) e 61 (mono) nao entram na BC de ICMS proprio.
+    itens_cst00 = [it for it in nota["itens"] if str(it.get("cst_icms")) in ("00", "000")]
+    v_bc_icms_tot = sum(float(it["vProd"]) for it in itens_cst00)
+    v_icms_tot = sum(
+        round(float(it["vProd"]) * float(it.get("aliq_icms") or 0) / 100, 2)
+        for it in itens_cst00
+    )
+
     # ide: NFC-e -> mod 65, tpImp 4 (DANFE NFC-e), indPres 1 (presencial)
     ide = (
         f"<ide><cUF>{cuf}</cUF><cNF>{cnf_fmt}</cNF>"
@@ -263,7 +272,7 @@ def montar_infnfce(nota, empresa, ambiente):
 
     tag_qbcmono = f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>" if q_bc_mono > 0 else ""
     icmstot = (
-        f"<ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
+        f"<ICMSTot><vBC>{v_bc_icms_tot:.2f}</vBC><vICMS>{v_icms_tot:.2f}</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
         f"{tag_qbcmono}"
