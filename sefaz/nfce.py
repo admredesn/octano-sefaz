@@ -90,6 +90,17 @@ def _det_item_nfce(it, n, cnpj_emit):
         enc_fin = it.get("enc_fin")
         n_bico = it.get("n_bico") or it.get("bico") or 1
         n_tanque = it.get("n_tanque") or it.get("tanque") or 1
+        # Robustez: o encerrante FINAL e o que o concentrador sempre fornece.
+        # Se o INICIAL faltar, deriva-o de (final - litros) — o totalizador antes
+        # do abastecimento. Assim o grupo nunca fica incompleto (evita rej. 378).
+        try:
+            litros_x = float(it.get("qCom") or 0)
+        except (TypeError, ValueError):
+            litros_x = 0.0
+        if enc_fin is not None and enc_ini is None:
+            enc_ini = float(enc_fin) - litros_x
+        if enc_ini is not None and enc_fin is None:
+            enc_fin = float(enc_ini) + litros_x
         enc = ""
         if enc_ini is not None and enc_fin is not None:
             enc = (f"<encerrante>"
