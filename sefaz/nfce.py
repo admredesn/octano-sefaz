@@ -69,25 +69,49 @@ def _imposto_item_nfce(it):
 
 def _det_item_nfce(it, n, cnpj_emit):
     """Item (det) da NFC-e espelhando os cupons autorizados: com <comb> e <CNPJFab>,
-    SEM IPI. O posto trata combustivel E lubrificante com grupo <comb> (cProdANP)."""
+    SEM IPI. O posto trata combustivel E lubrificante com grupo <comb> (cProdANP).
+
+    Combustivel monofasico em MG exige:
+    - unidade tributavel "L" (validado contra a SEFAZ-MG; "LT"/"LITRO"/"LTS" dao 854)
+    - grupo <encerrante> dentro do <comb> com nBico/nTanque/vEncIni/vEncFin (rej. 378)
+    """
     cest = it.get("cest")
     tem_anp = bool(it.get("cod_anp"))
+
+    # unidade: combustivel (com cod_anp) usa SEMPRE "L" na NFC-e MG.
+    unidade = "L" if tem_anp else (it.get("uCom") or "UN")
+
     comb = ""
     if tem_anp:
+        # grupo encerrante (obrigatorio p/ combustivel em MG). Os valores vem do
+        # concentrador via PDV: enc_ini/enc_fin (leitura do totalizador da bomba),
+        # n_bico e n_tanque. Se faltar algum, usa fallback seguro para nao travar.
+        enc_ini = it.get("enc_ini")
+        enc_fin = it.get("enc_fin")
+        n_bico = it.get("n_bico") or it.get("bico") or 1
+        n_tanque = it.get("n_tanque") or it.get("tanque") or 1
+        enc = ""
+        if enc_ini is not None and enc_fin is not None:
+            enc = (f"<encerrante>"
+                   f"<nBico>{int(n_bico)}</nBico>"
+                   f"<nTanque>{int(n_tanque)}</nTanque>"
+                   f"<vEncIni>{float(enc_ini):.3f}</vEncIni>"
+                   f"<vEncFin>{float(enc_fin):.3f}</vEncFin>"
+                   f"</encerrante>")
         comb = (f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
                 f"<descANP>{it.get('desc_anp', it['xProd'])[:95]}</descANP>"
-                f"<UFCons>{it.get('uf_cons','MG')}</UFCons></comb>")
+                f"<UFCons>{it.get('uf_cons','MG')}</UFCons>{enc}</comb>")
     prod = (
         f'<det nItem="{n}"><prod>'
         f"<cProd>{it['cProd']}</cProd><cEAN>{it.get('cEAN','SEM GTIN')}</cEAN>"
         f"<xProd>{it['xProd']}</xProd><NCM>{it['ncm']}</NCM>"
         + (f"<CEST>{cest}</CEST><indEscala>N</indEscala>" if cest else "")
         + f"<CNPJFab>{cnpj_emit}</CNPJFab>"
-        f"<CFOP>{it['cfop']}</CFOP><uCom>{it['uCom']}</uCom>"
+        f"<CFOP>{it['cfop']}</CFOP><uCom>{unidade}</uCom>"
         f"<qCom>{float(it['qCom']):.4f}</qCom><vUnCom>{float(it['vUnCom']):.10f}</vUnCom>"
         f"<vProd>{float(it['vProd']):.2f}</vProd>"
         f"<cEANTrib>{it.get('cEANTrib','SEM GTIN')}</cEANTrib>"
-        f"<uTrib>{it.get('uTrib', it['uCom'])}</uTrib>"
+        f"<uTrib>{unidade}</uTrib>"
         f"<qTrib>{float(it['qCom']):.4f}</qTrib><vUnTrib>{float(it['vUnCom']):.10f}</vUnTrib>"
         f"<indTot>1</indTot>{comb}</prod>"
         + _imposto_item_nfce(it)
