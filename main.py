@@ -316,6 +316,59 @@ def cancelar_nfce_empresa():
         return jsonify({"erro": str(e)}), 500
 
 
+@app.route("/status-servico-nfce-empresa", methods=["POST"])
+def status_servico_nfce_empresa():
+    """Consulta o status do servico da SEFAZ-MG (NFC-e) usando o cert da empresa.
+    Usado pelo nucleo para decidir se da para sair de contingencia e retransmitir.
+    Retorna {ok, online, cstat, xmotivo}. online=True quando cStat=107."""
+    try:
+        from sefaz.nfce import status_servico_nfce
+        from sefaz.empresa_cert import carregar_empresa
+        dados = request.get_json() or {}
+        empresa_id = dados.get("empresa_id")
+        ambiente = dados.get("ambiente", "homologacao")
+        uf = dados.get("uf", "MG")
+        if not empresa_id:
+            return jsonify({"erro": "empresa_id e obrigatorio"}), 400
+        ctx = carregar_empresa(empresa_id)
+        resultado = status_servico_nfce(ctx["cert_base64"], ctx["cert_senha"], ambiente, uf)
+        # sempre 200: "offline" e uma resposta valida, nao um erro HTTP
+        return jsonify(resultado), 200
+    except Exception as e:
+        return jsonify({"ok": False, "online": False, "erro": str(e)}), 500
+
+
+@app.route("/transmitir-contingencia", methods=["POST"])
+def transmitir_contingencia():
+    """Retransmite a SEFAZ um XML de NFC-e JA ASSINADO (emitido antes em
+    contingencia tpEmis=9). NAO reassina nem remonta — preserva chave e digest.
+    Body: { empresa_id, xml_assinado, ambiente }.
+    Retorna {ok, cstat_nfe, xmotivo, protocolo, nfe_proc, comunicacao_falhou?}.
+    O nucleo usa isso para decidir tirar (ou nao) o cupom da fila."""
+    try:
+        from sefaz.nfce import transmitir_nfce_assinada
+        from sefaz.empresa_cert import carregar_empresa
+        dados = request.get_json() or {}
+        empresa_id = dados.get("empresa_id")
+        xml_assinado = dados.get("xml_assinado")
+        ambiente = dados.get("ambiente", "homologacao")
+        if not empresa_id or not xml_assinado:
+            return jsonify({"erro": "empresa_id e xml_assinado sao obrigatorios"}), 400
+        ctx = carregar_empresa(empresa_id)
+        resultado = transmitir_nfce_assinada(xml_assinado, ctx["cert_base64"], ctx["cert_senha"], ambiente)
+        # 200 se autorizou; 202 (aceito, pendente) se a comunicacao falhou e
+        # o cupom deve permanecer na fila; 422 para rejeicao real da SEFAZ.
+        if resultado.get("ok"):
+            codigo = 200
+        elif resultado.get("comunicacao_falhou"):
+            codigo = 202
+        else:
+            codigo = 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
 @app.route("/danfce", methods=["POST"])
 def danfce():
     """Gera o DANFCE (cupom 80mm em PDF) da NFC-e a partir do nfeProc autorizado.
