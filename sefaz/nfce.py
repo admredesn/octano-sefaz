@@ -187,6 +187,47 @@ def _gerar_qrcode(chave, tp_amb, csc_id, csc, ambiente, dh_emi_hex=None):
     return qr
 
 
+def _gerar_qrcode_offline(chave, tp_amb, csc_id, csc, ambiente, dia_emi, v_nf, dig_val):
+    """QR Code v2 OFFLINE (contingencia tpEmis=9). Difere do online: inclui
+    dia da emissao, valor total e DigestValue ANTES do cIdToken, e o hash SHA-1
+    e calculado sobre TODOS esses parametros + CSC.
+
+    Formato da URL (NT/Manual DANFE NFC-e v2 offline):
+      ...?p=<chave>|<versao>|<tpAmb>|<diaEmi>|<vNF>|<digVal>|<cIdToken>|<HASH>
+    onde HASH = SHA1("<chave>|2|<tpAmb>|<diaEmi>|<vNF>|<digVal>|<cIdToken>" + CSC).upper()
+
+    - dia_emi: dois digitos (ex. "07"), so o DIA do dhEmi.
+    - v_nf: valor total como string com ponto decimal (ex. "60.90"), 2 casas.
+    - dig_val: o DigestValue da NFC-e convertido para HEXADECIMAL (lowercase),
+      exatamente como exige o manual (entra o hexa do digest, nao o base64).
+    """
+    base = URL_QRCODE[ambiente]
+    versao = "2"
+    id_token = str(csc_id).lstrip("0") or "0"
+    dados = f"{chave}|{versao}|{tp_amb}|{dia_emi}|{v_nf}|{dig_val}|{id_token}"
+    chash = hashlib.sha1((dados + csc).encode("utf-8")).hexdigest().upper()
+    qr = f"{base}?p={dados}|{chash}"
+    return qr
+
+
+def _digval_para_hexa(dig_val_b64):
+    """Converte o DigestValue (base64, como aparece na tag <DigestValue> do XML)
+    para a representacao HEXADECIMAL exigida no QR offline.
+
+    ATENCAO (validado contra o exemplo oficial do Manual DANFE NFC-e):
+    o digVal do QR e o HEXA DOS CARACTERES ASCII da string base64, NAO o hexa
+    dos bytes decodificados. Exemplo oficial:
+      base64  'yzGYhUx1/XYYzksWB+fPR3Qc50c='
+      digVal  '797a4759685578312f5859597a6b7357422b6650523351633530633d'
+    (que e cada caractere do base64 em hexa). Usar os bytes decodificados gera
+    rejeicao 397 na retransmissao.
+    """
+    try:
+        return str(dig_val_b64).encode("ascii").hex()
+    except Exception:
+        return str(dig_val_b64)
+
+
 def montar_infnfce(nota, empresa, ambiente):
     tp_amb = "1" if ambiente == "producao" else "2"
     emit = empresa
@@ -200,7 +241,10 @@ def montar_infnfce(nota, empresa, ambiente):
     numero = nota["numero"]
     serie = nota.get("serie", 1)
     modelo = "65"
-    tp_emis = "1"
+    # tp_emis: "1" = normal (online); "9" = contingencia offline NFC-e.
+    # A nota pode pedir contingencia explicitamente (nota["tp_emis"]="9"); o
+    # default continua "1" para nao alterar o fluxo online existente.
+    tp_emis = str(nota.get("tp_emis", "1"))
 
     chave = montar_chave(cuf, dh, cnpj_emit, modelo, serie, numero, tp_emis, cnf)
     cnf_fmt = str(cnf).zfill(8)
@@ -239,6 +283,17 @@ def montar_infnfce(nota, empresa, ambiente):
     )
 
     # ide: NFC-e -> mod 65, tpImp 4 (DANFE NFC-e), indPres 1 (presencial)
+    # Em contingencia offline (tp_emis=9), o schema exige dhCont (data/hora de
+    # entrada em contingencia) e xJust (justificativa, 15-256 chars) APOS verProc.
+    cont_xml = ""
+    if tp_emis == "9":
+        dh_cont = nota.get("dh_cont") or dh_emi
+        x_just = (nota.get("x_just") or "Falha de comunicacao com a SEFAZ").strip()
+        # xJust: minimo 15 caracteres (regra do schema). Garante o minimo.
+        if len(x_just) < 15:
+            x_just = (x_just + " - emissao offline NFC-e")[:256]
+        cont_xml = f"<dhCont>{dh_cont}</dhCont><xJust>{x_just}</xJust>"
+
     ide = (
         f"<ide><cUF>{cuf}</cUF><cNF>{cnf_fmt}</cNF>"
         f"<natOp>{nota.get('natureza_op','VENDA AO CONSUMIDOR')}</natOp>"
@@ -247,7 +302,8 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<cMunFG>{emit.get('c_mun','3123205')}</cMunFG>"
         f"<tpImp>4</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
-        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
+        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc>"
+        f"{cont_xml}</ide>"
     )
     cep_emit = re.sub(r"\D", "", emit.get("cep", "") or "")
     ie_emit = re.sub(r"\D", "", emit.get("ie", "") or "")
@@ -322,7 +378,10 @@ def montar_infnfce(nota, empresa, ambiente):
         f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_adic}{inf_resptec}</infNFe>"
     )
     nfe = f'<NFe xmlns="{NS}">{inf}</NFe>'
-    return nfe, chave, tp_amb
+    # retorna tambem tp_emis, valor total (vNF) e o dia da emissao (dd) — usados
+    # na montagem do QR Code OFFLINE de contingencia.
+    dia_emi = dh.strftime("%d")
+    return nfe, chave, tp_amb, tp_emis, v_prod, dia_emi
 
 
 def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="homologacao"):
@@ -339,14 +398,29 @@ def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="h
 
     cert_file, key_file = extrair_cert_pem(cert_base64, cert_senha)
     try:
-        nfe_xml, chave, tp_amb = montar_infnfce(nota, empresa, ambiente)
+        nfe_xml, chave, tp_amb, tp_emis, v_nf, dia_emi = montar_infnfce(nota, empresa, ambiente)
 
         # assina (mesma tecnica SHA-1 do modelo 55)
         xml_assinada = assinar_nfe(nfe_xml, cert_file, key_file)
 
-        # QR Code + urlChave -> infNFeSupl (inserido DEPOIS da assinatura, ANTES de enviar;
-        # infNFeSupl nao e assinado, fica fora do infNFe)
-        qr = _gerar_qrcode(chave, tp_amb, csc_id, csc, ambiente)
+        # extrai o DigestValue da assinatura (necessario p/ o QR offline)
+        dig_val_b64 = None
+        try:
+            m = re.search(r"<DigestValue>([^<]+)</DigestValue>", xml_assinada)
+            if m:
+                dig_val_b64 = m.group(1)
+        except Exception:
+            dig_val_b64 = None
+
+        # QR Code: ONLINE (tpEmis=1) ou OFFLINE de contingencia (tpEmis=9).
+        # O offline inclui dia da emissao, valor total e DigestValue (hexa).
+        if tp_emis == "9":
+            v_nf_str = f"{float(v_nf):.2f}"
+            dig_hexa = _digval_para_hexa(dig_val_b64) if dig_val_b64 else ""
+            qr = _gerar_qrcode_offline(chave, tp_amb, csc_id, csc, ambiente,
+                                       dia_emi, v_nf_str, dig_hexa)
+        else:
+            qr = _gerar_qrcode(chave, tp_amb, csc_id, csc, ambiente)
         url_chave = URL_CONSULTA[ambiente]
         supl = f"<infNFeSupl><qrCode><![CDATA[{qr}]]></qrCode><urlChave>{url_chave}</urlChave></infNFeSupl>"
         # insere o infNFeSupl logo apos </infNFe> dentro de <NFe>...</NFe>
@@ -354,6 +428,23 @@ def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="h
         #  infNFe, infNFeSupl, Signature). Como assinar_nfe ja inseriu a Signature,
         #  inserimos o supl ANTES da <Signature>.
         xml_final = xml_assinada.replace("<Signature", supl + "<Signature", 1)
+
+        # CONTINGENCIA OFFLINE: nao envia a SEFAZ agora. Devolve o XML assinado
+        # (com tpEmis=9) para o PDV/nucleo ENFILEIRAR e transmitir depois, quando
+        # a SEFAZ voltar. O cupom e impresso imediatamente (DANFE de contingencia).
+        if tp_emis == "9":
+            return {
+                "ok": True,
+                "etapa": "contingencia",
+                "contingencia": True,
+                "chave": chave,
+                "qrcode": qr,
+                "xml_assinado": xml_final,
+                "nfe_proc": None,
+                "protocolo": None,
+                "cstat_nfe": None,
+                "xmotivo": "NFC-e emitida em contingencia offline (aguardando transmissao)",
+            }
 
         # validacao XSD local: se o XML nao bate com o schema, retorna o erro EXATO
         # (elemento/linha) em vez de depender do 215 generico da SEFAZ.
@@ -444,3 +535,139 @@ def _soap_autorizacao_nfce(xml_nfe_assinada):
         f'<nfeDadosMsg xmlns="{wsdl_ns}">{enviNFe}</nfeDadosMsg>'
         '</soap12:Body></soap12:Envelope>'
     )
+
+
+# ---------------------------------------------------------------------------
+# CONTINGENCIA: status do servico + transmissao de XML ja assinado
+# ---------------------------------------------------------------------------
+
+# Webservice de Status do Servico da SEFAZ-MG (NFC-e, modelo 65)
+URLS_STATUS_NFCE = {
+    "producao":    "https://nfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+    "homologacao": "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeStatusServico4",
+}
+
+
+def status_servico_nfce(cert_base64, cert_senha, ambiente="homologacao", uf="MG"):
+    """Consulta o status do servico da SEFAZ (NFeStatusServico4). Usado para
+    decidir se da para sair de contingencia e retransmitir a fila.
+    Retorna {ok, online, cstat, xmotivo}. online=True quando cStat=107
+    (Servico em Operacao).
+    """
+    tp_amb = "1" if ambiente == "producao" else "2"
+    cuf = UF_CODIGO.get(uf, "31")
+    cert_file, key_file = extrair_cert_pem(cert_base64, cert_senha)
+    try:
+        cons = (
+            f'<consStatServ versao="4.00" xmlns="{NS}">'
+            f'<tpAmb>{tp_amb}</tpAmb><cUF>{cuf}</cUF><xServ>STATUS</xServ>'
+            f'</consStatServ>'
+        )
+        wsdl_ns = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeStatusServico4"
+        soap = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">'
+            f'<soap12:Body><nfeDadosMsg xmlns="{wsdl_ns}">{cons}</nfeDadosMsg>'
+            '</soap12:Body></soap12:Envelope>'
+        )
+        action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeStatusServico4/nfeStatusServicoNF"
+        ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
+        url = URLS_STATUS_NFCE[ambiente]
+        resp = requests.post(
+            url, data=soap.encode("utf-8"),
+            headers={"Content-Type": ctype},
+            cert=(cert_file, key_file), timeout=20, verify=True,
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "online": False, "etapa": "http",
+                    "status": resp.status_code, "detalhes": resp.text[:300]}
+        root = etree.fromstring(resp.content)
+        cstat = root.findtext(f".//{{{NS}}}cStat")
+        xmotivo = root.findtext(f".//{{{NS}}}xMotivo")
+        return {"ok": True, "online": (cstat == "107"),
+                "cstat": cstat, "xmotivo": xmotivo}
+    except requests.exceptions.RequestException as e:
+        # timeout/conexao = SEFAZ inalcancavel = continua offline
+        return {"ok": False, "online": False, "etapa": "conexao", "erro": str(e)}
+    finally:
+        limpar_arquivos(cert_file, key_file)
+
+
+def transmitir_nfce_assinada(xml_final, cert_base64, cert_senha, ambiente="homologacao"):
+    """Transmite a SEFAZ um XML de NFC-e JA ASSINADO (vindo da fila de
+    contingencia). NAO remonta nem reassina nada — a chave e o digest precisam
+    ser identicos aos do cupom ja impresso. So envia e interpreta a resposta.
+
+    Retorna a mesma estrutura de emitir_nfce (ok, cstat_nfe, xmotivo, protocolo,
+    nfe_proc, etc.), para o nucleo decidir: 100 -> autorizada (sai da fila);
+    duplicidade (204/539) -> tratar; demais -> mantem na fila / marca rejeitada.
+    """
+    cert_file, key_file = extrair_cert_pem(cert_base64, cert_senha)
+    try:
+        # extrai a chave do proprio XML (Id="NFe<chave>")
+        chave = None
+        m = re.search(r'Id="NFe(\d{44})"', xml_final)
+        if m:
+            chave = m.group(1)
+
+        url = URLS_AUTORIZACAO_NFCE[ambiente]
+        soap = _soap_autorizacao_nfce(xml_final)
+        action = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeAutorizacao4/nfeAutorizacaoLote"
+        ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
+        resp = requests.post(
+            url, data=soap.encode("utf-8"),
+            headers={"Content-Type": ctype},
+            cert=(cert_file, key_file), timeout=60, verify=True,
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "etapa": "http", "chave": chave,
+                    "status": resp.status_code, "detalhes": resp.text[:800]}
+
+        root = etree.fromstring(resp.content)
+
+        def t(tag):
+            el = root.find(f".//{{{NS}}}{tag}")
+            return el.text if el is not None else None
+
+        cstat_lote = t("cStat")
+        xmotivo = t("xMotivo")
+        prot = root.find(f".//{{{NS}}}protNFe")
+        cstat_nfe = None
+        nprot = None
+        nfe_proc = None
+        if prot is not None:
+            inf_prot = prot.find(f"{{{NS}}}infProt")
+            if inf_prot is not None:
+                cstat_nfe = inf_prot.findtext(f"{{{NS}}}cStat")
+                xmotivo = inf_prot.findtext(f"{{{NS}}}xMotivo") or xmotivo
+                nprot = inf_prot.findtext(f"{{{NS}}}nProt")
+
+        autorizado = (cstat_nfe == "100")
+        # 539 = duplicidade de NFe com a mesma chave porem ja autorizada antes;
+        # tratamos como "ja esta na base" (idempotente: pode sair da fila).
+        ja_autorizada = (cstat_nfe == "100" or cstat_lote == "539" or cstat_nfe == "539")
+        if autorizado and prot is not None:
+            prot_xml = etree.tostring(prot, encoding="unicode")
+            nfe_proc = (
+                f'<?xml version="1.0" encoding="UTF-8"?>'
+                f'<nfeProc versao="4.00" xmlns="{NS}">'
+                f'{xml_final}{prot_xml}</nfeProc>'
+            )
+
+        return {
+            "ok": autorizado,
+            "ja_autorizada": ja_autorizada,
+            "etapa": "sefaz",
+            "chave": chave,
+            "cstat_lote": cstat_lote,
+            "cstat_nfe": cstat_nfe,
+            "xmotivo": xmotivo,
+            "protocolo": nprot,
+            "nfe_proc": nfe_proc,
+            "sefaz_raw": resp.text[:2000] if not autorizado else None,
+        }
+    except requests.exceptions.RequestException as e:
+        # SEFAZ ainda fora: NAO e rejeicao, e falha de comunicacao. Mantem na fila.
+        return {"ok": False, "etapa": "conexao", "comunicacao_falhou": True, "erro": str(e)}
+    finally:
+        limpar_arquivos(cert_file, key_file)
