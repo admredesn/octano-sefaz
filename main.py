@@ -6,10 +6,15 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
+from webhook_pagbank import registrar_rotas_webhook
+
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app, origins="*")
+
+# recebe as notificacoes de transacao do PagBank (teste da maquininha)
+registrar_rotas_webhook(app)
 
 @app.route("/", methods=["GET"])
 def health():
