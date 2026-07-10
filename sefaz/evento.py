@@ -24,9 +24,12 @@ from .cert import extrair_cert_pem, limpar_arquivos
 from .cancelamento import _assinar_evento, _soap_evento, NS
 
 # Manifestacao do destinatario vai para o Ambiente Nacional (AN), nao para a UF.
+# ATENCAO: o host do WEBSERVICE do AN e www1/hom1 (mesmo da NFeDistribuicaoDFe, que
+# funciona). "www.nfe.fazenda.gov.br" (sem o 1) e o PORTAL humano -> devolve 403 IIS
+# e a cadeia do cert nao valida no container -> SSLCertVerificationError.
 URLS_EVENTO = {
-    "producao":    "https://www.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
-    "homologacao": "https://hom.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
+    "producao":    "https://www1.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
+    "homologacao": "https://hom1.nfe.fazenda.gov.br/NFeRecepcaoEvento4/NFeRecepcaoEvento4.asmx",
 }
 
 # descEvento sao valores FIXOS do schema (ASCII, sem acento).
