@@ -351,6 +351,7 @@ def montar_infnfce(nota, empresa, ambiente):
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>9</modFrete></transp>"
 
+    # [deploy 2026-07-11: forcar redeploy Railway p/ o <card>/tpIntegra (cStat 391)]
     # pagamento: cartao de credito (03) / debito (04) EXIGE o grupo <card> com tpIntegra,
     # senao a SEFAZ rejeita com cStat 391 ("nao informados os dados do cartao"). Como a
     # maquininha PagBank NAO e integrada ao PDV, tpIntegra=2 (pagamento nao integrado) —
