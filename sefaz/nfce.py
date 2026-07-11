@@ -351,8 +351,11 @@ def montar_infnfce(nota, empresa, ambiente):
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>9</modFrete></transp>"
 
-    # pagamento: cartao (03/04) exige grupo <card> com tpIntegra
-    tpag = nota.get("forma_pagamento", "01")
+    # pagamento: cartao de credito (03) / debito (04) EXIGE o grupo <card> com tpIntegra,
+    # senao a SEFAZ rejeita com cStat 391 ("nao informados os dados do cartao"). Como a
+    # maquininha PagBank NAO e integrada ao PDV, tpIntegra=2 (pagamento nao integrado) —
+    # nesse caso CNPJ/tBand/cAut sao OPCIONAIS. So 03/04 levam <card> (Pix/Dinheiro/Vale nao).
+    tpag = str(nota.get("forma_pagamento", "01") or "01").strip()
     card = "<card><tpIntegra>2</tpIntegra></card>" if tpag in ("03", "04") else ""
     pag = f"<pag><detPag><tPag>{tpag}</tPag><vPag>{v_prod:.2f}</vPag>{card}</detPag></pag>"
 
