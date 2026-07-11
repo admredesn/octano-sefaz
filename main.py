@@ -18,7 +18,9 @@ registrar_rotas_webhook(app)
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0"})
+    # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
+    return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
+                    "build": "2026-07-11-card391"})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
 def consultar_cnpj(cnpj):
