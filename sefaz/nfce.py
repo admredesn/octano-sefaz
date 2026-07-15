@@ -140,9 +140,13 @@ def _det_item_nfce(it, n, cnpj_emit):
         f'<det nItem="{n}"><prod>'
         f"<cProd>{it['cProd']}</cProd><cEAN>{it.get('cEAN','SEM GTIN')}</cEAN>"
         f"<xProd>{it['xProd']}</xProd><NCM>{it['ncm']}</NCM>"
-        + (f"<CEST>{cest}</CEST><indEscala>N</indEscala>" if cest else "")
-        + f"<CNPJFab>{cnpj_emit}</CNPJFab>"
-        f"<CFOP>{it['cfop']}</CFOP><uCom>{unidade}</uCom>"
+        # CNPJFab so e valido acompanhado de CEST: em 100% dos cupons autorizados
+        # do posto (66.728 itens) o CNPJFab SEMPRE vem depois do CEST; nenhum item
+        # tem CNPJFab sem CEST. Item sem CEST (ex. ARLA) que emitia CNPJFab dava
+        # rej. 215 (Falha no schema XML). Por isso amarramos os dois: sem CEST, sem
+        # CNPJFab (CNPJFab e opcional; item nao-ST nao precisa dele).
+        + (f"<CEST>{cest}</CEST><indEscala>N</indEscala><CNPJFab>{cnpj_emit}</CNPJFab>" if cest else "")
+        + f"<CFOP>{it['cfop']}</CFOP><uCom>{unidade}</uCom>"
         f"<qCom>{float(it['qCom']):.4f}</qCom><vUnCom>{float(it['vUnCom']):.10f}</vUnCom>"
         f"<vProd>{float(it['vProd']):.2f}</vProd>"
         f"<cEANTrib>{it.get('cEANTrib','SEM GTIN')}</cEANTrib>"
