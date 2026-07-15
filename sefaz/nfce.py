@@ -601,6 +601,70 @@ def status_servico_nfce(cert_base64, cert_senha, ambiente="homologacao", uf="MG"
         limpar_arquivos(cert_file, key_file)
 
 
+# Consulta de situacao da NFC-e por chave (NFeConsultaProtocolo4). Retorna a
+# situacao ATUAL na SEFAZ (100=autorizada em uso, 101=cancelada, 110/301/302=
+# uso denegado, 217=nao consta) e a LISTA de eventos ja registrados (procEventoNFe),
+# incluindo cancelamento (tpEvento 110111). Usado para: (a) diagnosticar o cStat 594
+# ("nSeqEvento maior que o permitido"), (b) reconciliar o status local quando a SEFAZ
+# ja tem o cancelamento mas o PDV nao gravou.
+URLS_CONSULTA_NFCE = {
+    "producao":    "https://nfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
+    "homologacao": "https://hnfce.fazenda.mg.gov.br/nfce/services/NFeConsultaProtocolo4",
+}
+
+
+def consultar_situacao_nfce(chave, cert_base64, cert_senha, ambiente="homologacao"):
+    """Consulta a situacao de uma NFC-e pela chave. Retorna
+    {ok, chave, cstat, xmotivo, cancelada(bool), eventos:[{tpEvento,cStat,nSeq}], raw}."""
+    chave = re.sub(r"\D", "", chave or "")
+    if len(chave) != 44:
+        return {"ok": False, "erro": "Chave deve ter 44 digitos."}
+    tp_amb = "1" if ambiente == "producao" else "2"
+    cert_file, key_file = extrair_cert_pem(cert_base64, cert_senha)
+    try:
+        cons = (
+            f'<consSitNFe versao="4.00" xmlns="{NS}">'
+            f'<tpAmb>{tp_amb}</tpAmb><xServ>CONSULTAR</xServ><chNFe>{chave}</chNFe>'
+            f'</consSitNFe>'
+        )
+        wsdl_ns = "http://www.portalfiscal.inf.br/nfe/wsdl/NFeConsultaProtocolo4"
+        soap = (
+            '<?xml version="1.0" encoding="utf-8"?>'
+            '<soap12:Envelope xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">'
+            f'<soap12:Body><nfeDadosMsg xmlns="{wsdl_ns}">{cons}</nfeDadosMsg>'
+            '</soap12:Body></soap12:Envelope>'
+        )
+        action = f"{wsdl_ns}/nfeConsultaNF"
+        ctype = f'application/soap+xml; charset=utf-8; action="{action}"'
+        resp = requests.post(
+            URLS_CONSULTA_NFCE[ambiente], data=soap.encode("utf-8"),
+            headers={"Content-Type": ctype},
+            cert=(cert_file, key_file), timeout=30, verify=True,
+        )
+        if resp.status_code != 200:
+            return {"ok": False, "etapa": "http", "status": resp.status_code,
+                    "detalhes": resp.text[:400]}
+        root = etree.fromstring(resp.content)
+        # cStat do proprio protocolo da NFe (nao o do lote)
+        cstat = root.findtext(f".//{{{NS}}}infProt/{{{NS}}}cStat") or root.findtext(f".//{{{NS}}}cStat")
+        xmotivo = root.findtext(f".//{{{NS}}}infProt/{{{NS}}}xMotivo") or root.findtext(f".//{{{NS}}}xMotivo")
+        eventos = []
+        for ev in root.findall(f".//{{{NS}}}procEventoNFe"):
+            eventos.append({
+                "tpEvento": ev.findtext(f".//{{{NS}}}tpEvento"),
+                "cStat": ev.findtext(f".//{{{NS}}}retEvento//{{{NS}}}cStat"),
+                "nSeq": ev.findtext(f".//{{{NS}}}nSeqEvento"),
+            })
+        tem_canc = any(e.get("tpEvento") == "110111" for e in eventos)
+        cancelada = (cstat == "101") or tem_canc
+        return {"ok": True, "chave": chave, "cstat": cstat, "xmotivo": xmotivo,
+                "cancelada": cancelada, "eventos": eventos, "raw": resp.text[:2500]}
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "etapa": "conexao", "erro": str(e)}
+    finally:
+        limpar_arquivos(cert_file, key_file)
+
+
 def transmitir_nfce_assinada(xml_final, cert_base64, cert_senha, ambiente="homologacao"):
     """Transmite a SEFAZ um XML de NFC-e JA ASSINADO (vindo da fila de
     contingencia). NAO remonta nem reassina nada — a chave e o digest precisam
