@@ -323,6 +323,26 @@ def cancelar_nfce_empresa():
         return jsonify({"erro": str(e)}), 500
 
 
+@app.route("/consultar-nfce-empresa", methods=["POST"])
+def consultar_nfce_empresa():
+    """Consulta a situacao ATUAL de uma NFC-e na SEFAZ (autorizada/cancelada + eventos).
+    Read-only. Body: { empresa_id, chave, ambiente }."""
+    try:
+        from sefaz.nfce import consultar_situacao_nfce
+        from sefaz.empresa_cert import carregar_empresa
+        dados = request.get_json() or {}
+        empresa_id = dados.get("empresa_id")
+        chave = dados.get("chave")
+        ambiente = dados.get("ambiente", "homologacao")
+        if not empresa_id or not chave:
+            return jsonify({"erro": "empresa_id e chave sao obrigatorios"}), 400
+        ctx = carregar_empresa(empresa_id)
+        resultado = consultar_situacao_nfce(chave, ctx["cert_base64"], ctx["cert_senha"], ambiente)
+        return jsonify(resultado), 200
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+
+
 @app.route("/status-servico-nfce-empresa", methods=["POST"])
 def status_servico_nfce_empresa():
     """Consulta o status do servico da SEFAZ-MG (NFC-e) usando o cert da empresa.
