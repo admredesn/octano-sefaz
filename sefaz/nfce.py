@@ -355,13 +355,13 @@ def montar_infnfce(nota, empresa, ambiente):
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>9</modFrete></transp>"
 
-    # [deploy 2026-07-18: forcar redeploy Railway p/ o <card>/tpIntegra (cStat 391) — build estava velho]
-    # pagamento: cartao de credito (03) / debito (04) EXIGE o grupo <card> com tpIntegra,
-    # senao a SEFAZ rejeita com cStat 391 ("nao informados os dados do cartao"). Como a
-    # maquininha PagBank NAO e integrada ao PDV, tpIntegra=2 (pagamento nao integrado) —
-    # nesse caso CNPJ/tBand/cAut sao OPCIONAIS. So 03/04 levam <card> (Pix/Dinheiro/Vale nao).
+    # [2026-07-18: PIX (17) tambem exige <card>] cStat 391 (NT 2015.002) vale p/ tPag
+    # 03 (credito), 04 (debito) E 17 (PIX). A SEFAZ-MG REATIVOU essa regra em 01/10/2024,
+    # entao PIX passou a rejeitar sem o grupo <card>. Como nada aqui e integrado ao PDV
+    # (maquininha PagBank), tpIntegra=2 (nao integrado) — CNPJ/tBand/cAut sao OPCIONAIS.
+    # Dinheiro (01), Nota a prazo (05), Vale etc. NAO levam <card>.
     tpag = str(nota.get("forma_pagamento", "01") or "01").strip()
-    card = "<card><tpIntegra>2</tpIntegra></card>" if tpag in ("03", "04") else ""
+    card = "<card><tpIntegra>2</tpIntegra></card>" if tpag in ("03", "04", "17") else ""
     pag = f"<pag><detPag><tPag>{tpag}</tPag><vPag>{v_prod:.2f}</vPag>{card}</detPag></pag>"
 
     # responsavel tecnico (obrigatorio na NFC-e)
