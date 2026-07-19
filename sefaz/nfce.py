@@ -133,8 +133,12 @@ def _det_item_nfce(it, n, cnpj_emit):
                    f"<vEncIni>{float(enc_ini):.3f}</vEncIni>"
                    f"<vEncFin>{float(enc_fin):.3f}</vEncFin>"
                    f"</encerrante>")
+        # descANP: usa a descrição ANP se houver; senão cai no nome do produto.
+        # (usar `or` e NÃO .get(key, default): o PDV manda desc_anp=None — chave
+        #  presente com valor None — e .get não substitui None, causando None[:95].)
+        _desc_anp = (it.get("desc_anp") or it.get("xProd") or "")[:95]
         comb = (f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
-                f"<descANP>{it.get('desc_anp', it['xProd'])[:95]}</descANP>"
+                f"<descANP>{_desc_anp}</descANP>"
                 f"<UFCons>{it.get('uf_cons','MG')}</UFCons>{enc}</comb>")
     prod = (
         f'<det nItem="{n}"><prod>'
