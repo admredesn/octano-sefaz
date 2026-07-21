@@ -444,5 +444,18 @@ def danfe():
         )
     except Exception as e:
         return jsonify({"erro": "Falha ao gerar DANFE: " + str(e)}), 500
+
+
+# ── Agendador da consulta automatica de NF-e (DistDFe) ──────────────────────
+# Roda so se DFE_AUTO=1. Iniciado no import (gunicorn --workers 2); o claim
+# atomico no banco (oct_dfe_controle) garante 1 consulta por empresa/intervalo.
+try:
+    from sefaz.dfe_auto import iniciar_agendador
+    iniciar_agendador()
+except Exception as _e:
+    print("[dfe-auto] nao iniciou:", _e)
+
+
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
