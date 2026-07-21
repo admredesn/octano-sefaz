@@ -61,7 +61,8 @@ def _rest(method, path, body=None, prefer=None):
 
 def _empresas_alvo():
     try:
-        rows = _rest_get("oct_empresas", "?cert_path=not.is.null&select=id,cnpj,ambiente,ativo")
+        # obs: oct_empresas NAO tem coluna 'ambiente' -> o ambiente vem de DFE_AMBIENTE (default producao)
+        rows = _rest_get("oct_empresas", "?cert_path=not.is.null&select=id,cnpj,ativo")
     except Exception as e:
         print("[dfe-auto] erro listando empresas:", e)
         return []
