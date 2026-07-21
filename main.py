@@ -20,7 +20,8 @@ registrar_rotas_webhook(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-07-11-card391"})
+                    "build": "2026-07-21-dfe-auto",
+                    "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
 def consultar_cnpj(cnpj):
