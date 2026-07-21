@@ -162,6 +162,7 @@ def _consultar_empresa(emp):
         dados = carregar_empresa(emp_id)
     except Exception as e:
         print(f"[dfe-auto] {emp_id}: cert nao carregou: {e}")
+        _set_controle(emp_id, {"ultimo_status": f"cert nao carregou: {str(e)[:160]}"})
         return
     cert_b64, senha = dados["cert_base64"], dados["cert_senha"]
     ult_nsu = str(_controle(emp_id).get("ultimo_nsu") or "0")
@@ -171,21 +172,26 @@ def _consultar_empresa(emp):
             resp = consultar_distdfe(cnpj, cert_b64, senha, ambiente, ult_nsu)
         except Exception as e:
             print(f"[dfe-auto] {emp_id}: erro distdfe: {e}")
+            _set_controle(emp_id, {"ultimo_status": f"erro distdfe: {str(e)[:160]}"})
             break
         if resp.get("erro"):
             print(f"[dfe-auto] {emp_id}: {resp['erro']}")
+            _set_controle(emp_id, {"ultimo_status": f"amb={ambiente} erro: {str(resp['erro'])[:150]}"})
             break
         cstat = str(resp.get("cstat") or "")
+        xmot = str(resp.get("xmotivo") or "")
         if cstat == "656":
             _set_controle(emp_id, {"ultimo_nsu": ult_nsu,
-                                   "bloqueado_ate": _iso(_agora() + timedelta(minutes=BLOQUEIO_656_MIN))})
+                                   "bloqueado_ate": _iso(_agora() + timedelta(minutes=BLOQUEIO_656_MIN)),
+                                   "ultimo_status": f"656 consumo indevido -> pausa {BLOQUEIO_656_MIN}min"})
             print(f"[dfe-auto] {emp_id}: 656 consumo indevido -> pausa {BLOQUEIO_656_MIN}min")
             return
         for n in (resp.get("nfes") or []):
             _salvar_nota(emp_id, n, resp.get("ultimo_nsu"))
             total += 1
         novo = str(resp.get("ultimo_nsu") or ult_nsu)
-        _set_controle(emp_id, {"ultimo_nsu": novo})
+        _set_controle(emp_id, {"ultimo_nsu": novo,
+                               "ultimo_status": f"amb={ambiente} cStat {cstat} {xmot} | ult {novo}/max {resp.get('max_nsu')} | +{total} docs"})
         if cstat == "137" or novo == ult_nsu:
             break
         try:
