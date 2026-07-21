@@ -210,6 +210,12 @@ def _ciclo():
         try:
             if _claim(emp["id"]):
                 _consultar_empresa(emp)
+                # Fase 2: casa as descargas da sonda com as NFs de combustivel (mesmo claim)
+                try:
+                    from . import descarga_match
+                    descarga_match.casar_empresa(emp["id"])
+                except Exception as e:
+                    print(f"[descarga] {emp.get('id')}: {e}")
         except Exception as e:
             print(f"[dfe-auto] ciclo erro {emp.get('id')}: {e}")
 
