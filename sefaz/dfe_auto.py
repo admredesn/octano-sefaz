@@ -216,6 +216,12 @@ def _ciclo():
                     descarga_match.casar_empresa(emp["id"])
                 except Exception as e:
                     print(f"[descarga] {emp.get('id')}: {e}")
+                # Fase 3: entrada automatica (SO se ENTRADA_AUTO habilitar o posto)
+                try:
+                    from . import entrada_auto
+                    entrada_auto.processar_empresa(emp["id"])
+                except Exception as e:
+                    print(f"[entrada] {emp.get('id')}: {e}")
         except Exception as e:
             print(f"[dfe-auto] ciclo erro {emp.get('id')}: {e}")
 
