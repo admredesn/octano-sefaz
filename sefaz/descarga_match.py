@@ -22,7 +22,7 @@ import urllib.error
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
-from .empresa_cert import _rest_get, _supabase_conf
+from .empresa_cert import carregar_empresa, _rest_get, _supabase_conf
 
 DESCARGA_DIAS = int(os.environ.get("DESCARGA_DIAS", "7"))
 TOL_PCT = float(os.environ.get("DESCARGA_TOL_PCT", "1.0"))
