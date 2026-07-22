@@ -272,6 +272,47 @@ def _gravar(emp_id, d, fuel, recon, vend, match):
 
 
 # ------------------------------------------------------------------
+# CIENCIA nas notas resumo proximas de uma descarga (puxa o XML completo)
+# ------------------------------------------------------------------
+def _ciencia_resumos(emp_id, datas_descarga):
+    if not datas_descarga:
+        return
+    try:
+        resumos = _rest_get("oct_nfe_manifestadas",
+                            f"?empresa_id=eq.{emp_id}&status=eq.sem_manifestacao&tipo=eq.resumo"
+                            f"&chave_nfe=neq.null&select=id,chave_nfe,emissao&limit=100")
+    except Exception:
+        return
+    alvo = []
+    for r in resumos:
+        try:
+            ed = datetime.fromisoformat((r.get("emissao") or "")[:10]).date()
+        except Exception:
+            continue
+        for dd in datas_descarga:
+            if 0 <= (dd - ed).days <= DIAS_NF + 1:   # nota emitida ate ~DIAS_NF antes da descarga
+                alvo.append(r)
+                break
+    if not alvo:
+        return
+    try:
+        dados = carregar_empresa(emp_id)
+        cnpj = str((dados.get("empresa") or {}).get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+        from .evento import registrar_evento
+    except Exception as e:
+        print(f"[descarga] {emp_id}: cert p/ ciencia falhou: {e}")
+        return
+    amb = os.environ.get("DFE_AMBIENTE", "producao")
+    for r in alvo:
+        try:
+            registrar_evento(cnpj, r["chave_nfe"], dados["cert_base64"], dados["cert_senha"], amb, tipo="210210")
+            _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{r['id']}", body={"status": "ciencia"}, prefer="return=minimal")
+            print(f"[descarga] {emp_id}: ciencia p/ puxar XML da nota {r['chave_nfe'][:12]} (descarga sem NF)")
+        except Exception as e:
+            print(f"[descarga] {emp_id}: ciencia falhou {str(r.get('chave_nfe'))[:12]}: {e}")
+
+
+# ------------------------------------------------------------------
 # ENTRADA: casa as descargas de uma empresa
 # ------------------------------------------------------------------
 def casar_empresa(emp_id):
@@ -286,6 +327,7 @@ def casar_empresa(emp_id):
             por_tanque.setdefault(l["tanque_numero"], []).append((_t(l["medido_em"]), l.get("volume")))
         nfs = _nfs_combustivel(emp_id)
         n_casadas = 0
+        datas_sem_nf = set()
         for t, serie in por_tanque.items():
             fuel = tq.get(t)
             if not fuel:
@@ -298,6 +340,10 @@ def casar_empresa(emp_id):
                 _gravar(emp_id, d, fuel, recon, vend, match)
                 if match:
                     n_casadas += 1
+                else:
+                    datas_sem_nf.add(d["ini"].date())
+        # descarga sem nota casada -> da ciencia nas resumo da janela p/ puxar o XML completo
+        _ciencia_resumos(emp_id, datas_sem_nf)
         if n_casadas:
             print(f"[descarga] {emp_id}: {n_casadas} descarga(s) casada(s) com NF")
         return n_casadas
