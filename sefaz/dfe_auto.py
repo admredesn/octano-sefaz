@@ -124,7 +124,14 @@ def _salvar_nota(emp_id, n, ult_nsu_consulta):
             patch = {}
             if not row.get("numero") and n.get("numero"):
                 patch["numero"] = n["numero"]
-            if not row.get("xml") and n.get("xml"):
+            # UPGRADE resumo -> completo: quando chega o nfeProc (tem <prod>) e a linha
+            # so tinha o resumo (sem produtos), troca o XML e marca como nfe_completa.
+            xml_novo = n.get("xml") or ""
+            if ("<prod" in xml_novo) and ("<prod" not in (row.get("xml") or "")):
+                patch["xml"] = xml_novo
+                patch["tipo"] = "nfe_completa"
+                patch["schema"] = schema
+            elif not row.get("xml") and n.get("xml"):
                 patch["xml"] = n["xml"]
             if not row.get("emissao") and n.get("emissao"):
                 patch["emissao"] = n["emissao"]
