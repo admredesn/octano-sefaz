@@ -319,7 +319,7 @@ def casar_empresa(emp_id):
     try:
         med = _puxar_medicoes(emp_id)
         if not med:
-            return 0
+            return {"ok": True, "casadas": 0, "obs": "sem medicoes"}
         tanques = _rest_get("oct_tanques", f"?empresa_id=eq.{emp_id}&select=numero,combustivel")
         tq = {t["numero"]: _fuel_tanque(t["combustivel"]) for t in tanques}
         por_tanque = {}
@@ -327,12 +327,14 @@ def casar_empresa(emp_id):
             por_tanque.setdefault(l["tanque_numero"], []).append((_t(l["medido_em"]), l.get("volume")))
         nfs = _nfs_combustivel(emp_id)
         n_casadas = 0
+        n_descargas = 0
         datas_sem_nf = set()
         for t, serie in por_tanque.items():
             fuel = tq.get(t)
             if not fuel:
                 continue
             for d in _detectar(sorted(serie, key=lambda x: x[0])):
+                n_descargas += 1
                 d["tanque"] = t
                 vend = _vendas(emp_id, fuel, d["ini"], d["fim"])
                 recon = round(d["salto"] + vend, 1)
@@ -346,7 +348,10 @@ def casar_empresa(emp_id):
         _ciencia_resumos(emp_id, datas_sem_nf)
         if n_casadas:
             print(f"[descarga] {emp_id}: {n_casadas} descarga(s) casada(s) com NF")
-        return n_casadas
+        return {"ok": True, "casadas": n_casadas, "descargas": n_descargas,
+                "nfs_combustivel": len(nfs), "medicoes": len(med)}
     except Exception as e:
-        print(f"[descarga] {emp_id}: erro no casamento: {e}")
-        return 0
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[descarga] {emp_id}: erro no casamento: {e}\n{tb}")
+        return {"ok": False, "erro": str(e), "traceback": tb[-1500:]}
