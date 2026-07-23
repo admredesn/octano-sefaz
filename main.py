@@ -20,7 +20,7 @@ registrar_rotas_webhook(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-07-22-ciencia2",
+                    "build": "2026-07-22-casar-solto",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -445,6 +445,24 @@ def danfe():
         )
     except Exception as e:
         return jsonify({"erro": "Falha ao gerar DANFE: " + str(e)}), 500
+
+
+@app.route("/dfe/casar/<empresa_id>", methods=["POST"])
+def dfe_casar_manual(empresa_id):
+    """Roda o cruzamento variacao-de-estoque x notas disponiveis AGORA para a
+    empresa (nao consulta a SEFAZ -> sem risco de 656). Diagnostico/execucao manual."""
+    try:
+        from sefaz import descarga_match, entrada_auto
+        r = descarga_match.casar_empresa(empresa_id)
+        ent = None
+        try:
+            ent = entrada_auto.processar_empresa(empresa_id)
+        except Exception as e:
+            ent = {"erro": str(e)}
+        return jsonify({"casar": r, "entrada": ent})
+    except Exception as e:
+        import traceback
+        return jsonify({"erro": str(e), "traceback": traceback.format_exc()[-1500:]}), 500
 
 
 # ── Agendador da consulta automatica de NF-e (DistDFe) ──────────────────────
