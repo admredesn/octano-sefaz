@@ -19,6 +19,7 @@ import json
 import unicodedata
 import urllib.request
 import urllib.error
+import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
@@ -154,8 +155,8 @@ def _detectar(serie):
 # 2. vendas na janela (reconstrucao)
 # ------------------------------------------------------------------
 def _vendas(emp_id, fuel, ini, fim):
-    i2 = _iso(ini - timedelta(minutes=10))
-    f2 = _iso(fim + timedelta(minutes=10))
+    i2 = urllib.parse.quote(_iso(ini - timedelta(minutes=10)))
+    f2 = urllib.parse.quote(_iso(fim + timedelta(minutes=10)))
     try:
         ab = _rest_get("oct_pdv_abastecimentos",
                        f"?empresa_id=eq.{emp_id}&data_abast=gte.{i2}&data_abast=lte.{f2}"
@@ -246,10 +247,13 @@ def _casar(recon, fuel, dia, nfs):
 # ------------------------------------------------------------------
 def _gravar(emp_id, d, fuel, recon, vend, match):
     chave_desc = _iso(d["ini"])
+    # OBS: o '+00:00' do timestamp PRECISA de URL-encode ('+' cru vira espaco no
+    # PostgREST -> busca falha -> POST duplicado silencioso e a linha nunca atualiza)
+    chave_q = urllib.parse.quote(chave_desc)
     try:
         ex = _rest_get("oct_nfe_descarga",
                        f"?empresa_id=eq.{emp_id}&tanque_numero=eq.{d['tanque']}"
-                       f"&descarga_ini=eq.{chave_desc}&select=id,status&limit=1")
+                       f"&descarga_ini=eq.{chave_q}&select=id,status&limit=1")
     except Exception:
         ex = []
     if ex and ex[0].get("status") not in (None, "candidato", "sem_nf"):
