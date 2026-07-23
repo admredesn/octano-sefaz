@@ -11,4 +11,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 EXPOSE 8000
-CMD gunicorn main:app --bind 0.0.0.0:$PORT --workers 2 --timeout 60
+CMD gunicorn main:app --bind 0.0.0.0:$PORT --workers 2 --timeout 300
