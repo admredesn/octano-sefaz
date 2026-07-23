@@ -10,7 +10,7 @@ Controle em oct_dfe_controle (empresa_id, ultimo_nsu, ultima_consulta_em, bloque
 O servidor roda com gunicorn --workers 2, entao o "claim" da consulta e ATOMICO no banco
 (PATCH condicional): so 1 worker consulta cada empresa por intervalo -> evita 656.
 
-Ativado por env DFE_AUTO=1. Ajustes: DFE_INTERVALO_MIN (60), DFE_CICLO_SEG (600),
+Ativado por env DFE_AUTO=1. Ajustes: DFE_INTERVALO_MIN (120), DFE_CICLO_SEG (600),
 DFE_BLOQUEIO_MIN (65), DFE_AMBIENTE (producao).
 """
 
@@ -26,7 +26,7 @@ from datetime import datetime, timezone, timedelta
 from .empresa_cert import carregar_empresa, _rest_get, _supabase_conf
 from .distdfe import consultar_distdfe
 
-MIN_INTERVALO_MIN = int(os.environ.get("DFE_INTERVALO_MIN", "60"))
+MIN_INTERVALO_MIN = int(os.environ.get("DFE_INTERVALO_MIN", "120"))
 CICLO_SEG = int(os.environ.get("DFE_CICLO_SEG", "600"))
 BLOQUEIO_656_MIN = int(os.environ.get("DFE_BLOQUEIO_MIN", "65"))
 MAX_PAGINAS = 40
@@ -215,22 +215,24 @@ def _consultar_empresa(emp):
 def _ciclo():
     for emp in _empresas_alvo():
         try:
+            # Consulta na SEFAZ: no maximo 1x/hora por empresa (claim atomico + bloqueio 656)
             if _claim(emp["id"]):
                 _consultar_empresa(emp)
-                # Fase 2: casa as descargas da sonda com as NFs de combustivel (mesmo claim)
-                try:
-                    from . import descarga_match
-                    descarga_match.casar_empresa(emp["id"])
-                except Exception as e:
-                    print(f"[descarga] {emp.get('id')}: {e}")
-                # Fase 3: entrada automatica (SO se ENTRADA_AUTO habilitar o posto)
-                try:
-                    from . import entrada_auto
-                    entrada_auto.processar_empresa(emp["id"])
-                except Exception as e:
-                    print(f"[entrada] {emp.get('id')}: {e}")
         except Exception as e:
             print(f"[dfe-auto] ciclo erro {emp.get('id')}: {e}")
+        # Fase 2 + 3 rodam TODO ciclo, independente da consulta/bloqueio SEFAZ:
+        # cruzam a variacao de estoque com as notas JA disponiveis na lista
+        # (nao tocam na SEFAZ, so manifestacao quando ha match -> sem risco de 656).
+        try:
+            from . import descarga_match
+            descarga_match.casar_empresa(emp["id"])
+        except Exception as e:
+            print(f"[descarga] {emp.get('id')}: {e}")
+        try:
+            from . import entrada_auto
+            entrada_auto.processar_empresa(emp["id"])
+        except Exception as e:
+            print(f"[entrada] {emp.get('id')}: {e}")
 
 
 _on = False
