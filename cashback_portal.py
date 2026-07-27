@@ -684,7 +684,9 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div style="color:#fff;font-weight:700;margin-bottom:10px">Aponte para o QR do bico</div>
     <video id="scan-video" playsinline muted style="width:100%;max-width:400px;border-radius:12px;border:2px solid #f97316"></video>
     <div id="scan-msg" class="sub" style="margin-top:10px;text-align:center">Abrindo a câmera…</div>
+    <button onclick="scanPorFoto()" style="max-width:400px;background:#16a34a">📸 Tirar FOTO do QR (câmera do celular)</button>
     <button onclick="fecharScanner()" style="max-width:400px;background:#2a2d3e">Cancelar e digitar o número</button>
+    <input id="scan-foto" type="file" accept="image/*" capture="environment" style="display:none">
   </div>
 
   <div class="card esc" id="pwa-card">
@@ -693,6 +695,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <button id="pwa-btn" class="esc" onclick="pwaInstalar()">Instalar o app</button>
   </div>
 </div>
+
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-1</div>
 
 <script>
 const API = "";
@@ -946,6 +950,48 @@ function fecharScanner(){
   if(_scanStream){_scanStream.getTracks().forEach(t=>t.stop());_scanStream=null;}
   document.getElementById("scan-overlay").classList.add("esc");
 }
+
+// ---- PLANO C: FOTO do QR pelo app de câmera nativo (funciona em qualquer
+// navegador, sem permissão de vídeo — inclusive navegador embutido) ----
+async function _decodificarImagem(bmp){
+  if("BarcodeDetector" in window){
+    try{const det=new BarcodeDetector({formats:["qr_code"]});
+      const codes=await det.detect(bmp);
+      if(codes.length)return codes[0].rawValue;}catch(e){}
+  }
+  if(!window.jsQR){
+    _jsqrCarregando=_jsqrCarregando||new Promise((ok,err)=>{
+      const s=document.createElement("script");
+      s.src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      s.onload=ok;s.onerror=err;document.head.appendChild(s);
+    });
+    await _jsqrCarregando;
+  }
+  // reduz a foto (fotos de 12MP travam o decoder) e tenta em 2 tamanhos
+  for(const alvo of [900, 1600]){
+    const esc=Math.min(1, alvo/Math.max(bmp.width,bmp.height));
+    const cv=document.createElement("canvas");
+    cv.width=Math.round(bmp.width*esc);cv.height=Math.round(bmp.height*esc);
+    const cx=cv.getContext("2d");cx.drawImage(bmp,0,0,cv.width,cv.height);
+    const img=cx.getImageData(0,0,cv.width,cv.height);
+    const q=window.jsQR(img.data,img.width,img.height);
+    if(q&&q.data)return q.data;
+  }
+  return null;
+}
+function scanPorFoto(){document.getElementById("scan-foto").click();}
+document.getElementById("scan-foto").addEventListener("change",async function(){
+  const f=this.files&&this.files[0];this.value="";
+  if(!f)return;
+  const msg=document.getElementById("scan-msg");
+  msg.textContent="Lendo a foto…";
+  try{
+    const bmp=await createImageBitmap(f);
+    const texto=await _decodificarImagem(bmp);
+    if(texto&&_scanAchou(texto))return;
+    msg.textContent="Não achei o QR na foto — tenta de novo mais perto e com luz, ou digite o número.";
+  }catch(e){msg.textContent="Falha ao ler a foto ("+(e.name||"erro")+"). Digite o número do bico.";}
+});
 
 // ---- PWA: service worker + botão de instalação ----
 if ("serviceWorker" in navigator) {
