@@ -44,20 +44,35 @@ FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("05", "A Prazo")]
 
 
 def _prazo_liberado(empresa_id, cpf):
-    """Cliente pode comprar A PRAZO neste posto? A liberação é do POSTO:
-    oct_pessoas.aceita_nota_prazo (e sem credito_bloqueado)."""
+    """Cliente pode comprar A PRAZO neste posto? A liberação é do POSTO.
+    Se a pessoa está VINCULADA a uma EMPRESA (frota_empresa_id), o crédito é
+    o da EMPRESA e a venda sai no NOME DELA.
+    Retorna (ok, motivo, conta) — conta = {"pessoa_id", "nome", "empresa": bool}."""
     try:
         p = _sget(f"oct_pessoas?empresa_id=eq.{empresa_id}&documento=eq.{cpf}"
-                  f"&select=aceita_nota_prazo,credito_bloqueado,limite_nota_prazo&limit=1")
+                  f"&select=id,nome,aceita_nota_prazo,credito_bloqueado,frota_empresa_id&limit=1")
         if not p:
-            return False, "Seu cadastro ainda não existe neste posto — fale com o caixa."
-        if p[0].get("credito_bloqueado"):
-            return False, "Crédito bloqueado neste posto — fale com o caixa."
-        if not p[0].get("aceita_nota_prazo"):
-            return False, "Compra a prazo ainda não liberada pro seu cadastro — fale com o posto."
-        return True, None
+            return False, "Seu cadastro ainda não existe neste posto — fale com o caixa.", None
+        pes = p[0]
+        # COLABORADOR de empresa: usa o crédito da EMPRESA vinculada
+        if pes.get("frota_empresa_id"):
+            e = _sget(f"oct_pessoas?id=eq.{pes['frota_empresa_id']}"
+                      f"&select=id,nome,aceita_nota_prazo,credito_bloqueado&limit=1")
+            if not e:
+                return False, "Empresa vinculada não encontrada — fale com o posto.", None
+            emp = e[0]
+            if emp.get("credito_bloqueado"):
+                return False, f"Crédito da empresa {emp.get('nome')} está bloqueado — fale com o posto.", None
+            if not emp.get("aceita_nota_prazo"):
+                return False, f"A empresa {emp.get('nome')} não está liberada a prazo — fale com o posto.", None
+            return True, None, {"pessoa_id": emp["id"], "nome": emp.get("nome"), "empresa": True}
+        if pes.get("credito_bloqueado"):
+            return False, "Crédito bloqueado neste posto — fale com o caixa.", None
+        if not pes.get("aceita_nota_prazo"):
+            return False, "Compra a prazo ainda não liberada pro seu cadastro — fale com o posto.", None
+        return True, None, {"pessoa_id": pes["id"], "nome": pes.get("nome"), "empresa": False}
     except Exception as e:
-        return False, "não deu pra verificar o crédito: " + str(e)[:80]
+        return False, "não deu pra verificar o crédito: " + str(e)[:80], None
 
 
 # ------------------------------------------------------------------
@@ -356,9 +371,11 @@ def api_acionar():
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
-    # A PRAZO: só com liberação do POSTO no cadastro do cliente (revalida no servidor)
+    # A PRAZO: só com liberação do POSTO (revalida no servidor); se o cliente é
+    # colaborador de EMPRESA, a conta (e o cupom) é da empresa
+    conta_prazo = None
     if forma == "05":
-        ok, motivo = _prazo_liberado(empresa, cli["cpf"])
+        ok, motivo, conta_prazo = _prazo_liberado(empresa, cli["cpf"])
         if not ok:
             return jsonify({"erro": motivo}), 403
     # janela 2h (regra do CASHBACK — não vale pro A PRAZO, que pode repetir no dia)
@@ -387,18 +404,34 @@ def api_acionar():
             "pessoa_id": pessoa_id, "combustivel": comb or None, "forma": forma,
             "status": "aguardando",
         }
+        # frota: a CONTA (cliente da venda/cupom) é a EMPRESA vinculada
+        if conta_prazo and conta_prazo.get("empresa"):
+            reg["pessoa_id"] = conta_prazo["pessoa_id"]
+            reg["cliente_nome"] = f"{conta_prazo['nome']} (por {cli['nome'].split(' ')[0]})"
         if bico:
             reg["bico"] = bico
         itens = _sanear_itens(d.get("itens"))
         if itens:
             reg["itens"] = itens
+        # prazo sem bico só faz sentido com produtos no carrinho
+        if forma == "05" and not bico and not any(i.get("tipo") == "produto" for i in itens):
+            return jsonify({"erro": "Informe o bico do abastecimento ou adicione produtos ao carrinho."}), 400
+        placa = re.sub(r"[^A-Za-z0-9]", "", str(d.get("placa") or "")).upper()[:8]
+        if placa:
+            reg["placa"] = placa
+        try:
+            km = int(float(str(d.get("km") or "").replace(",", ".") or 0)) or None
+        except (TypeError, ValueError):
+            km = None
+        if km:
+            reg["km"] = km
         try:
             novo = _spost("oct_cashback_acionamentos", reg)
         except RuntimeError as e:
             if "Could not find the" not in str(e):
                 raise
-            reg.pop("bico", None)   # tabela ainda sem a coluna bico/itens
-            reg.pop("itens", None)
+            for c in ("bico", "itens", "placa", "km"):   # tabela sem alguma coluna nova
+                reg.pop(c, None)
             novo = _spost("oct_cashback_acionamentos", reg)
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
                         "validade_min": ACIONAMENTO_VALIDADE_MIN})
@@ -415,8 +448,9 @@ def api_prazo_status():
     posto = _uuid_ok(request.args.get("posto"))
     if not posto:
         return jsonify({"ok": True, "prazo": False})
-    ok, motivo = _prazo_liberado(posto, cli["cpf"])
-    return jsonify({"ok": True, "prazo": ok, "motivo": motivo})
+    ok, motivo, conta = _prazo_liberado(posto, cli["cpf"])
+    return jsonify({"ok": True, "prazo": ok, "motivo": motivo,
+                    "empresa": (conta or {}).get("nome") if (conta or {}).get("empresa") else None})
 
 
 @bp_cashback.route("/cashback/api/produtos", methods=["GET"])
@@ -531,7 +565,7 @@ def api_acionamento_live():
         return jsonify({"ok": True, "fase": "sem_acionamento"})
     ac = acs[0]
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
-            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens")}}
+            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens", "placa", "km")}}
     bico = ac.get("bico")
 
     # cashback gerado depois do acionamento? (fase final)
@@ -896,6 +930,12 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <label>Forma de pagamento</label>
       <select id="ac-forma" onchange="carrinhoVisibilidade()"><option value="01">Dinheiro</option><option value="17">PIX</option></select>
 
+      <!-- PLACA + KM (compra a prazo: identifica o veículo) -->
+      <div id="veiculo-box" class="esc" style="display:flex;gap:8px;margin-top:10px">
+        <div style="flex:1.4"><label>Placa do veículo</label><input id="ac-placa" placeholder="ABC1D23" maxlength="8" style="text-transform:uppercase"></div>
+        <div style="flex:1"><label>KM atual</label><input id="ac-km" inputmode="numeric" placeholder="km"></div>
+      </div>
+
       <!-- CARRINHO da compra A PRAZO: mais abastecimentos + produtos de loja -->
       <div id="carrinho-box" class="esc" style="margin-top:12px;border:1px solid var(--borda);border-radius:9px;padding:10px 12px">
         <div style="font-weight:700;font-size:.86rem">🛒 Itens da compra</div>
@@ -951,7 +991,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão carrinho-10</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-11</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1077,12 +1117,15 @@ async function carregarDash(){
 // mostra a opção A PRAZO só pra cliente LIBERADO pelo posto (revalidado no servidor)
 async function verificarPrazo(){
   const sel=document.getElementById("ac-forma");
-  const tem=[...sel.options].some(o=>o.value==="05");
-  if(!POSTO){if(tem)sel.querySelector('option[value="05"]').remove();return;}
+  const opt=sel.querySelector('option[value="05"]');
+  if(!POSTO){if(opt)opt.remove();return;}
   try{
     const r=await req("/cashback/api/prazo-status?posto="+POSTO,null);
-    if(r.prazo&&!tem)sel.insertAdjacentHTML("beforeend",'<option value="05">🧾 A Prazo (minha conta no posto)</option>');
-    if(!r.prazo&&tem)sel.querySelector('option[value="05"]').remove();
+    const rotulo=r.empresa?("🧾 A Prazo (conta: "+r.empresa+")"):"🧾 A Prazo (minha conta no posto)";
+    if(r.prazo){
+      if(opt)opt.textContent=rotulo;
+      else sel.insertAdjacentHTML("beforeend",'<option value="05">'+rotulo+'</option>');
+    } else if(opt){opt.remove();carrinhoVisibilidade();}
   }catch(e){}
 }
 
@@ -1107,6 +1150,7 @@ let _cbBuscaTimer=null;
 function carrinhoVisibilidade(){
   const prazo=document.getElementById("ac-forma").value==="05";
   document.getElementById("carrinho-box").classList.toggle("esc",!prazo);
+  document.getElementById("veiculo-box").classList.toggle("esc",!prazo);
   if(!prazo){CARRINHO=[];carrinhoRender();}
 }
 function carrinhoRender(){
@@ -1187,7 +1231,8 @@ async function acionar(){
   m.textContent="Acionando…";
   const r=await req("/cashback/api/acionar",{posto:posto,bico:document.getElementById("ac-bico").value,
     combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value,
-    itens:(document.getElementById("ac-forma").value==="05"?CARRINHO:[])});
+    itens:(document.getElementById("ac-forma").value==="05"?CARRINHO:[]),
+    placa:document.getElementById("ac-placa").value,km:document.getElementById("ac-km").value});
   if(r.ok){m.textContent="";CARRINHO=[];carrinhoRender();carregarDash();ligarEspelho();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha ao acionar";
     if(r.proxima_liberacao){const d=new Date(r.proxima_liberacao);m.textContent+=" (libera às "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})+")";}}
@@ -1207,7 +1252,10 @@ async function _lvTick(){
   if(!r.ok||r.fase==="sem_acionamento"){desligarEspelho();return;}
   box.classList.remove("esc");
   const ac=r.acionamento||{};
-  if(r.fase==="aguardando_inicio"){
+  if(r.fase==="aguardando_inicio"&&!ac.bico){
+    fase.textContent="🛍 Compra enviada ao caixa";
+    num.textContent="—";det.textContent="Retire seus produtos — a emissão sai em instantes.";
+  } else if(r.fase==="aguardando_inicio"){
     fase.textContent="⏳ Aguardando o abastecimento no bico "+(ac.bico||"?");
     num.textContent="—";det.textContent="Vá até a bomba e abasteça normalmente.";
   } else if(r.fase==="abastecendo"){
