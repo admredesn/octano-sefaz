@@ -442,7 +442,7 @@ def api_acionamento_live():
             if idade < 20 and lv.get("estado") in ("abastecendo", "aguardando"):
                 resp["fase"] = "abastecendo"
                 resp["live"] = {"estado": lv.get("estado"), "volume": lv.get("volume"),
-                                "combustivel": lv.get("combustivel")}
+                                "valor": lv.get("valor"), "combustivel": lv.get("combustivel")}
                 return jsonify(resp)
     resp["fase"] = "aguardando_inicio" if ac.get("status") == "aguardando" else ac.get("status")
     return jsonify(resp)
@@ -814,8 +814,14 @@ async function _lvTick(){
     num.textContent="—";det.textContent="Vá até a bomba e abasteça normalmente.";
   } else if(r.fase==="abastecendo"){
     fase.textContent="⛽ Abastecendo no bico "+(ac.bico||"?");
-    num.textContent=Number(r.live&&r.live.volume||0).toLocaleString("pt-BR",{minimumFractionDigits:2});
-    det.textContent=(r.live&&r.live.combustivel||"")+" · acompanhando a bomba ao vivo";
+    const lv=r.live||{};
+    if(lv.volume!=null){
+      num.textContent=Number(lv.volume).toLocaleString("pt-BR",{minimumFractionDigits:2})+" L";
+      det.textContent=(lv.valor!=null?brl(lv.valor)+" · ":"")+(lv.combustivel||"")+" · ao vivo da bomba";
+    } else {
+      num.textContent=brl(lv.valor!=null?lv.valor:0);
+      det.textContent=(lv.combustivel||"")+" · ao vivo da bomba";
+    }
   } else if(r.fase==="concluido"){
     const a=r.abastecimento||{};
     fase.textContent="✅ Abastecimento concluído — bico "+(ac.bico||"?");
