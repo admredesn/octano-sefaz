@@ -379,6 +379,47 @@ def api_acionar():
         return jsonify({"erro": "falha ao acionar: " + str(e)[:200]}), 500
 
 
+@bp_cashback.route("/cashback/api/bico", methods=["GET"])
+def api_bico():
+    """Ficha do bico p/ o portal: combustível (e preço, se houver um recente).
+    Fonte: últimos abastecimentos do bico na nuvem."""
+    posto = _uuid_ok(request.args.get("posto"))
+    try:
+        bico = int(request.args.get("bico") or 0)
+    except ValueError:
+        bico = 0
+    if not posto or not bico:
+        return jsonify({"ok": False, "erro": "posto/bico inválidos"}), 400
+    try:
+        rows = _sget(f"oct_pdv_abastecimentos?empresa_id=eq.{posto}&bico=eq.{bico}"
+                     f"&select=combustivel,preco_litro,data_abast&order=data_abast.desc&limit=30")
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)[:120]}), 500
+    comb_bruto = next((r["combustivel"] for r in rows if r.get("combustivel")), None)
+    preco = None
+    corte_preco = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    for r in rows:
+        if (r.get("preco_litro") or 0) > 0 and str(r.get("data_abast") or "") >= corte_preco:
+            preco = float(r["preco_litro"])
+            break
+    # normaliza pro nome padrão da lista do portal
+    comb = None
+    if comb_bruto:
+        s = comb_bruto.upper()
+        if "ADT" in s or "ADIT" in s:
+            comb = "GASOLINA ADITIVADA"
+        elif "GASOLINA" in s:
+            comb = "GASOLINA COMUM"
+        elif "ETANOL" in s or "ALCOOL" in s or "ÁLCOOL" in s:
+            comb = "ETANOL"
+        elif "S10" in s or "S-10" in s:
+            comb = "DIESEL S10"
+        elif "DIESEL" in s:
+            comb = "DIESEL S500"
+    return jsonify({"ok": True, "bico": bico, "combustivel": comb,
+                    "combustivel_bruto": comb_bruto, "preco_litro": preco})
+
+
 @bp_cashback.route("/cashback/api/acionamento/live", methods=["GET"])
 def api_acionamento_live():
     """Espelho do abastecimento p/ o acionamento mais recente do cliente.
@@ -681,6 +722,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
         <input id="ac-bico" inputmode="numeric" maxlength="3" placeholder="digite o nº do bico" style="flex:1">
         <button onclick="abrirScanner()" style="width:auto;margin:0;padding:0 16px;white-space:nowrap">📷 Escanear</button>
       </div>
+      <div id="ac-bico-info" class="sub" style="margin:6px 0 0;min-height:1.1em"></div>
       <label>Combustível</label>
       <select id="ac-comb"></select>
       <label>Forma de pagamento</label>
@@ -721,7 +763,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão overlay-fix-6</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão bico-info-7</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -747,7 +789,10 @@ if (POSTO) localStorage.setItem("cb_posto", POSTO);
 const COMBS = ["GASOLINA COMUM","GASOLINA ADITIVADA","ETANOL","DIESEL S10","DIESEL S500"];
 document.getElementById("ac-comb").innerHTML = COMBS.map(c=>`<option>${c}</option>`).join("");
 const BICO_URL = (new URLSearchParams(location.search).get("bico")||"").replace(/\D/g,"");
-if (BICO_URL) document.getElementById("ac-bico").value = BICO_URL;
+if (BICO_URL) {
+  document.getElementById("ac-bico").value = BICO_URL;
+  setTimeout(()=>{ try{ carregarInfoBico(); }catch(e){} }, 400);   // ficha do bico do QR
+}
 
 function mostrar(id){["tela-login","tela-cad","tela-dash"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
 function tok(){return localStorage.getItem("cb_token")||"";}
@@ -943,8 +988,33 @@ function _scanAchou(texto){
   document.getElementById("ac-bico").value=b;
   fecharScanner();
   if(navigator.vibrate)navigator.vibrate(80);
+  carregarInfoBico();
   return true;
 }
+
+// ---- FICHA do bico: ao identificar o bico (QR/foto/digitação), puxa o
+// combustível (e preço recente, se houver) e já seleciona no formulário ----
+let _infoBicoTimer=null;
+async function carregarInfoBico(){
+  const bico=(document.getElementById("ac-bico").value||"").replace(/\D/g,"");
+  const info=document.getElementById("ac-bico-info");
+  if(!bico||!POSTO){info.textContent="";return;}
+  info.textContent="Consultando o bico "+bico+"…";
+  try{
+    const r=await fetch(API+"/cashback/api/bico?posto="+POSTO+"&bico="+bico).then(x=>x.json());
+    if(!r.ok||!r.combustivel){info.textContent="Bico "+bico+" sem histórico — confira o combustível abaixo.";return;}
+    const sel=document.getElementById("ac-comb");
+    if(![...sel.options].some(o=>o.value===r.combustivel||o.text===r.combustivel))
+      sel.insertAdjacentHTML("beforeend",`<option>${r.combustivel}</option>`);
+    sel.value=r.combustivel;
+    info.innerHTML="⛽ <b style='color:#4ade80'>"+r.combustivel+"</b>"+
+      (r.preco_litro?(" · ≈ R$ "+Number(r.preco_litro).toLocaleString("pt-BR",{minimumFractionDigits:2})+"/L"):"");
+  }catch(e){info.textContent="";}
+}
+document.getElementById("ac-bico").addEventListener("input",()=>{
+  clearTimeout(_infoBicoTimer);
+  _infoBicoTimer=setTimeout(carregarInfoBico,500);
+});
 const EH_IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
 async function abrirScanner(){
   const ov=document.getElementById("scan-overlay"),vid=document.getElementById("scan-video"),msg=document.getElementById("scan-msg");
