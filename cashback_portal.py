@@ -389,12 +389,16 @@ def api_acionar():
         }
         if bico:
             reg["bico"] = bico
+        itens = _sanear_itens(d.get("itens"))
+        if itens:
+            reg["itens"] = itens
         try:
             novo = _spost("oct_cashback_acionamentos", reg)
         except RuntimeError as e:
             if "Could not find the" not in str(e):
                 raise
-            reg.pop("bico", None)   # tabela ainda sem a coluna bico
+            reg.pop("bico", None)   # tabela ainda sem a coluna bico/itens
+            reg.pop("itens", None)
             novo = _spost("oct_cashback_acionamentos", reg)
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
                         "validade_min": ACIONAMENTO_VALIDADE_MIN})
@@ -413,6 +417,57 @@ def api_prazo_status():
         return jsonify({"ok": True, "prazo": False})
     ok, motivo = _prazo_liberado(posto, cli["cpf"])
     return jsonify({"ok": True, "prazo": ok, "motivo": motivo})
+
+
+@bp_cashback.route("/cashback/api/produtos", methods=["GET"])
+def api_produtos():
+    """Busca de produtos de LOJA do posto (p/ o carrinho da compra a prazo).
+    Combustível de bomba fica de fora (tanque_id é dele)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    posto = _uuid_ok(request.args.get("posto"))
+    q = str(request.args.get("q") or "").strip()
+    if not posto or len(q) < 2:
+        return jsonify([])
+    try:
+        termo = rq.utils.quote(f"*{q}*", safe="")
+        rows = _sget(f"oct_produtos?empresa_id=eq.{posto}&ativo=eq.true&tanque_id=is.null"
+                     f"&or=(nome.ilike.{termo},codigo.ilike.{termo})"
+                     f"&select=id,nome,codigo,preco_venda_a&order=nome&limit=12")
+        return jsonify([{"id": r["id"], "nome": r["nome"], "codigo": r.get("codigo"),
+                         "preco": float(r.get("preco_venda_a") or 0)} for r in rows
+                        if float(r.get("preco_venda_a") or 0) > 0])
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+
+
+def _sanear_itens(brutos):
+    """Itens do carrinho do app: no máximo 20, tipos conhecidos, números válidos."""
+    itens = []
+    for it in (brutos or [])[:20]:
+        if not isinstance(it, dict):
+            continue
+        if it.get("tipo") == "bico":
+            try:
+                b = int(it.get("bico") or 0)
+            except (TypeError, ValueError):
+                continue
+            if b > 0:
+                itens.append({"tipo": "bico", "bico": b})
+        elif it.get("tipo") == "produto":
+            pid = _uuid_ok(it.get("produto_id"))
+            if not pid:
+                continue
+            try:
+                qtd = round(float(it.get("qtd") or 1), 3)
+            except (TypeError, ValueError):
+                qtd = 1
+            itens.append({"tipo": "produto", "produto_id": pid,
+                          "nome": str(it.get("nome") or "")[:80],
+                          "qtd": max(qtd, 0.001),
+                          "preco": round(float(it.get("preco") or 0), 2)})
+    return itens
 
 
 @bp_cashback.route("/cashback/api/bico", methods=["GET"])
@@ -476,7 +531,7 @@ def api_acionamento_live():
         return jsonify({"ok": True, "fase": "sem_acionamento"})
     ac = acs[0]
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
-            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero")}}
+            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens")}}
     bico = ac.get("bico")
 
     # cashback gerado depois do acionamento? (fase final)
@@ -839,7 +894,23 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <label>Combustível</label>
       <select id="ac-comb"></select>
       <label>Forma de pagamento</label>
-      <select id="ac-forma"><option value="01">Dinheiro</option><option value="17">PIX</option></select>
+      <select id="ac-forma" onchange="carrinhoVisibilidade()"><option value="01">Dinheiro</option><option value="17">PIX</option></select>
+
+      <!-- CARRINHO da compra A PRAZO: mais abastecimentos + produtos de loja -->
+      <div id="carrinho-box" class="esc" style="margin-top:12px;border:1px solid var(--borda);border-radius:9px;padding:10px 12px">
+        <div style="font-weight:700;font-size:.86rem">🛒 Itens da compra</div>
+        <div class="sub" style="margin:2px 0 8px">O abastecimento do bico acima já entra. Adicione outros itens se precisar.</div>
+        <div id="carrinho-lista"></div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="button" onclick="carrinhoAddBico()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">⛽ + outro bico</button>
+          <button type="button" onclick="carrinhoAbrirBusca()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">🛍 + produto</button>
+        </div>
+        <div id="carrinho-busca" class="esc" style="margin-top:8px">
+          <input id="cb-q" placeholder="Digite o nome do produto (mín. 2 letras)" autocomplete="off">
+          <div id="cb-res" style="margin-top:6px"></div>
+        </div>
+      </div>
+
       <button onclick="acionar()">Acionar benefício</button>
     </div>
     <div id="ac-ativo" class="cta esc"></div>
@@ -876,7 +947,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão a-prazo-8</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão carrinho-9</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1026,6 +1097,61 @@ async function garantirPosto(){
   sel.onchange=()=>{if(sel.value){POSTO=sel.value;localStorage.setItem("cb_posto",POSTO);}};
 }
 
+// ---- CARRINHO da compra a prazo (outros bicos + produtos de loja) ----
+let CARRINHO=[];   // [{tipo:'bico',bico}|{tipo:'produto',produto_id,nome,qtd,preco}]
+let _cbBuscaTimer=null;
+function carrinhoVisibilidade(){
+  const prazo=document.getElementById("ac-forma").value==="05";
+  document.getElementById("carrinho-box").classList.toggle("esc",!prazo);
+  if(!prazo){CARRINHO=[];carrinhoRender();}
+}
+function carrinhoRender(){
+  const el=document.getElementById("carrinho-lista");
+  const bicoP=(document.getElementById("ac-bico").value||"").replace(/\D/g,"");
+  let html=bicoP?`<div class="item"><div>⛽ Abastecimento — bico <b>${bicoP}</b></div><span class="sub">principal</span></div>`:"";
+  html+=CARRINHO.map((it,i)=>it.tipo==="bico"
+    ?`<div class="item"><div>⛽ Abastecimento — bico <b>${it.bico}</b></div><a href="#" onclick="carrinhoRemover(${i});return false" style="color:#f87171">✕</a></div>`
+    :`<div class="item"><div>🛍 ${it.qtd}x ${it.nome} <span class="sub">· ${brl(it.preco*it.qtd)}</span></div><a href="#" onclick="carrinhoRemover(${i});return false" style="color:#f87171">✕</a></div>`
+  ).join("");
+  el.innerHTML=html||'<div class="sub">Nenhum item ainda.</div>';
+}
+function carrinhoRemover(i){CARRINHO.splice(i,1);carrinhoRender();}
+function carrinhoAddBico(){
+  const b=(prompt("Número do OUTRO bico que você vai usar:")||"").replace(/\D/g,"");
+  if(!b)return;
+  const bicoP=(document.getElementById("ac-bico").value||"").replace(/\D/g,"");
+  if(b===bicoP||CARRINHO.some(x=>x.tipo==="bico"&&String(x.bico)===b)){alert("Esse bico já está na lista.");return;}
+  CARRINHO.push({tipo:"bico",bico:parseInt(b,10)});carrinhoRender();
+}
+function carrinhoAbrirBusca(){
+  const bx=document.getElementById("carrinho-busca");
+  bx.classList.toggle("esc");
+  if(!bx.classList.contains("esc"))document.getElementById("cb-q").focus();
+}
+document.getElementById("cb-q").addEventListener("input",()=>{
+  clearTimeout(_cbBuscaTimer);
+  _cbBuscaTimer=setTimeout(async()=>{
+    const q=document.getElementById("cb-q").value.trim(),res=document.getElementById("cb-res");
+    if(q.length<2){res.innerHTML="";return;}
+    res.innerHTML='<div class="sub">Buscando…</div>';
+    try{
+      const lista=await req("/cashback/api/produtos?posto="+POSTO+"&q="+encodeURIComponent(q),null);
+      res.innerHTML=(Array.isArray(lista)&&lista.length)
+        ?lista.map(p=>`<div class="item" style="cursor:pointer" onclick='carrinhoAddProduto(${JSON.stringify(p).replace(/'/g,"&#39;")})'>
+            <div>${p.nome}</div><b style="color:#4ade80">${brl(p.preco)}</b></div>`).join("")
+        :'<div class="sub">Nada encontrado.</div>';
+    }catch(e){res.innerHTML='<div class="sub">Falha na busca.</div>';}
+  },450);
+});
+function carrinhoAddProduto(p){
+  let qtd=parseFloat((prompt("Quantidade de \""+p.nome+"\":","1")||"").replace(",","."));
+  if(!qtd||qtd<=0)return;
+  CARRINHO.push({tipo:"produto",produto_id:p.id,nome:p.nome,qtd:qtd,preco:p.preco});
+  document.getElementById("cb-q").value="";document.getElementById("cb-res").innerHTML="";
+  document.getElementById("carrinho-busca").classList.add("esc");
+  carrinhoRender();
+}
+
 async function acionar(){
   const m=document.getElementById("ac-msg");m.className="msg";
   const postoSel=document.getElementById("ac-posto");
@@ -1033,8 +1159,9 @@ async function acionar(){
   if(!posto){m.className="msg erro";m.textContent="Escolha o POSTO acima (ou leia o QR do bico).";garantirPosto();return;}
   m.textContent="Acionando…";
   const r=await req("/cashback/api/acionar",{posto:posto,bico:document.getElementById("ac-bico").value,
-    combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value});
-  if(r.ok){m.textContent="";carregarDash();ligarEspelho();}
+    combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value,
+    itens:(document.getElementById("ac-forma").value==="05"?CARRINHO:[])});
+  if(r.ok){m.textContent="";CARRINHO=[];carrinhoRender();carregarDash();ligarEspelho();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha ao acionar";
     if(r.proxima_liberacao){const d=new Date(r.proxima_liberacao);m.textContent+=" (libera às "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})+")";}}
 }
@@ -1145,7 +1272,7 @@ async function carregarInfoBico(){
 }
 document.getElementById("ac-bico").addEventListener("input",()=>{
   clearTimeout(_infoBicoTimer);
-  _infoBicoTimer=setTimeout(carregarInfoBico,500);
+  _infoBicoTimer=setTimeout(carregarInfoBico,500);try{carrinhoRender();}catch(e){}
 });
 const EH_IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
 async function abrirScanner(){
