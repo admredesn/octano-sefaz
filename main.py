@@ -20,7 +20,7 @@ registrar_rotas_webhook(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-07-23-urlencode",
+                    "build": "2026-07-27-cashback-portal",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -463,6 +463,14 @@ def dfe_casar_manual(empresa_id):
     except Exception as e:
         import traceback
         return jsonify({"erro": str(e), "traceback": traceback.format_exc()[-1500:]}), 500
+
+
+# ── Portal do cliente do CASHBACK (QR code no posto) ────────────────────────
+try:
+    from cashback_portal import bp_cashback
+    app.register_blueprint(bp_cashback)
+except Exception as _e:
+    print("[cashback] portal nao carregou:", _e)
 
 
 # ── Agendador da consulta automatica de NF-e (DistDFe) ──────────────────────
