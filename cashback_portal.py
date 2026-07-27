@@ -467,7 +467,11 @@ def qr_posto():
     import qrcode
     p = (request.args.get("p") or "").strip()
     bico = (request.args.get("bico") or "").strip()
-    alvo = request.host_url.rstrip("/") + "/cashback"
+    # atrás do proxy do Railway o host_url vem http:// — força https (só local fica http)
+    base_url = request.host_url.rstrip("/")
+    if "localhost" not in base_url and "127.0.0.1" not in base_url:
+        base_url = base_url.replace("http://", "https://")
+    alvo = base_url + "/cashback"
     if p:
         alvo += f"?p={p}" + (f"&bico={bico}" if bico else "")
     img = qrcode.make(alvo, box_size=10, border=2)
@@ -696,7 +700,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-1</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-2</div>
 
 <script>
 const API = "";
@@ -967,17 +971,30 @@ async function _decodificarImagem(bmp){
     });
     await _jsqrCarregando;
   }
-  // reduz a foto (fotos de 12MP travam o decoder) e tenta em 2 tamanhos
-  for(const alvo of [900, 1600]){
+  // reduz a foto (12MP trava o decoder) e tenta em VÁRIOS tamanhos, com e sem
+  // inversão de cor (attemptBoth) — foto real tem blur/ângulo/iluminação
+  for(const alvo of [520, 800, 1200, 1800]){
     const esc=Math.min(1, alvo/Math.max(bmp.width,bmp.height));
     const cv=document.createElement("canvas");
     cv.width=Math.round(bmp.width*esc);cv.height=Math.round(bmp.height*esc);
     const cx=cv.getContext("2d");cx.drawImage(bmp,0,0,cv.width,cv.height);
     const img=cx.getImageData(0,0,cv.width,cv.height);
-    const q=window.jsQR(img.data,img.width,img.height);
+    const q=window.jsQR(img.data,img.width,img.height,{inversionAttempts:"attemptBoth"});
     if(q&&q.data)return q.data;
   }
   return null;
+}
+// carrega a foto respeitando a rotação EXIF; se createImageBitmap não aceitar
+// o formato (ex.: HEIC do iPhone), cai pro <img> que o navegador sabe renderizar
+async function _fotoParaBitmap(f){
+  try{return await createImageBitmap(f,{imageOrientation:"from-image"});}catch(e1){}
+  try{return await createImageBitmap(f);}catch(e2){}
+  return await new Promise((ok,err)=>{
+    const url=URL.createObjectURL(f), im=new Image();
+    im.onload=()=>{URL.revokeObjectURL(url);ok(im);};
+    im.onerror=()=>{URL.revokeObjectURL(url);err(new DOMException("formato de foto não suportado","NotSupportedError"));};
+    im.src=url;
+  });
 }
 function scanPorFoto(){document.getElementById("scan-foto").click();}
 document.getElementById("scan-foto").addEventListener("change",async function(){
@@ -986,10 +1003,10 @@ document.getElementById("scan-foto").addEventListener("change",async function(){
   const msg=document.getElementById("scan-msg");
   msg.textContent="Lendo a foto…";
   try{
-    const bmp=await createImageBitmap(f);
+    const bmp=await _fotoParaBitmap(f);
     const texto=await _decodificarImagem(bmp);
     if(texto&&_scanAchou(texto))return;
-    msg.textContent="Não achei o QR na foto — tenta de novo mais perto e com luz, ou digite o número.";
+    msg.textContent="Não achei o QR na foto — enche a tela com o QR (sem cortar as bordas) e evita reflexo. Ou digite o número.";
   }catch(e){msg.textContent="Falha ao ler a foto ("+(e.name||"erro")+"). Digite o número do bico.";}
 });
 
