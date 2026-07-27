@@ -702,7 +702,9 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 
   <!-- SCANNER de QR (câmera) -->
-  <div id="scan-overlay" class="esc" style="position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px">
+  <!-- display controlado SÓ por style.display (inline display:flex vencia a
+       classe .esc e a tela nascia ABERTA por cima de tudo — era ESSE o travamento) -->
+  <div id="scan-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.92);z-index:9999;flex-direction:column;align-items:center;justify-content:center;padding:16px">
     <div style="color:#fff;font-weight:700;margin-bottom:10px">Aponte para o QR do bico</div>
     <video id="scan-video" playsinline muted style="width:100%;max-width:400px;border-radius:12px;border:2px solid #f97316"></video>
     <div id="scan-msg" class="sub" style="margin-top:10px;text-align:center">Abrindo a câmera…</div>
@@ -719,7 +721,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão posto-manual-5</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão overlay-fix-6</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -946,7 +948,7 @@ function _scanAchou(texto){
 const EH_IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
 async function abrirScanner(){
   const ov=document.getElementById("scan-overlay"),vid=document.getElementById("scan-video"),msg=document.getElementById("scan-msg");
-  ov.classList.remove("esc");
+  ov.style.display="flex";
   if(EH_IOS){
     // iPhone/iPad: a câmera ao vivo do WebKit é problemática (trava em app
     // instalado) — vai DIRETO pra câmera nativa de foto, que o iOS faz bem
@@ -1014,7 +1016,7 @@ async function abrirScanner(){
 function fecharScanner(){
   if(_scanTimer){clearInterval(_scanTimer);_scanTimer=null;}
   if(_scanStream){_scanStream.getTracks().forEach(t=>t.stop());_scanStream=null;}
-  document.getElementById("scan-overlay").classList.add("esc");
+  document.getElementById("scan-overlay").style.display="none";
 }
 
 // ---- PLANO C: FOTO do QR pelo app de câmera nativo (funciona em qualquer
