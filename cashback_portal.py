@@ -655,7 +655,10 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div class="sub">Escolha antes de abastecer — o caixa já vai saber.</div>
     <div id="ac-form">
       <label>Bico (número na bomba)</label>
-      <input id="ac-bico" inputmode="numeric" maxlength="3" placeholder="lido do QR ou digite o nº do bico">
+      <div style="display:flex;gap:8px">
+        <input id="ac-bico" inputmode="numeric" maxlength="3" placeholder="digite o nº do bico" style="flex:1">
+        <button onclick="abrirScanner()" style="width:auto;margin:0;padding:0 16px;white-space:nowrap">📷 Escanear</button>
+      </div>
       <label>Combustível</label>
       <select id="ac-comb"></select>
       <label>Forma de pagamento</label>
@@ -674,6 +677,14 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <div style="font-weight:700;margin-bottom:6px">📜 Meus cashbacks</div>
     <div class="lista" id="dh-lista"><div class="sub">Carregando…</div></div>
+  </div>
+
+  <!-- SCANNER de QR (câmera) -->
+  <div id="scan-overlay" class="esc" style="position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px">
+    <div style="color:#fff;font-weight:700;margin-bottom:10px">Aponte para o QR do bico</div>
+    <video id="scan-video" playsinline muted style="width:100%;max-width:400px;border-radius:12px;border:2px solid #f97316"></video>
+    <div id="scan-msg" class="sub" style="margin-top:10px;text-align:center">Abrindo a câmera…</div>
+    <button onclick="fecharScanner()" style="max-width:400px;background:#2a2d3e">Cancelar e digitar o número</button>
   </div>
 
   <div class="card esc" id="pwa-card">
@@ -850,6 +861,72 @@ async function _lvTick(){
 })();
 
 if(tok()) carregarDash(); else mostrar("tela-login");
+
+// ---- SCANNER de QR do bico (câmera no próprio portal) ----
+// Nativo (BarcodeDetector, Android/Chrome) com fallback jsQR (iPhone/Safari).
+// Sempre dá pra cancelar e digitar o número na mão.
+let _scanStream=null,_scanTimer=null,_jsqrCarregando=null;
+function _scanExtrair(texto){
+  // aceita a URL do QR (…/cashback?p=..&bico=N) ou um número puro
+  try{ const u=new URL(texto); const b=u.searchParams.get("bico"); const p=u.searchParams.get("p");
+    if(p&&UUID_RE.test(p)){POSTO=p;localStorage.setItem("cb_posto",p);}
+    if(b)return b.replace(/\D/g,""); }catch(e){}
+  const so=String(texto||"").replace(/\D/g,"");
+  return (so.length>=1&&so.length<=3)?so:null;
+}
+function _scanAchou(texto){
+  const b=_scanExtrair(texto);
+  if(!b)return false;
+  document.getElementById("ac-bico").value=b;
+  fecharScanner();
+  if(navigator.vibrate)navigator.vibrate(80);
+  return true;
+}
+async function abrirScanner(){
+  const ov=document.getElementById("scan-overlay"),vid=document.getElementById("scan-video"),msg=document.getElementById("scan-msg");
+  ov.classList.remove("esc");msg.textContent="Abrindo a câmera…";
+  try{
+    _scanStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});
+    vid.srcObject=_scanStream;await vid.play();
+  }catch(e){msg.textContent="Não consegui abrir a câmera ("+e.name+"). Digite o número do bico.";return;}
+  msg.textContent="Procurando o QR…";
+  if("BarcodeDetector" in window){
+    const det=new BarcodeDetector({formats:["qr_code"]});
+    _scanTimer=setInterval(async()=>{
+      try{const codes=await det.detect(vid);
+        if(codes.length&&_scanAchou(codes[0].rawValue))return;
+      }catch(e){}
+    },300);
+  } else {
+    // fallback: jsQR via canvas (carrega a lib só quando precisa)
+    try{
+      if(!window.jsQR){
+        _jsqrCarregando=_jsqrCarregando||new Promise((ok,err)=>{
+          const s=document.createElement("script");
+          s.src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+          s.onload=ok;s.onerror=err;document.head.appendChild(s);
+        });
+        await _jsqrCarregando;
+      }
+      const cv=document.createElement("canvas"),cx=cv.getContext("2d",{willReadFrequently:true});
+      _scanTimer=setInterval(()=>{
+        try{
+          if(!vid.videoWidth)return;
+          cv.width=vid.videoWidth;cv.height=vid.videoHeight;
+          cx.drawImage(vid,0,0);
+          const img=cx.getImageData(0,0,cv.width,cv.height);
+          const q=window.jsQR(img.data,img.width,img.height);
+          if(q&&q.data)_scanAchou(q.data);
+        }catch(e){}
+      },350);
+    }catch(e){msg.textContent="Leitor indisponível neste navegador — digite o número do bico.";}
+  }
+}
+function fecharScanner(){
+  if(_scanTimer){clearInterval(_scanTimer);_scanTimer=null;}
+  if(_scanStream){_scanStream.getTracks().forEach(t=>t.stop());_scanStream=null;}
+  document.getElementById("scan-overlay").classList.add("esc");
+}
 
 // ---- PWA: service worker + botão de instalação ----
 if ("serviceWorker" in navigator) {
