@@ -40,7 +40,24 @@ ACIONAMENTO_VALIDADE_MIN = 60      # acionamento vale 1h
 JANELA_2H_SEG = 2 * 3600
 
 COMBUSTIVEIS = ["GASOLINA COMUM", "GASOLINA ADITIVADA", "ETANOL", "DIESEL S10", "DIESEL S500"]
-FORMAS = [("01", "Dinheiro"), ("17", "PIX")]
+FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("05", "A Prazo")]
+
+
+def _prazo_liberado(empresa_id, cpf):
+    """Cliente pode comprar A PRAZO neste posto? A liberação é do POSTO:
+    oct_pessoas.aceita_nota_prazo (e sem credito_bloqueado)."""
+    try:
+        p = _sget(f"oct_pessoas?empresa_id=eq.{empresa_id}&documento=eq.{cpf}"
+                  f"&select=aceita_nota_prazo,credito_bloqueado,limite_nota_prazo&limit=1")
+        if not p:
+            return False, "Seu cadastro ainda não existe neste posto — fale com o caixa."
+        if p[0].get("credito_bloqueado"):
+            return False, "Crédito bloqueado neste posto — fale com o caixa."
+        if not p[0].get("aceita_nota_prazo"):
+            return False, "Compra a prazo ainda não liberada pro seu cadastro — fale com o posto."
+        return True, None
+    except Exception as e:
+        return False, "não deu pra verificar o crédito: " + str(e)[:80]
 
 
 # ------------------------------------------------------------------
@@ -339,18 +356,24 @@ def api_acionar():
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
-    # janela 2h: se recebeu (ou tem pendente) há menos de 2h, não deixa acionar
-    corte2h = (datetime.now(timezone.utc) - timedelta(seconds=JANELA_2H_SEG)).isoformat()
-    try:
-        rec = _sget("oct_cashback?chave_pix=eq." + rq.utils.quote(cli.get("chave_pix") or "", safe="")
-                    + "&status=in.(pendente,processando,pago)"
-                    + f"&criado_em=gte.{rq.utils.quote(corte2h, safe='')}&select=criado_em&limit=1")
-        if rec:
-            lib = datetime.fromisoformat(str(rec[0]["criado_em"]).replace("Z", "+00:00")) + timedelta(seconds=JANELA_2H_SEG)
-            return jsonify({"erro": "Você já recebeu cashback nas últimas 2 horas.",
-                            "proxima_liberacao": lib.isoformat()}), 429
-    except Exception:
-        pass
+    # A PRAZO: só com liberação do POSTO no cadastro do cliente (revalida no servidor)
+    if forma == "05":
+        ok, motivo = _prazo_liberado(empresa, cli["cpf"])
+        if not ok:
+            return jsonify({"erro": motivo}), 403
+    # janela 2h (regra do CASHBACK — não vale pro A PRAZO, que pode repetir no dia)
+    if forma != "05":
+        corte2h = (datetime.now(timezone.utc) - timedelta(seconds=JANELA_2H_SEG)).isoformat()
+        try:
+            rec = _sget("oct_cashback?chave_pix=eq." + rq.utils.quote(cli.get("chave_pix") or "", safe="")
+                        + "&status=in.(pendente,processando,pago)"
+                        + f"&criado_em=gte.{rq.utils.quote(corte2h, safe='')}&select=criado_em&limit=1")
+            if rec:
+                lib = datetime.fromisoformat(str(rec[0]["criado_em"]).replace("Z", "+00:00")) + timedelta(seconds=JANELA_2H_SEG)
+                return jsonify({"erro": "Você já recebeu cashback nas últimas 2 horas.",
+                                "proxima_liberacao": lib.isoformat()}), 429
+        except Exception:
+            pass
     try:
         # expira acionamentos antigos ainda aguardando
         _spatch(f"oct_cashback_acionamentos?cliente_cpf=eq.{cli['cpf']}&status=eq.aguardando",
@@ -377,6 +400,19 @@ def api_acionar():
                         "validade_min": ACIONAMENTO_VALIDADE_MIN})
     except Exception as e:
         return jsonify({"erro": "falha ao acionar: " + str(e)[:200]}), 500
+
+
+@bp_cashback.route("/cashback/api/prazo-status", methods=["GET"])
+def api_prazo_status():
+    """O cliente logado pode comprar A PRAZO neste posto? (mostra/esconde a opção)"""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    posto = _uuid_ok(request.args.get("posto"))
+    if not posto:
+        return jsonify({"ok": True, "prazo": False})
+    ok, motivo = _prazo_liberado(posto, cli["cpf"])
+    return jsonify({"ok": True, "prazo": ok, "motivo": motivo})
 
 
 @bp_cashback.route("/cashback/api/bico", methods=["GET"])
@@ -440,7 +476,7 @@ def api_acionamento_live():
         return jsonify({"ok": True, "fase": "sem_acionamento"})
     ac = acs[0]
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
-            ("id", "status", "bico", "combustivel", "forma", "criado_em")}}
+            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero")}}
     bico = ac.get("bico")
 
     # cashback gerado depois do acionamento? (fase final)
@@ -840,7 +876,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão bico-info-7</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão a-prazo-8</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -872,6 +908,7 @@ if (BICO_URL) {
 }
 
 function mostrar(id){["tela-login","tela-cad","tela-dash"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
+function nomeForma(f){return f==="17"?"PIX":f==="05"?"A PRAZO":"Dinheiro";}
 function tok(){return localStorage.getItem("cb_token")||"";}
 function brl(v){return "R$ "+Number(v||0).toLocaleString("pt-BR",{minimumFractionDigits:2});}
 function mascaraCpf(el){el.addEventListener("input",()=>{let v=el.value.replace(/\D/g,"").slice(0,11);el.value=v.replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d{1,2})$/,"$1-$2");});}
@@ -946,13 +983,12 @@ async function carregarDash(){
   const at=document.getElementById("ac-ativo"),fm=document.getElementById("ac-form");
   if(r.acionamento){
     fm.classList.add("esc");at.classList.remove("esc");
-    at.innerHTML="✅ <b>Benefício acionado!</b><br>"+
+    at.innerHTML="✅ <b>"+(r.acionamento.forma==="05"?"Compra A PRAZO acionada!":"Benefício acionado!")+"</b><br>"+
       (r.acionamento.bico?("Bico "+r.acionamento.bico+" · "):"")+
-      (r.acionamento.combustivel||"Combustível") + " · " +
-      (r.acionamento.forma==="17"?"PIX":"Dinheiro") +
+      (r.acionamento.combustivel||"Combustível") + " · " + nomeForma(r.acionamento.forma) +
       "<br>Vá até a bomba e abasteça — acompanhe abaixo.<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
     ligarEspelho();
-  } else {fm.classList.remove("esc");at.classList.add("esc");garantirPosto();}
+  } else {fm.classList.remove("esc");at.classList.add("esc");garantirPosto();verificarPrazo();}
   const lst=document.getElementById("dh-lista");
   if(!(r.cashbacks||[]).length){lst.innerHTML='<div class="sub">Nenhum cashback ainda — abasteça para começar! 🚗</div>';}
   else lst.innerHTML=r.cashbacks.map(c=>{
@@ -961,6 +997,18 @@ async function carregarDash(){
     const q=c.quando?new Date(c.quando).toLocaleDateString("pt-BR")+" "+new Date(c.quando).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}):"";
     return `<div class="item"><div><b>${brl(c.valor)}</b> <span class="sub">· ${Number(c.litros||0).toFixed(1)} L${c.posto?" · "+c.posto:""}</span><br><span class="sub">${q}</span></div><span class="tag ${cls}">${rot}</span></div>`;
   }).join("");
+}
+
+// mostra a opção A PRAZO só pra cliente LIBERADO pelo posto (revalidado no servidor)
+async function verificarPrazo(){
+  const sel=document.getElementById("ac-forma");
+  const tem=[...sel.options].some(o=>o.value==="05");
+  if(!POSTO){if(tem)sel.querySelector('option[value="05"]').remove();return;}
+  try{
+    const r=await req("/cashback/api/prazo-status?posto="+POSTO,null);
+    if(r.prazo&&!tem)sel.insertAdjacentHTML("beforeend",'<option value="05">🧾 A Prazo (minha conta no posto)</option>');
+    if(!r.prazo&&tem)sel.querySelector('option[value="05"]').remove();
+  }catch(e){}
 }
 
 // sem posto identificado (entrou sem QR): mostra o seletor de postos
@@ -1023,13 +1071,20 @@ async function _lvTick(){
     fase.textContent="✅ Abastecimento concluído — bico "+(ac.bico||"?");
     num.textContent=brl(a.valor||a.valor_total||0);
     det.textContent=Number(a.litros||0).toFixed(2)+" L de "+(a.produto_nome||"combustível")+
-      ". Agora pague no caixa em "+(ac.forma==="17"?"PIX":"Dinheiro")+" 💳";
+      (ac.forma==="05"
+        ? ". Vai direto pra sua CONTA no posto — só assinar a via no caixa 🧾"
+        : ". Agora pague no caixa em "+nomeForma(ac.forma)+" 💳");
   } else if(r.fase==="cashback"){
     const c=r.cashback||{};
     fase.textContent=c.status==="pago"?"🎉 Cashback PAGO no seu Pix!":"🕐 Cashback a caminho…";
     num.textContent=brl(c.valor_cashback||0);
     det.textContent=c.status==="pago"?"Confira seu extrato — e obrigado pela preferência!":"Pagamento em processamento (cai em instantes).";
     if(c.status==="pago"){clearInterval(_lvTimer);_lvTimer=null;setTimeout(carregarDash,4000);}
+  } else if(r.fase==="usado"&&ac.forma==="05"){
+    fase.textContent="🧾 Venda A PRAZO lançada na sua conta!";
+    num.textContent=ac.venda_numero?("cupom "+ac.venda_numero):"✓";
+    det.textContent="Obrigado pela preferência — bom trajeto! ⛽";
+    clearInterval(_lvTimer);_lvTimer=null;setTimeout(carregarDash,5000);
   } else { // usado / expirado / cancelado
     fase.textContent="Acionamento "+r.fase;num.textContent="—";det.textContent="";
     if(r.fase==="expirado"||r.fase==="cancelado")desligarEspelho();
