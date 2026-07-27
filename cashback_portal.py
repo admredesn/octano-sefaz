@@ -672,6 +672,10 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div style="font-weight:700">🎁 Usar meu cashback agora</div>
     <div class="sub">Escolha antes de abastecer — o caixa já vai saber.</div>
     <div id="ac-form">
+      <div id="ac-posto-box" class="esc">
+        <label>Posto</label>
+        <select id="ac-posto"><option value="">Carregando postos…</option></select>
+      </div>
       <label>Bico (número na bomba)</label>
       <div style="display:flex;gap:8px">
         <input id="ac-bico" inputmode="numeric" maxlength="3" placeholder="digite o nº do bico" style="flex:1">
@@ -715,7 +719,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-4</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão posto-manual-5</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -824,7 +828,7 @@ async function carregarDash(){
       (r.acionamento.forma==="17"?"PIX":"Dinheiro") +
       "<br>Vá até a bomba e abasteça — acompanhe abaixo.<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
     ligarEspelho();
-  } else {fm.classList.remove("esc");at.classList.add("esc");}
+  } else {fm.classList.remove("esc");at.classList.add("esc");garantirPosto();}
   const lst=document.getElementById("dh-lista");
   if(!(r.cashbacks||[]).length){lst.innerHTML='<div class="sub">Nenhum cashback ainda — abasteça para começar! 🚗</div>';}
   else lst.innerHTML=r.cashbacks.map(c=>{
@@ -835,9 +839,28 @@ async function carregarDash(){
   }).join("");
 }
 
+// sem posto identificado (entrou sem QR): mostra o seletor de postos
+async function garantirPosto(){
+  const box=document.getElementById("ac-posto-box"),sel=document.getElementById("ac-posto");
+  if(POSTO){box.classList.add("esc");return;}
+  box.classList.remove("esc");
+  if(sel.options.length<=1){
+    try{
+      const ps=await fetch(API+"/cashback/api/postos").then(r=>r.json());
+      sel.innerHTML='<option value="">Escolha o posto…</option>'+
+        (Array.isArray(ps)?ps:[]).map(p=>`<option value="${p.id}">${p.nome}</option>`).join("");
+    }catch(e){sel.innerHTML='<option value="">Falha ao listar postos</option>';}
+  }
+  sel.onchange=()=>{if(sel.value){POSTO=sel.value;localStorage.setItem("cb_posto",POSTO);}};
+}
+
 async function acionar(){
-  const m=document.getElementById("ac-msg");m.className="msg";m.textContent="Acionando…";
-  const r=await req("/cashback/api/acionar",{posto:POSTO,bico:document.getElementById("ac-bico").value,
+  const m=document.getElementById("ac-msg");m.className="msg";
+  const postoSel=document.getElementById("ac-posto");
+  const posto=POSTO||(postoSel&&postoSel.value)||"";
+  if(!posto){m.className="msg erro";m.textContent="Escolha o POSTO acima (ou leia o QR do bico).";garantirPosto();return;}
+  m.textContent="Acionando…";
+  const r=await req("/cashback/api/acionar",{posto:posto,bico:document.getElementById("ac-bico").value,
     combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value});
   if(r.ok){m.textContent="";carregarDash();ligarEspelho();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha ao acionar";
