@@ -522,6 +522,83 @@ def qr_posto():
 
 
 # ------------------------------------------------------------------
+# PDF de QR codes dos bicos (impressão) — individual ou em massa.
+#   GET /cashback/qr-pdf?p=<empresa>&bicos=3        (um bico)
+#   GET /cashback/qr-pdf?p=<empresa>&bicos=1,2,5    (lista)
+#   GET /cashback/qr-pdf?p=<empresa>                (TODOS os bicos do cadastro)
+# ------------------------------------------------------------------
+@bp_cashback.route("/cashback/qr-pdf", methods=["GET"])
+def qr_pdf():
+    import io
+    import qrcode
+    from PIL import Image, ImageDraw, ImageFont
+    posto = _uuid_ok(request.args.get("p"))
+    if not posto:
+        return jsonify({"erro": "parâmetro p (empresa) inválido"}), 400
+    # bicos: da URL ou do cadastro (oct_bicos)
+    brutos = _so_digitos_lista(request.args.get("bicos"))
+    if not brutos:
+        try:
+            rows = _sget(f"oct_bicos?empresa_id=eq.{posto}&select=numero&order=numero")
+            brutos = sorted({int(r["numero"]) for r in rows if r.get("numero") is not None})
+        except Exception:
+            brutos = []
+    if not brutos:
+        return jsonify({"erro": "nenhum bico encontrado (cadastre os bicos ou informe ?bicos=1,2,3)"}), 404
+    # nome do posto (cabeçalho do cartão)
+    nome_posto = "CASHBACK"
+    try:
+        e = _sget(f"oct_empresas?id=eq.{posto}&select=nome,nome_fantasia")
+        if e:
+            nome_posto = (e[0].get("nome_fantasia") or e[0].get("nome") or "CASHBACK")[:36].upper()
+    except Exception:
+        pass
+
+    base_url = request.host_url.rstrip("/")
+    if "localhost" not in base_url and "127.0.0.1" not in base_url:
+        base_url = base_url.replace("http://", "https://")
+
+    LARG, ALT, COLS, LINHAS = 1240, 1754, 2, 3   # A4 ~150dpi, 6 cartões/página
+    try:
+        F_TIT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 64)
+        F_SUB = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+    except Exception:
+        F_TIT = F_SUB = ImageFont.load_default()
+    paginas = []
+    for p0 in range(0, len(brutos), COLS * LINHAS):
+        pag = Image.new("RGB", (LARG, ALT), "white")
+        dr = ImageDraw.Draw(pag)
+        cw, ch = LARG // COLS, ALT // LINHAS
+        for i, bico in enumerate(brutos[p0:p0 + COLS * LINHAS]):
+            cx0, cy0 = (i % COLS) * cw, (i // COLS) * ch
+            dr.rectangle([cx0 + 14, cy0 + 14, cx0 + cw - 14, cy0 + ch - 14], outline="#bbbbbb", width=2)
+            qr = qrcode.make(f"{base_url}/cashback?p={posto}&bico={bico}", box_size=10, border=2).convert("RGB")
+            qs = min(cw, ch) - 240
+            pag.paste(qr.resize((qs, qs)), (cx0 + (cw - qs) // 2, cy0 + 64))
+            t = nome_posto
+            dr.text((cx0 + (cw - dr.textlength(t, font=F_SUB)) / 2, cy0 + 26), t, fill="#666666", font=F_SUB)
+            t = f"BICO {bico}"
+            dr.text((cx0 + (cw - dr.textlength(t, font=F_TIT)) / 2, cy0 + 64 + qs + 6), t, fill="black", font=F_TIT)
+            t = "Cashback: aponte a camera e ative"
+            dr.text((cx0 + (cw - dr.textlength(t, font=F_SUB)) / 2, cy0 + 64 + qs + 84), t, fill="#666666", font=F_SUB)
+        paginas.append(pag)
+    buf = io.BytesIO()
+    paginas[0].save(buf, format="PDF", save_all=True, append_images=paginas[1:], resolution=150)
+    nome_arq = f"qrcodes-bicos-{brutos[0]}" + (f"-a-{brutos[-1]}" if len(brutos) > 1 else "") + ".pdf"
+    return Response(buf.getvalue(), mimetype="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{nome_arq}"'})
+
+
+def _so_digitos_lista(txt):
+    out = []
+    for peca in str(txt or "").split(","):
+        peca = re.sub(r"\D", "", peca)
+        if peca:
+            out.append(int(peca))
+    return sorted(set(out))
+
+
+# ------------------------------------------------------------------
 # PWA: manifest + service worker + ícone (vira "app" na tela inicial)
 # ------------------------------------------------------------------
 @bp_cashback.route("/cashback/manifest.json", methods=["GET"])
