@@ -477,6 +477,82 @@ def qr_posto():
 
 
 # ------------------------------------------------------------------
+# PWA: manifest + service worker + ícone (vira "app" na tela inicial)
+# ------------------------------------------------------------------
+@bp_cashback.route("/cashback/manifest.json", methods=["GET"])
+def manifest():
+    return jsonify({
+        "name": "Cashback do Posto",
+        "short_name": "Cashback",
+        "description": "Abasteça e receba dinheiro de volta no seu Pix",
+        "start_url": "/cashback",
+        "scope": "/cashback",
+        "display": "standalone",
+        "orientation": "portrait",
+        "background_color": "#0b0d14",
+        "theme_color": "#f97316",
+        "icons": [
+            {"src": "/cashback/icone.png?t=192", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+            {"src": "/cashback/icone.png?t=512", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
+        ],
+    })
+
+
+@bp_cashback.route("/cashback/icone.png", methods=["GET"])
+def icone():
+    """Ícone do app gerado na hora (gota de combustível + cifrão), sem arquivo."""
+    import io
+    from PIL import Image, ImageDraw
+    try:
+        tam = int(request.args.get("t") or 192)
+    except ValueError:
+        tam = 192
+    tam = 512 if tam > 256 else 192
+    img = Image.new("RGB", (tam, tam), "#f97316")
+    dr = ImageDraw.Draw(img)
+    m = tam / 192.0   # escala
+    # gota (triângulo + círculo) branca
+    cx, topo, raio = tam / 2, 34 * m, 52 * m
+    cy = tam - 62 * m - raio / 2
+    dr.polygon([(cx, topo), (cx - raio, cy), (cx + raio, cy)], fill="white")
+    dr.ellipse([cx - raio, cy - raio * 0.9, cx + raio, cy + raio * 1.1], fill="white")
+    # cifrão laranja dentro da gota (traços simples)
+    e = 10 * m
+    dr.line([(cx, cy - raio * 0.55), (cx, cy + raio * 0.75)], fill="#f97316", width=int(e * 0.8))
+    dr.arc([cx - raio * 0.45, cy - raio * 0.5, cx + raio * 0.45, cy + raio * 0.1],
+           start=90, end=340, fill="#f97316", width=int(e * 0.7))
+    dr.arc([cx - raio * 0.45, cy - raio * 0.05, cx + raio * 0.45, cy + raio * 0.55],
+           start=270, end=160, fill="#f97316", width=int(e * 0.7))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@bp_cashback.route("/cashback/sw.js", methods=["GET"])
+def service_worker():
+    # network-first (dados sempre frescos); casca offline básica
+    sw = """
+self.addEventListener('install', e => self.skipWaiting());
+self.addEventListener('activate', e => e.waitUntil(clients.claim()));
+self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+  e.respondWith(
+    fetch(e.request).then(r => {
+      if (e.request.url.includes('/cashback') && r.ok) {
+        const cp = r.clone();
+        caches.open('cb-v1').then(c => c.put(e.request, cp));
+      }
+      return r;
+    }).catch(() => caches.match(e.request))
+  );
+});
+"""
+    return Response(sw, mimetype="application/javascript",
+                    headers={"Service-Worker-Allowed": "/cashback"})
+
+
+# ------------------------------------------------------------------
 # Página do cliente (mobile-first, um arquivo, sem credencial)
 # ------------------------------------------------------------------
 @bp_cashback.route("/cashback", methods=["GET"])
@@ -488,6 +564,13 @@ PAGINA_HTML = r"""<!DOCTYPE html>
 <html lang="pt-BR"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cashback do Posto</title>
+<link rel="manifest" href="/cashback/manifest.json">
+<meta name="theme-color" content="#f97316">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Cashback">
+<link rel="apple-touch-icon" href="/cashback/icone.png?t=192">
+<link rel="icon" type="image/png" href="/cashback/icone.png?t=192">
 <style>
   :root{--lar:#f97316;--ok:#16a34a;--fundo:#0b0d14;--card:#131722;--borda:#232838;--txt:#e5e9f0;--mut:#8b93a5}
   *{box-sizing:border-box;margin:0;padding:0;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}
@@ -591,6 +674,12 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   <div class="card">
     <div style="font-weight:700;margin-bottom:6px">📜 Meus cashbacks</div>
     <div class="lista" id="dh-lista"><div class="sub">Carregando…</div></div>
+  </div>
+
+  <div class="card esc" id="pwa-card">
+    <div style="font-weight:700">📲 Vire um app no seu celular</div>
+    <div class="sub" id="pwa-txt">Instale para abrir direto da tela inicial, como um aplicativo.</div>
+    <button id="pwa-btn" class="esc" onclick="pwaInstalar()">Instalar o app</button>
   </div>
 </div>
 
@@ -755,6 +844,36 @@ async function _lvTick(){
 })();
 
 if(tok()) carregarDash(); else mostrar("tela-login");
+
+// ---- PWA: service worker + botão de instalação ----
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/cashback/sw.js", { scope: "/cashback" }).catch(()=>{});
+}
+let _pwaEvt=null;
+const _standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+window.addEventListener("beforeinstallprompt", e => {
+  e.preventDefault(); _pwaEvt = e;
+  if(!_standalone){
+    document.getElementById("pwa-card").classList.remove("esc");
+    document.getElementById("pwa-btn").classList.remove("esc");
+  }
+});
+async function pwaInstalar(){
+  if(!_pwaEvt) return;
+  _pwaEvt.prompt();
+  const r = await _pwaEvt.userChoice;
+  if(r && r.outcome === "accepted") document.getElementById("pwa-card").classList.add("esc");
+  _pwaEvt = null;
+}
+// iPhone/iPad (Safari não tem prompt): mostra a instrução manual
+(function(){
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if(ios && !_standalone){
+    document.getElementById("pwa-card").classList.remove("esc");
+    document.getElementById("pwa-txt").innerHTML =
+      "No iPhone: toque em <b>Compartilhar</b> (⬆️) e depois em <b>Adicionar à Tela de Início</b>.";
+  }
+})();
 </script>
 </div></body></html>
 """
