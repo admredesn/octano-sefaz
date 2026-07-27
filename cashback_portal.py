@@ -413,9 +413,14 @@ def api_acionar():
         itens = _sanear_itens(d.get("itens"))
         if itens:
             reg["itens"] = itens
-        # prazo sem bico só faz sentido com produtos no carrinho
-        if forma == "05" and not bico and not any(i.get("tipo") == "produto" for i in itens):
-            return jsonify({"erro": "Informe o bico do abastecimento ou adicione produtos ao carrinho."}), 400
+        # regras do A PRAZO: combustível vazio + sem bico = SÓ PRODUTOS (exige itens);
+        # combustível escolhido = vai abastecer (exige o bico)
+        if forma == "05" and not bico:
+            if comb:
+                return jsonify({"erro": "Escolheu o combustível: informe o número do BICO "
+                                        "(ou deixe o combustível vazio para só produtos)."}), 400
+            if not any(i.get("tipo") == "produto" for i in itens):
+                return jsonify({"erro": "Adicione produtos ao carrinho — ou informe o bico se for abastecer."}), 400
         placa = re.sub(r"[^A-Za-z0-9]", "", str(d.get("placa") or "")).upper()[:8]
         if placa:
             reg["placa"] = placa
@@ -997,7 +1002,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-12</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão so-produto-13</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1021,7 +1026,11 @@ let POSTO = new URLSearchParams(location.search).get("p") || localStorage.getIte
 if (!UUID_RE.test(POSTO)) { POSTO = ""; localStorage.removeItem("cb_posto"); }
 if (POSTO) localStorage.setItem("cb_posto", POSTO);
 const COMBS = ["GASOLINA COMUM","GASOLINA ADITIVADA","ETANOL","DIESEL S10","DIESEL S500"];
-document.getElementById("ac-comb").innerHTML = COMBS.map(c=>`<option>${c}</option>`).join("");
+// começa VAZIO: preenche pelo QR do bico ou manualmente. Vazio + sem bico ao
+// acionar = compra SÓ DE PRODUTOS (vai direto pra emissão no caixa).
+document.getElementById("ac-comb").innerHTML =
+  '<option value="">— sem abastecimento (só produtos) —</option>' +
+  COMBS.map(c=>`<option>${c}</option>`).join("");
 const BICO_URL = (new URLSearchParams(location.search).get("bico")||"").replace(/\D/g,"");
 if (BICO_URL) {
   document.getElementById("ac-bico").value = BICO_URL;
@@ -1104,10 +1113,14 @@ async function carregarDash(){
   const at=document.getElementById("ac-ativo"),fm=document.getElementById("ac-form");
   if(r.acionamento){
     fm.classList.add("esc");at.classList.remove("esc");
+    const soProd=!r.acionamento.bico&&!r.acionamento.combustivel;
     at.innerHTML="✅ <b>"+(r.acionamento.forma==="05"?"Compra A PRAZO acionada!":"Benefício acionado!")+"</b><br>"+
-      (r.acionamento.bico?("Bico "+r.acionamento.bico+" · "):"")+
-      (r.acionamento.combustivel||"Combustível") + " · " + nomeForma(r.acionamento.forma) +
-      "<br>Vá até a bomba e abasteça — acompanhe abaixo.<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
+      (soProd
+        ? ("🛍 Só produtos · " + nomeForma(r.acionamento.forma) + "<br>Retire seus produtos no caixa — a emissão sai sozinha.")
+        : ((r.acionamento.bico?("Bico "+r.acionamento.bico+" · "):"")+
+           (r.acionamento.combustivel||"Combustível") + " · " + nomeForma(r.acionamento.forma) +
+           "<br>Vá até a bomba e abasteça — acompanhe abaixo."))+
+      "<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
     ligarEspelho();
   } else {fm.classList.remove("esc");at.classList.add("esc");garantirPosto();verificarPrazo();}
   const lst=document.getElementById("dh-lista");
@@ -1241,6 +1254,16 @@ async function acionar(){
   const postoSel=document.getElementById("ac-posto");
   const posto=POSTO||(postoSel&&postoSel.value)||"";
   if(!posto){m.className="msg erro";m.textContent="Escolha o POSTO acima (ou leia o QR do bico).";garantirPosto();return;}
+  // regras do A PRAZO: combustível VAZIO + sem bico = só produtos (precisa ter itens);
+  // combustível escolhido = vai abastecer (precisa do bico)
+  const fPag=document.getElementById("ac-forma").value;
+  const bicoV=(document.getElementById("ac-bico").value||"").replace(/\D/g,"");
+  const combV=document.getElementById("ac-comb").value;
+  if(fPag==="05"){
+    const temProduto=CARRINHO.some(x=>x.tipo==="produto");
+    if(!bicoV&&!combV&&!temProduto){m.className="msg erro";m.textContent="Adicione produtos ao carrinho — ou informe o bico se for abastecer.";return;}
+    if(!bicoV&&combV){m.className="msg erro";m.textContent="Escolheu o combustível: informe o Nº DO BICO (ou deixe o combustível vazio para só produtos).";return;}
+  }
   m.textContent="Acionando…";
   const r=await req("/cashback/api/acionar",{posto:posto,bico:document.getElementById("ac-bico").value,
     combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value,
@@ -1360,6 +1383,11 @@ async function carregarInfoBico(){
 }
 document.getElementById("ac-bico").addEventListener("input",()=>{
   clearTimeout(_infoBicoTimer);
+  // apagou o bico -> combustível volta a vazio (vazio = só produtos)
+  if(!(document.getElementById("ac-bico").value||"").replace(/\D/g,"")){
+    document.getElementById("ac-comb").value="";
+    document.getElementById("ac-bico-info").textContent="";
+  }
   _infoBicoTimer=setTimeout(carregarInfoBico,500);try{carrinhoRender();}catch(e){}
 });
 const EH_IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
