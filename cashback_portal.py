@@ -884,11 +884,30 @@ function _scanAchou(texto){
 }
 async function abrirScanner(){
   const ov=document.getElementById("scan-overlay"),vid=document.getElementById("scan-video"),msg=document.getElementById("scan-msg");
-  ov.classList.remove("esc");msg.textContent="Abrindo a câmera…";
+  ov.classList.remove("esc");msg.textContent="Abrindo a câmera… (se pedir permissão, toque em PERMITIR)";
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    msg.textContent="Este navegador não dá acesso à câmera. Abra no Chrome/Safari ou digite o número do bico.";return;
+  }
+  // timeout: alguns navegadores seguram o prompt de permissão indefinidamente
+  const comTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new DOMException("demorou demais","TimeoutError")),ms))]);
   try{
-    _scanStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});
-    vid.srcObject=_scanStream;await vid.play();
-  }catch(e){msg.textContent="Não consegui abrir a câmera ("+e.name+"). Digite o número do bico.";return;}
+    try{
+      _scanStream=await comTimeout(navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false}),9000);
+    }catch(e1){
+      // fallback: qualquer câmera disponível
+      _scanStream=await comTimeout(navigator.mediaDevices.getUserMedia({video:true,audio:false}),9000);
+    }
+    vid.setAttribute("playsinline","");vid.muted=true;
+    vid.srcObject=_scanStream;
+    try{await vid.play();}catch(e){/* alguns navegadores tocam sozinhos */}
+  }catch(e){
+    let dica="Digite o número do bico.";
+    if(e&&e.name==="NotAllowedError")dica="Permissão negada — toque no cadeado 🔒 da barra do navegador > Permissões > Câmera > Permitir, e tente de novo. Ou digite o número.";
+    else if(e&&e.name==="TimeoutError")dica="O pedido de permissão não apareceu — confira se a câmera não está bloqueada pro site (cadeado 🔒 na barra). Ou digite o número.";
+    else if(e&&e.name==="NotFoundError")dica="Nenhuma câmera encontrada neste aparelho. Digite o número do bico.";
+    msg.textContent="Câmera não abriu ("+(e&&e.name||"erro")+"). "+dica;
+    return;
+  }
   msg.textContent="Procurando o QR…";
   if("BarcodeDetector" in window){
     const det=new BarcodeDetector({formats:["qr_code"]});
