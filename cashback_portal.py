@@ -902,8 +902,12 @@ PAGINA_HTML = r"""<!DOCTYPE html>
         <div class="sub" style="margin:2px 0 8px">O abastecimento do bico acima já entra. Adicione outros itens se precisar.</div>
         <div id="carrinho-lista"></div>
         <div style="display:flex;gap:8px;margin-top:8px">
-          <button type="button" onclick="carrinhoAddBico()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">⛽ + outro bico</button>
+          <button type="button" onclick="carrinhoAbrirBico()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">⛽ + outro bico</button>
           <button type="button" onclick="carrinhoAbrirBusca()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">🛍 + produto</button>
+        </div>
+        <div id="carrinho-bico-add" class="esc" style="margin-top:8px;display:flex;gap:8px">
+          <input id="cb-bico-num" inputmode="numeric" maxlength="3" placeholder="nº do outro bico" style="flex:1">
+          <button type="button" onclick="carrinhoConfirmarBico()" style="width:auto;margin:0;padding:0 18px;background:#16a34a">OK</button>
         </div>
         <div id="carrinho-busca" class="esc" style="margin-top:8px">
           <input id="cb-q" placeholder="Digite o nome do produto (mín. 2 letras)" autocomplete="off">
@@ -947,7 +951,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão carrinho-9</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão carrinho-10</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1116,18 +1120,32 @@ function carrinhoRender(){
   el.innerHTML=html||'<div class="sub">Nenhum item ainda.</div>';
 }
 function carrinhoRemover(i){CARRINHO.splice(i,1);carrinhoRender();}
-function carrinhoAddBico(){
-  const b=(prompt("Número do OUTRO bico que você vai usar:")||"").replace(/\D/g,"");
+// "+ outro bico": campo na tela (prompt() não funciona no app instalado do iPhone)
+function carrinhoAbrirBico(){
+  const bx=document.getElementById("carrinho-bico-add");
+  bx.classList.toggle("esc");
+  if(!bx.classList.contains("esc"))document.getElementById("cb-bico-num").focus();
+}
+function carrinhoConfirmarBico(){
+  const inp=document.getElementById("cb-bico-num");
+  const b=(inp.value||"").replace(/\D/g,"");
   if(!b)return;
   const bicoP=(document.getElementById("ac-bico").value||"").replace(/\D/g,"");
-  if(b===bicoP||CARRINHO.some(x=>x.tipo==="bico"&&String(x.bico)===b)){alert("Esse bico já está na lista.");return;}
-  CARRINHO.push({tipo:"bico",bico:parseInt(b,10)});carrinhoRender();
+  const m=document.getElementById("ac-msg");
+  if(b===bicoP||CARRINHO.some(x=>x.tipo==="bico"&&String(x.bico)===b)){
+    m.className="msg erro";m.textContent="O bico "+b+" já está na lista.";return;
+  }
+  m.textContent="";
+  CARRINHO.push({tipo:"bico",bico:parseInt(b,10)});
+  inp.value="";document.getElementById("carrinho-bico-add").classList.add("esc");
+  carrinhoRender();
 }
 function carrinhoAbrirBusca(){
   const bx=document.getElementById("carrinho-busca");
   bx.classList.toggle("esc");
   if(!bx.classList.contains("esc"))document.getElementById("cb-q").focus();
 }
+let _cbResultados=[];
 document.getElementById("cb-q").addEventListener("input",()=>{
   clearTimeout(_cbBuscaTimer);
   _cbBuscaTimer=setTimeout(async()=>{
@@ -1135,17 +1153,26 @@ document.getElementById("cb-q").addEventListener("input",()=>{
     if(q.length<2){res.innerHTML="";return;}
     res.innerHTML='<div class="sub">Buscando…</div>';
     try{
-      const lista=await req("/cashback/api/produtos?posto="+POSTO+"&q="+encodeURIComponent(q),null);
-      res.innerHTML=(Array.isArray(lista)&&lista.length)
-        ?lista.map(p=>`<div class="item" style="cursor:pointer" onclick='carrinhoAddProduto(${JSON.stringify(p).replace(/'/g,"&#39;")})'>
-            <div>${p.nome}</div><b style="color:#4ade80">${brl(p.preco)}</b></div>`).join("")
+      // fetch direto: o helper req() espalha a resposta num objeto e DESTRÓI arrays
+      const lista=await fetch(API+"/cashback/api/produtos?posto="+POSTO+"&q="+encodeURIComponent(q),
+        {headers:{"Authorization":"Bearer "+tok()}}).then(r=>r.json());
+      _cbResultados=Array.isArray(lista)?lista:[];
+      res.innerHTML=_cbResultados.length
+        ?_cbResultados.map((p,i)=>`<div class="item">
+            <div style="flex:1;min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.nome}</div><span class="sub">${brl(p.preco)}</span></div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <input id="cb-qtd-${i}" inputmode="numeric" value="1" style="width:54px;padding:8px;text-align:center">
+              <button type="button" onclick="carrinhoAddProduto(${i})" style="width:auto;margin:0;padding:8px 14px;background:#16a34a">+</button>
+            </div></div>`).join("")
         :'<div class="sub">Nada encontrado.</div>';
     }catch(e){res.innerHTML='<div class="sub">Falha na busca.</div>';}
   },450);
 });
-function carrinhoAddProduto(p){
-  let qtd=parseFloat((prompt("Quantidade de \""+p.nome+"\":","1")||"").replace(",","."));
-  if(!qtd||qtd<=0)return;
+function carrinhoAddProduto(i){
+  const p=_cbResultados[i];
+  if(!p)return;
+  const qtd=parseFloat(String(document.getElementById("cb-qtd-"+i).value||"1").replace(",","."))||1;
+  if(qtd<=0)return;
   CARRINHO.push({tipo:"produto",produto_id:p.id,nome:p.nome,qtd:qtd,preco:p.preco});
   document.getElementById("cb-q").value="";document.getElementById("cb-res").innerHTML="";
   document.getElementById("carrinho-busca").classList.add("esc");
