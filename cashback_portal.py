@@ -330,6 +330,11 @@ def api_acionar():
     empresa = _uuid_ok(d.get("posto"))
     comb = str(d.get("combustivel") or "").strip().upper()
     forma = str(d.get("forma") or "").strip()
+    bico = None
+    try:
+        bico = int(str(d.get("bico") or "").strip() or 0) or None
+    except ValueError:
+        bico = None
     if not empresa:
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
@@ -354,15 +359,93 @@ def api_acionar():
             "cpf": cli["cpf"], "nome": cli["nome"], "telefone": cli.get("telefone"),
             "email": cli.get("email"), "chave_pix": cli.get("chave_pix"),
         })
-        novo = _spost("oct_cashback_acionamentos", {
+        reg = {
             "empresa_id": empresa, "cliente_cpf": cli["cpf"], "cliente_nome": cli["nome"],
             "pessoa_id": pessoa_id, "combustivel": comb or None, "forma": forma,
             "status": "aguardando",
-        })
+        }
+        if bico:
+            reg["bico"] = bico
+        try:
+            novo = _spost("oct_cashback_acionamentos", reg)
+        except RuntimeError as e:
+            if "Could not find the" not in str(e):
+                raise
+            reg.pop("bico", None)   # tabela ainda sem a coluna bico
+            novo = _spost("oct_cashback_acionamentos", reg)
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
                         "validade_min": ACIONAMENTO_VALIDADE_MIN})
     except Exception as e:
         return jsonify({"erro": "falha ao acionar: " + str(e)[:200]}), 500
+
+
+@bp_cashback.route("/cashback/api/acionamento/live", methods=["GET"])
+def api_acionamento_live():
+    """Espelho do abastecimento p/ o acionamento mais recente do cliente.
+    Fases: aguardando_inicio -> abastecendo (volume ao vivo, oct_bico_live
+    publicado pelo núcleo) -> concluido (litros/valor do abastecimento) ->
+    usado (venda emitida) + cashback (pendente/pago)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    corte = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    try:
+        acs = _sget(f"oct_cashback_acionamentos?cliente_cpf=eq.{cli['cpf']}"
+                    f"&criado_em=gte.{rq.utils.quote(corte, safe='')}"
+                    f"&order=criado_em.desc&limit=1")
+    except Exception:
+        acs = []
+    if not acs:
+        return jsonify({"ok": True, "fase": "sem_acionamento"})
+    ac = acs[0]
+    resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
+            ("id", "status", "bico", "combustivel", "forma", "criado_em")}}
+    bico = ac.get("bico")
+
+    # cashback gerado depois do acionamento? (fase final)
+    try:
+        cbs = _sget("oct_cashback?chave_pix=eq." + rq.utils.quote(cli.get("chave_pix") or "", safe="")
+                    + f"&criado_em=gte.{rq.utils.quote(ac['criado_em'], safe='')}"
+                    + "&select=valor_cashback,litros,status,pago_em&order=criado_em.desc&limit=1")
+    except Exception:
+        cbs = []
+    if cbs:
+        resp["fase"] = "cashback"
+        resp["cashback"] = cbs[0]
+        return jsonify(resp)
+
+    # abastecimento concluído no bico após o acionamento?
+    if bico:
+        try:
+            abs_ = _sget(f"oct_pdv_abastecimentos?empresa_id=eq.{ac['empresa_id']}&bico=eq.{bico}"
+                         f"&data_abast=gte.{rq.utils.quote(ac['criado_em'], safe='')}"
+                         f"&select=litros,valor,preco_litro,produto_nome,data_abast,status"
+                         f"&order=data_abast.desc&limit=1")
+        except Exception:
+            abs_ = []
+        if abs_:
+            resp["fase"] = "concluido" if ac.get("status") == "aguardando" else "usado"
+            resp["abastecimento"] = abs_[0]
+            return jsonify(resp)
+        # ao vivo: bico publicado pelo núcleo há menos de 20s?
+        try:
+            live = _sget(f"oct_bico_live?empresa_id=eq.{ac['empresa_id']}&bico=eq.{bico}&limit=1")
+        except Exception:
+            live = []
+        if live:
+            lv = live[0]
+            try:
+                idade = (datetime.now(timezone.utc)
+                         - datetime.fromisoformat(str(lv["atualizado_em"]).replace("Z", "+00:00"))).total_seconds()
+            except Exception:
+                idade = 999
+            if idade < 20 and lv.get("estado") in ("abastecendo", "aguardando"):
+                resp["fase"] = "abastecendo"
+                resp["live"] = {"estado": lv.get("estado"), "volume": lv.get("volume"),
+                                "combustivel": lv.get("combustivel")}
+                return jsonify(resp)
+    resp["fase"] = "aguardando_inicio" if ac.get("status") == "aguardando" else ac.get("status")
+    return jsonify(resp)
 
 
 @bp_cashback.route("/cashback/api/acionar/cancelar", methods=["POST"])
@@ -383,7 +466,10 @@ def qr_posto():
     import io
     import qrcode
     p = (request.args.get("p") or "").strip()
-    alvo = request.host_url.rstrip("/") + "/cashback" + (f"?p={p}" if p else "")
+    bico = (request.args.get("bico") or "").strip()
+    alvo = request.host_url.rstrip("/") + "/cashback"
+    if p:
+        alvo += f"?p={p}" + (f"&bico={bico}" if bico else "")
     img = qrcode.make(alvo, box_size=10, border=2)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -485,6 +571,8 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div style="font-weight:700">🎁 Usar meu cashback agora</div>
     <div class="sub">Escolha antes de abastecer — o caixa já vai saber.</div>
     <div id="ac-form">
+      <label>Bico (número na bomba)</label>
+      <input id="ac-bico" inputmode="numeric" maxlength="3" placeholder="lido do QR ou digite o nº do bico">
       <label>Combustível</label>
       <select id="ac-comb"></select>
       <label>Forma de pagamento</label>
@@ -492,6 +580,11 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <button onclick="acionar()">Acionar benefício</button>
     </div>
     <div id="ac-ativo" class="cta esc"></div>
+    <div id="ac-live" class="esc" style="margin-top:10px;background:#0d1017;border:1px solid #232838;border-radius:10px;padding:14px;text-align:center">
+      <div class="sub" id="lv-fase">—</div>
+      <div style="font-size:2.4rem;font-weight:800;color:#4ade80;font-variant-numeric:tabular-nums" id="lv-num">—</div>
+      <div class="sub" id="lv-det"></div>
+    </div>
     <div class="msg" id="ac-msg"></div>
   </div>
 
@@ -509,6 +602,8 @@ if (!UUID_RE.test(POSTO)) { POSTO = ""; localStorage.removeItem("cb_posto"); }
 if (POSTO) localStorage.setItem("cb_posto", POSTO);
 const COMBS = ["GASOLINA COMUM","GASOLINA ADITIVADA","ETANOL","DIESEL S10","DIESEL S500"];
 document.getElementById("ac-comb").innerHTML = COMBS.map(c=>`<option>${c}</option>`).join("");
+const BICO_URL = (new URLSearchParams(location.search).get("bico")||"").replace(/\D/g,"");
+if (BICO_URL) document.getElementById("ac-bico").value = BICO_URL;
 
 function mostrar(id){["tela-login","tela-cad","tela-dash"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
 function tok(){return localStorage.getItem("cb_token")||"";}
@@ -585,9 +680,12 @@ async function carregarDash(){
   const at=document.getElementById("ac-ativo"),fm=document.getElementById("ac-form");
   if(r.acionamento){
     fm.classList.add("esc");at.classList.remove("esc");
-    at.innerHTML="✅ <b>Benefício acionado!</b><br>"+ (r.acionamento.combustivel||"Combustível") + " · " +
+    at.innerHTML="✅ <b>Benefício acionado!</b><br>"+
+      (r.acionamento.bico?("Bico "+r.acionamento.bico+" · "):"")+
+      (r.acionamento.combustivel||"Combustível") + " · " +
       (r.acionamento.forma==="17"?"PIX":"Dinheiro") +
-      "<br>Vá até a bomba e informe seu nome no caixa.<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
+      "<br>Vá até a bomba e abasteça — acompanhe abaixo.<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
+    ligarEspelho();
   } else {fm.classList.remove("esc");at.classList.add("esc");}
   const lst=document.getElementById("dh-lista");
   if(!(r.cashbacks||[]).length){lst.innerHTML='<div class="sub">Nenhum cashback ainda — abasteça para começar! 🚗</div>';}
@@ -601,13 +699,51 @@ async function carregarDash(){
 
 async function acionar(){
   const m=document.getElementById("ac-msg");m.className="msg";m.textContent="Acionando…";
-  const r=await req("/cashback/api/acionar",{posto:POSTO,combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value});
-  if(r.ok){m.textContent="";carregarDash();}
+  const r=await req("/cashback/api/acionar",{posto:POSTO,bico:document.getElementById("ac-bico").value,
+    combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value});
+  if(r.ok){m.textContent="";carregarDash();ligarEspelho();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha ao acionar";
     if(r.proxima_liberacao){const d=new Date(r.proxima_liberacao);m.textContent+=" (libera às "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})+")";}}
 }
 
-async function cancelarAcionamento(){await req("/cashback/api/acionar/cancelar",{});carregarDash();}
+async function cancelarAcionamento(){await req("/cashback/api/acionar/cancelar",{});desligarEspelho();carregarDash();}
+
+// ---- ESPELHO AO VIVO do abastecimento (fase a fase) ----
+let _lvTimer=null;
+function ligarEspelho(){ if(_lvTimer)return; _lvTimer=setInterval(_lvTick,2500); _lvTick(); }
+function desligarEspelho(){ if(_lvTimer){clearInterval(_lvTimer);_lvTimer=null;}
+  document.getElementById("ac-live").classList.add("esc"); }
+async function _lvTick(){
+  const box=document.getElementById("ac-live"),fase=document.getElementById("lv-fase"),
+        num=document.getElementById("lv-num"),det=document.getElementById("lv-det");
+  const r=await req("/cashback/api/acionamento/live");
+  if(!r.ok||r.fase==="sem_acionamento"){desligarEspelho();return;}
+  box.classList.remove("esc");
+  const ac=r.acionamento||{};
+  if(r.fase==="aguardando_inicio"){
+    fase.textContent="⏳ Aguardando o abastecimento no bico "+(ac.bico||"?");
+    num.textContent="—";det.textContent="Vá até a bomba e abasteça normalmente.";
+  } else if(r.fase==="abastecendo"){
+    fase.textContent="⛽ Abastecendo no bico "+(ac.bico||"?");
+    num.textContent=Number(r.live&&r.live.volume||0).toLocaleString("pt-BR",{minimumFractionDigits:2});
+    det.textContent=(r.live&&r.live.combustivel||"")+" · acompanhando a bomba ao vivo";
+  } else if(r.fase==="concluido"){
+    const a=r.abastecimento||{};
+    fase.textContent="✅ Abastecimento concluído — bico "+(ac.bico||"?");
+    num.textContent=brl(a.valor||a.valor_total||0);
+    det.textContent=Number(a.litros||0).toFixed(2)+" L de "+(a.produto_nome||"combustível")+
+      ". Agora pague no caixa em "+(ac.forma==="17"?"PIX":"Dinheiro")+" 💳";
+  } else if(r.fase==="cashback"){
+    const c=r.cashback||{};
+    fase.textContent=c.status==="pago"?"🎉 Cashback PAGO no seu Pix!":"🕐 Cashback a caminho…";
+    num.textContent=brl(c.valor_cashback||0);
+    det.textContent=c.status==="pago"?"Confira seu extrato — e obrigado pela preferência!":"Pagamento em processamento (cai em instantes).";
+    if(c.status==="pago"){clearInterval(_lvTimer);_lvTimer=null;setTimeout(carregarDash,4000);}
+  } else { // usado / expirado / cancelado
+    fase.textContent="Acionamento "+r.fase;num.textContent="—";det.textContent="";
+    if(r.fase==="expirado"||r.fase==="cancelado")desligarEspelho();
+  }
+}
 
 // nome do posto no topo
 (async()=>{ if(!POSTO) return;
