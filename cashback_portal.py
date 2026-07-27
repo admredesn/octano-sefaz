@@ -931,10 +931,14 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <select id="ac-forma" onchange="carrinhoVisibilidade()"><option value="01">Dinheiro</option><option value="17">PIX</option></select>
 
       <!-- PLACA + KM (compra a prazo: identifica o veículo) -->
-      <div id="veiculo-box" class="esc" style="display:flex;gap:8px;margin-top:10px">
-        <div style="flex:1.4"><label>Placa do veículo</label><input id="ac-placa" placeholder="ABC1D23" maxlength="8" style="text-transform:uppercase"></div>
-        <div style="flex:1"><label>KM atual</label><input id="ac-km" inputmode="numeric" placeholder="km"></div>
+      <!-- (sem display no inline: display:flex inline VENCE a classe .esc) -->
+      <div id="veiculo-box" class="esc" style="margin-top:10px">
+        <div style="display:flex;gap:8px">
+          <div style="flex:1.4"><label>Placa do veículo</label><input id="ac-placa" placeholder="ABC1D23" maxlength="8" style="text-transform:uppercase"></div>
+          <div style="flex:1"><label>KM atual</label><input id="ac-km" inputmode="numeric" placeholder="km"></div>
+        </div>
       </div>
+      <div id="prazo-motivo" class="sub esc" style="margin-top:8px;color:#fbbf24"></div>
 
       <!-- CARRINHO da compra A PRAZO: mais abastecimentos + produtos de loja -->
       <div id="carrinho-box" class="esc" style="margin-top:12px;border:1px solid var(--borda);border-radius:9px;padding:10px 12px">
@@ -945,9 +949,11 @@ PAGINA_HTML = r"""<!DOCTYPE html>
           <button type="button" onclick="carrinhoAbrirBico()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">⛽ + outro bico</button>
           <button type="button" onclick="carrinhoAbrirBusca()" style="margin:0;padding:9px;background:#1a2233;border:1px solid var(--borda);font-size:.82rem">🛍 + produto</button>
         </div>
-        <div id="carrinho-bico-add" class="esc" style="margin-top:8px;display:flex;gap:8px">
-          <input id="cb-bico-num" inputmode="numeric" maxlength="3" placeholder="nº do outro bico" style="flex:1">
-          <button type="button" onclick="carrinhoConfirmarBico()" style="width:auto;margin:0;padding:0 18px;background:#16a34a">OK</button>
+        <div id="carrinho-bico-add" class="esc" style="margin-top:8px">
+          <div style="display:flex;gap:8px">
+            <input id="cb-bico-num" inputmode="numeric" maxlength="3" placeholder="nº do outro bico" style="flex:1">
+            <button type="button" onclick="carrinhoConfirmarBico()" style="width:auto;margin:0;padding:0 18px;background:#16a34a">OK</button>
+          </div>
         </div>
         <div id="carrinho-busca" class="esc" style="margin-top:8px">
           <input id="cb-q" placeholder="Digite o nome do produto (mín. 2 letras)" autocomplete="off">
@@ -991,7 +997,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-11</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-12</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1122,10 +1128,17 @@ async function verificarPrazo(){
   try{
     const r=await req("/cashback/api/prazo-status?posto="+POSTO,null);
     const rotulo=r.empresa?("🧾 A Prazo (conta: "+r.empresa+")"):"🧾 A Prazo (minha conta no posto)";
+    const mot=document.getElementById("prazo-motivo");
     if(r.prazo){
       if(opt)opt.textContent=rotulo;
       else sel.insertAdjacentHTML("beforeend",'<option value="05">'+rotulo+'</option>');
-    } else if(opt){opt.remove();carrinhoVisibilidade();}
+      mot.classList.add("esc");
+    } else {
+      if(opt){opt.remove();carrinhoVisibilidade();}
+      // diz o MOTIVO de o a prazo não estar disponível (antes escondia em silêncio)
+      if(r.motivo){mot.textContent="🧾 A prazo indisponível: "+r.motivo;mot.classList.remove("esc");}
+      else mot.classList.add("esc");
+    }
   }catch(e){}
 }
 
