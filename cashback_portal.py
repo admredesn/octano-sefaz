@@ -533,6 +533,20 @@ def icone():
                     headers={"Cache-Control": "public, max-age=86400"})
 
 
+@bp_cashback.route("/cashback/jsqr.js", methods=["GET"])
+def jsqr_local():
+    """jsQR servido do PRÓPRIO servidor (CDN externo pode ser bloqueado
+    por operadora/DNS — era uma das causas de 'não lê a foto')."""
+    import os as _os
+    caminho = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "jsqr.min.js")
+    try:
+        with open(caminho, "rb") as f:
+            return Response(f.read(), mimetype="application/javascript",
+                            headers={"Cache-Control": "public, max-age=86400"})
+    except Exception:
+        return Response("// jsqr indisponivel", mimetype="application/javascript", status=404)
+
+
 @bp_cashback.route("/cashback/sw.js", methods=["GET"])
 def service_worker():
     # network-first (dados sempre frescos); casca offline básica
@@ -700,7 +714,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-2</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-3</div>
 
 <script>
 const API = "";
@@ -930,7 +944,7 @@ async function abrirScanner(){
       if(!window.jsQR){
         _jsqrCarregando=_jsqrCarregando||new Promise((ok,err)=>{
           const s=document.createElement("script");
-          s.src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+          s.src="/cashback/jsqr.js";
           s.onload=ok;s.onerror=err;document.head.appendChild(s);
         });
         await _jsqrCarregando;
@@ -966,7 +980,7 @@ async function _decodificarImagem(bmp){
   if(!window.jsQR){
     _jsqrCarregando=_jsqrCarregando||new Promise((ok,err)=>{
       const s=document.createElement("script");
-      s.src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      s.src="/cashback/jsqr.js";
       s.onload=ok;s.onerror=err;document.head.appendChild(s);
     });
     await _jsqrCarregando;
