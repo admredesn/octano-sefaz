@@ -60,25 +60,43 @@ def _sh(extra=None):
     return h
 
 
+def _checa(r):
+    """raise_for_status mostrando o ERRO REAL do PostgREST (não só o código)."""
+    if r.status_code >= 400:
+        det = ""
+        try:
+            det = (r.json() or {}).get("message") or r.text[:180]
+        except Exception:
+            det = (r.text or "")[:180]
+        raise RuntimeError(f"banco {r.status_code}: {det}")
+    return r
+
+
 def _sget(q):
     url, _ = _supa()
-    r = rq.get(f"{url}/rest/v1/{q}", headers=_sh(), timeout=20)
-    r.raise_for_status()
+    r = _checa(rq.get(f"{url}/rest/v1/{q}", headers=_sh(), timeout=20))
     return r.json()
 
 
 def _spost(tab, body, prefer="return=representation"):
     url, _ = _supa()
-    r = rq.post(f"{url}/rest/v1/{tab}", headers=_sh({"Prefer": prefer}), json=body, timeout=20)
-    r.raise_for_status()
+    r = _checa(rq.post(f"{url}/rest/v1/{tab}", headers=_sh({"Prefer": prefer}), json=body, timeout=20))
     return r.json() if r.text.strip() else None
 
 
 def _spatch(q, body, prefer="return=minimal"):
     url, _ = _supa()
-    r = rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=20)
-    r.raise_for_status()
+    r = _checa(rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=20))
     return r.json() if (r.text or "").strip() and "representation" in prefer else None
+
+
+_RE_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _uuid_ok(s):
+    """Só aceita UUID de verdade (o QR errado pode mandar '<empresa_id>' literal)."""
+    s = str(s or "").strip()
+    return s if _RE_UUID.match(s) else None
 
 
 # ------------------------------------------------------------------
@@ -179,22 +197,38 @@ def api_cadastro():
     tel = _so_digitos(d.get("telefone"))
     if len(tel) < 10:
         return jsonify({"erro": "Telefone/WhatsApp inválido"}), 400
+    posto = _uuid_ok(d.get("posto"))
     try:
         if _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&select=id&limit=1"):
             return jsonify({"erro": "CPF já cadastrado — use 'Entrar' com sua senha"}), 409
         reg = {
             "cpf": cpf, "nome": nome[:120],
-            "endereco": str(d.get("endereco") or "").strip()[:200] or None,
+            "endereco": str(d.get("endereco") or "").strip()[:160] or None,
+            "numero": str(d.get("numero") or "").strip()[:20] or None,
+            "bairro": str(d.get("bairro") or "").strip()[:80] or None,
+            "cidade": str(d.get("cidade") or "").strip()[:80] or None,
+            "uf": str(d.get("uf") or "").strip()[:2].upper() or None,
+            "cep": _so_digitos(d.get("cep"))[:8] or None,
             "telefone": tel, "nascimento": (d.get("nascimento") or None),
             "sexo": str(d.get("sexo") or "").strip()[:20] or None,
             "email": str(d.get("email") or "").strip()[:120] or None,
             "chave_pix": chave_pix[:120], "senha_hash": _hash_senha(senha),
-            "empresa_origem": d.get("posto") or None,
+            "empresa_origem": posto,
         }
-        _spost("oct_cashback_clientes", reg, prefer="return=minimal")
+        try:
+            _spost("oct_cashback_clientes", reg, prefer="return=minimal")
+        except RuntimeError as e:
+            # tabela ainda sem alguma coluna opcional (ex.: bairro/cidade) ->
+            # grava sem os opcionais em vez de falhar o cadastro
+            if "Could not find the" not in str(e):
+                raise
+            minimo = {k: reg[k] for k in ("cpf", "nome", "endereco", "telefone", "nascimento",
+                                          "sexo", "email", "chave_pix", "senha_hash", "empresa_origem")
+                      if k in reg}
+            _spost("oct_cashback_clientes", minimo, prefer="return=minimal")
         # garante a PESSOA do PDV no posto de origem (elegível ao cashback)
-        if d.get("posto"):
-            _garantir_pessoa(d["posto"], reg)
+        if posto:
+            _garantir_pessoa(posto, reg)
         return jsonify({"ok": True, "token": _token_gerar(cpf), "nome": nome})
     except Exception as e:
         return jsonify({"erro": "falha no cadastro: " + str(e)[:200]}), 500
@@ -209,6 +243,9 @@ def _garantir_pessoa(empresa_id, cad):
             "nome": cad["nome"], "documento": cad["cpf"], "telefone": cad.get("telefone"),
             "whatsapp": cad.get("telefone"), "email": cad.get("email"),
             "chave_pix": cad["chave_pix"], "cashback_ativo": True, "ativo": True,
+            "endereco": cad.get("endereco"), "num_endereco": cad.get("numero"),
+            "bairro": cad.get("bairro"), "cidade": cad.get("cidade"),
+            "cep": cad.get("cep"), "uf": cad.get("uf"),
         }
         if ex:
             _spatch(f"oct_pessoas?id=eq.{ex[0]['id']}", corpo)
@@ -290,11 +327,11 @@ def api_acionar():
     if not cli:
         return jsonify({"erro": "sessão expirada"}), 401
     d = request.get_json(silent=True) or {}
-    empresa = str(d.get("posto") or "").strip()
+    empresa = _uuid_ok(d.get("posto"))
     comb = str(d.get("combustivel") or "").strip().upper()
     forma = str(d.get("forma") or "").strip()
     if not empresa:
-        return jsonify({"erro": "posto não informado (leia o QR do posto)"}), 400
+        return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
     # janela 2h: se recebeu (ou tem pendente) há menos de 2h, não deixa acionar
@@ -413,7 +450,17 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   <label>Sexo</label><select id="cd-sexo"><option value="">Prefiro não informar</option><option>Feminino</option><option>Masculino</option><option>Outro</option></select>
   <label>Celular / WhatsApp *</label><input id="cd-tel" inputmode="numeric" placeholder="(31) 9 9999-9999">
   <label>E-mail</label><input id="cd-email" type="email" placeholder="voce@email.com">
-  <label>Endereço</label><input id="cd-end" placeholder="Rua, nº, bairro, cidade">
+  <div style="display:flex;gap:8px">
+    <div style="flex:1"><label>CEP</label><input id="cd-cep" inputmode="numeric" placeholder="00000-000" maxlength="9"></div>
+    <div style="flex:1.6"><label>Cidade</label><input id="cd-cidade" placeholder="Cidade"></div>
+    <div style="width:64px"><label>UF</label><input id="cd-uf" maxlength="2" placeholder="MG"></div>
+  </div>
+  <div class="sub" id="cd-cep-msg" style="margin:4px 0 0"></div>
+  <div style="display:flex;gap:8px">
+    <div style="flex:2.4"><label>Endereço (rua/avenida)</label><input id="cd-end" placeholder="Rua / Avenida"></div>
+    <div style="flex:1"><label>Número</label><input id="cd-num" inputmode="numeric" placeholder="nº"></div>
+  </div>
+  <label>Bairro</label><input id="cd-bairro" placeholder="Bairro">
   <label>Chave Pix (onde o dinheiro cai) *</label><input id="cd-pix" placeholder="CPF, celular, e-mail ou aleatória">
   <label>Senha (mín. 6) *</label><input id="cd-senha" type="password">
   <label>Repita a senha *</label><input id="cd-senha2" type="password">
@@ -456,7 +503,9 @@ PAGINA_HTML = r"""<!DOCTYPE html>
 
 <script>
 const API = "";
-const POSTO = new URLSearchParams(location.search).get("p") || localStorage.getItem("cb_posto") || "";
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+let POSTO = new URLSearchParams(location.search).get("p") || localStorage.getItem("cb_posto") || "";
+if (!UUID_RE.test(POSTO)) { POSTO = ""; localStorage.removeItem("cb_posto"); }
 if (POSTO) localStorage.setItem("cb_posto", POSTO);
 const COMBS = ["GASOLINA COMUM","GASOLINA ADITIVADA","ETANOL","DIESEL S10","DIESEL S500"];
 document.getElementById("ac-comb").innerHTML = COMBS.map(c=>`<option>${c}</option>`).join("");
@@ -466,6 +515,26 @@ function tok(){return localStorage.getItem("cb_token")||"";}
 function brl(v){return "R$ "+Number(v||0).toLocaleString("pt-BR",{minimumFractionDigits:2});}
 function mascaraCpf(el){el.addEventListener("input",()=>{let v=el.value.replace(/\D/g,"").slice(0,11);el.value=v.replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d{1,2})$/,"$1-$2");});}
 mascaraCpf(document.getElementById("lg-cpf"));mascaraCpf(document.getElementById("cd-cpf"));
+
+// ---- CEP: máscara + autopreenchimento (ViaCEP) ----
+(function(){
+  const cep=document.getElementById("cd-cep"),msg=document.getElementById("cd-cep-msg");
+  cep.addEventListener("input",()=>{let v=cep.value.replace(/\D/g,"").slice(0,8);cep.value=v.replace(/(\d{5})(\d)/,"$1-$2");
+    if(v.length===8)buscarCep(v);});
+  async function buscarCep(v){
+    msg.textContent="Buscando CEP…";
+    try{
+      const r=await fetch("https://viacep.com.br/ws/"+v+"/json/").then(x=>x.json());
+      if(r.erro){msg.textContent="CEP não encontrado — preencha o endereço manualmente.";return;}
+      document.getElementById("cd-end").value=r.logradouro||"";
+      document.getElementById("cd-bairro").value=r.bairro||"";
+      document.getElementById("cd-cidade").value=r.localidade||"";
+      document.getElementById("cd-uf").value=r.uf||"";
+      msg.textContent="✓ Endereço preenchido — confira e informe o número.";
+      document.getElementById("cd-num").focus();
+    }catch(e){msg.textContent="Não consegui consultar o CEP — preencha manualmente.";}
+  }
+})();
 
 async function req(caminho,corpo,metodo){
   const r = await fetch(API+caminho,{method:metodo||(corpo?"POST":"GET"),
@@ -490,7 +559,10 @@ async function fazerCadastro(){
     nome:document.getElementById("cd-nome").value,cpf:document.getElementById("cd-cpf").value,
     nascimento:document.getElementById("cd-nasc").value||null,sexo:document.getElementById("cd-sexo").value,
     telefone:document.getElementById("cd-tel").value,email:document.getElementById("cd-email").value,
-    endereco:document.getElementById("cd-end").value,chave_pix:document.getElementById("cd-pix").value,
+    cep:document.getElementById("cd-cep").value,endereco:document.getElementById("cd-end").value,
+    numero:document.getElementById("cd-num").value,bairro:document.getElementById("cd-bairro").value,
+    cidade:document.getElementById("cd-cidade").value,uf:document.getElementById("cd-uf").value,
+    chave_pix:document.getElementById("cd-pix").value,
     senha:s1,posto:POSTO||null});
   if(r.token){localStorage.setItem("cb_token",r.token);carregarDash();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha no cadastro";}
