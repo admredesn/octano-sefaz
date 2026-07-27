@@ -702,10 +702,11 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div style="color:#fff;font-weight:700;margin-bottom:10px">Aponte para o QR do bico</div>
     <video id="scan-video" playsinline muted style="width:100%;max-width:400px;border-radius:12px;border:2px solid #f97316"></video>
     <div id="scan-msg" class="sub" style="margin-top:10px;text-align:center">Abrindo a câmera…</div>
-    <button onclick="scanPorFoto()" style="max-width:400px;background:#16a34a">📸 Tirar FOTO do QR (câmera do celular)</button>
-    <button onclick="fecharScanner()" style="max-width:400px;background:#2a2d3e">Cancelar e digitar o número</button>
+    <button type="button" onclick="scanPorFoto()" style="max-width:400px;background:#16a34a">📸 Tirar FOTO do QR (câmera do celular)</button>
+    <button type="button" onclick="fecharScanner()" style="max-width:400px;background:#2a2d3e">Cancelar e digitar o número</button>
     <input id="scan-foto" type="file" accept="image/*" capture="environment" style="display:none">
   </div>
+  <div id="js-erro" style="display:none;position:fixed;bottom:0;left:0;right:0;background:#7f1d1d;color:#fecaca;font-size:.72rem;padding:8px 12px;z-index:99999;word-break:break-all"></div>
 
   <div class="card esc" id="pwa-card">
     <div style="font-weight:700">📲 Vire um app no seu celular</div>
@@ -714,9 +715,24 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-3</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão scanner-foto-4</div>
 
 <script>
+// qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
+window.onerror = function (m, src, lin, col) {
+  try {
+    var d = document.getElementById("js-erro");
+    d.style.display = "block";
+    d.textContent = "⚠ erro: " + m + " @" + (src || "").split("/").pop() + ":" + lin + ":" + col;
+  } catch (e) {}
+};
+window.addEventListener("unhandledrejection", function (ev) {
+  try {
+    var d = document.getElementById("js-erro");
+    d.style.display = "block";
+    d.textContent = "⚠ promessa: " + (ev.reason && (ev.reason.name + " " + ev.reason.message) || ev.reason);
+  } catch (e) {}
+});
 const API = "";
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 let POSTO = new URLSearchParams(location.search).get("p") || localStorage.getItem("cb_posto") || "";
@@ -904,11 +920,20 @@ function _scanAchou(texto){
   if(navigator.vibrate)navigator.vibrate(80);
   return true;
 }
+const EH_IOS=/iphone|ipad|ipod/i.test(navigator.userAgent);
 async function abrirScanner(){
   const ov=document.getElementById("scan-overlay"),vid=document.getElementById("scan-video"),msg=document.getElementById("scan-msg");
-  ov.classList.remove("esc");msg.textContent="Abrindo a câmera… (se pedir permissão, toque em PERMITIR)";
+  ov.classList.remove("esc");
+  if(EH_IOS){
+    // iPhone/iPad: a câmera ao vivo do WebKit é problemática (trava em app
+    // instalado) — vai DIRETO pra câmera nativa de foto, que o iOS faz bem
+    vid.style.display="none";
+    msg.textContent="Toque no botão verde: a câmera do iPhone abre, fotografe o QR do bico.";
+    return;
+  }
+  msg.textContent="Abrindo a câmera… (se pedir permissão, toque em PERMITIR)";
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    msg.textContent="Este navegador não dá acesso à câmera. Abra no Chrome/Safari ou digite o número do bico.";return;
+    msg.textContent="Este navegador não dá acesso à câmera. Use o botão verde (foto) ou digite o número.";return;
   }
   // timeout: alguns navegadores seguram o prompt de permissão indefinidamente
   const comTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new DOMException("demorou demais","TimeoutError")),ms))]);
