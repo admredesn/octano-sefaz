@@ -458,6 +458,38 @@ def api_prazo_status():
                     "empresa": (conta or {}).get("nome") if (conta or {}).get("empresa") else None})
 
 
+@bp_cashback.route("/cashback/api/frota", methods=["GET"])
+def api_frota():
+    """Placas disponíveis pro colaborador logado neste posto.
+    Regra: veículo COM motorista definido só aparece pro próprio motorista;
+    veículo SEM motorista aparece pra qualquer colaborador da empresa."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    posto = _uuid_ok(request.args.get("posto"))
+    if not posto:
+        return jsonify([])
+    try:
+        p = _sget(f"oct_pessoas?empresa_id=eq.{posto}&documento=eq.{cli['cpf']}"
+                  f"&select=id,frota_empresa_id&limit=1")
+        if not p:
+            return jsonify([])
+        pessoa_id = p[0]["id"]
+        dono = p[0].get("frota_empresa_id") or pessoa_id   # frota da empresa OU pessoal
+        veics = _sget(f"oct_frota_veiculos?pessoa_id=eq.{dono}&ativo=eq.true"
+                      f"&select=placa,veiculo,motorista_pessoa_id&order=placa")
+        out = []
+        for v in veics:
+            m = v.get("motorista_pessoa_id")
+            if m and m != pessoa_id:
+                continue   # placa de outro motorista: não aparece
+            out.append({"placa": v["placa"], "veiculo": v.get("veiculo") or "",
+                        "minha": bool(m)})
+        return jsonify(out)
+    except Exception:
+        return jsonify([])
+
+
 @bp_cashback.route("/cashback/api/produtos", methods=["GET"])
 def api_produtos():
     """Busca de produtos de LOJA do posto (p/ o carrinho da compra a prazo).
@@ -938,6 +970,10 @@ PAGINA_HTML = r"""<!DOCTYPE html>
       <!-- PLACA + KM (compra a prazo: identifica o veículo) -->
       <!-- (sem display no inline: display:flex inline VENCE a classe .esc) -->
       <div id="veiculo-box" class="esc" style="margin-top:10px">
+        <div id="frota-sel-box" class="esc">
+          <label>Veículo da frota</label>
+          <select id="ac-frota" onchange="frotaEscolheu()"><option value="">— escolha a placa —</option></select>
+        </div>
         <div style="display:flex;gap:8px">
           <div style="flex:1.4"><label>Placa do veículo</label><input id="ac-placa" placeholder="ABC1D23" maxlength="8" style="text-transform:uppercase"></div>
           <div style="flex:1"><label>KM atual</label><input id="ac-km" inputmode="numeric" placeholder="km"></div>
@@ -1002,7 +1038,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão so-produto-13</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-veiculos-14</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1177,7 +1213,34 @@ function carrinhoVisibilidade(){
   const prazo=document.getElementById("ac-forma").value==="05";
   document.getElementById("carrinho-box").classList.toggle("esc",!prazo);
   document.getElementById("veiculo-box").classList.toggle("esc",!prazo);
+  if(prazo)carregarFrota();
   if(!prazo){CARRINHO=[];carrinhoRender();}
+}
+
+// placas da FROTA da empresa (motorista fixo só vê a placa dele)
+let _frotaCarregada=false;
+async function carregarFrota(){
+  if(_frotaCarregada||!POSTO)return;
+  _frotaCarregada=true;
+  try{
+    const lista=await fetch(API+"/cashback/api/frota?posto="+POSTO,
+      {headers:{"Authorization":"Bearer "+tok()}}).then(r=>r.json());
+    if(!Array.isArray(lista)||!lista.length)return;
+    const sel=document.getElementById("ac-frota");
+    sel.innerHTML='<option value="">— escolha a placa —</option>'+
+      lista.map(v=>`<option value="${v.placa}">${v.placa}${v.veiculo?" · "+v.veiculo:""}${v.minha?" ⭐":""}</option>`).join("")+
+      '<option value="__outra__">outra placa (digitar)…</option>';
+    document.getElementById("frota-sel-box").classList.remove("esc");
+    document.getElementById("ac-placa").parentElement.style.display="none";  // esconde só a PLACA (KM continua)
+    if(lista.length===1){sel.value=lista[0].placa;frotaEscolheu();}   // placa única: já seleciona
+  }catch(e){}
+}
+function frotaEscolheu(){
+  const sel=document.getElementById("ac-frota");
+  const linhaDigitar=document.getElementById("ac-placa").parentElement;
+  if(sel.value==="__outra__"){linhaDigitar.style.display="";document.getElementById("ac-placa").value="";document.getElementById("ac-placa").focus();return;}
+  linhaDigitar.style.display="none";
+  document.getElementById("ac-placa").value=sel.value||"";
 }
 function carrinhoRender(){
   const el=document.getElementById("carrinho-lista");
