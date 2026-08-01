@@ -28,6 +28,7 @@ import json
 import hmac
 import base64
 import hashlib
+import secrets
 import time
 from datetime import datetime, timezone, timedelta
 
@@ -197,6 +198,99 @@ def _cpf_valido(cpf):
         if dig != int(cpf[n]):
             return False
     return True
+
+
+# ------------------------------------------------------------------
+# RECUPERAÇÃO DE SENHA: código de 6 dígitos por WhatsApp (gateway octano-wpp,
+# envs WPP_URL/WPP_TOKEN) ou e-mail (envs SMTP_HOST/SMTP_PORT/SMTP_USER/
+# SMTP_SENHA). Código gravado no próprio cadastro (reset_codigo/reset_expira).
+# ------------------------------------------------------------------
+def _reset_enviar_whatsapp(tel, codigo):
+    import urllib.request as _rq
+    base = (os.environ.get("WPP_URL") or "").rstrip("/")
+    tok = os.environ.get("WPP_TOKEN") or ""
+    if not base or not tok:
+        raise RuntimeError("WhatsApp indisponível")
+    tel = _so_digitos(tel)
+    if len(tel) <= 11:
+        tel = "55" + tel
+    msg = (f"🔐 *Recuperação de senha — Octano*\n\nSeu código é: *{codigo}*\n\n"
+           "Ele vale por 15 minutos. Se você não pediu, ignore esta mensagem.")
+    req = _rq.Request(base + "/send-text",
+                      data=json.dumps({"phone": tel, "message": msg}).encode(),
+                      headers={"Content-Type": "application/json", "x-wpp-token": tok})
+    with _rq.urlopen(req, timeout=30):
+        pass
+
+
+def _reset_enviar_email(email, codigo):
+    import smtplib
+    from email.mime.text import MIMEText
+    host = os.environ.get("SMTP_HOST") or ""
+    user = os.environ.get("SMTP_USER") or ""
+    senha = os.environ.get("SMTP_SENHA") or ""
+    porta = int(os.environ.get("SMTP_PORT") or 587)
+    if not host or not user:
+        raise RuntimeError("E-mail indisponível")
+    m = MIMEText(f"Seu código de recuperação de senha do Octano é: {codigo}\n\n"
+                 "Ele vale por 15 minutos. Se você não pediu, ignore este e-mail.")
+    m["Subject"] = "Octano — código de recuperação de senha"
+    m["From"] = user
+    m["To"] = email
+    with smtplib.SMTP(host, porta, timeout=30) as s:
+        s.starttls()
+        s.login(user, senha)
+        s.send_message(m)
+
+
+@bp_cashback.route("/cashback/api/senha/pedir", methods=["POST"])
+def api_senha_pedir():
+    d = request.get_json(silent=True) or {}
+    cpf = _so_digitos(d.get("cpf"))
+    canal = str(d.get("canal") or "whatsapp")
+    rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1")
+    if not rows:
+        return jsonify({"erro": "CPF não encontrado — faça seu cadastro"}), 404
+    cli = rows[0]
+    codigo = str(secrets.randbelow(900000) + 100000)
+    _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}",
+            {"reset_codigo": _hash_senha(codigo), "reset_expira": int(time.time()) + 900})
+    try:
+        if canal == "email":
+            if not cli.get("email"):
+                return jsonify({"erro": "Cadastro sem e-mail — use o WhatsApp"}), 400
+            _reset_enviar_email(cli["email"], codigo)
+            destino = cli["email"]
+        else:
+            tel = cli.get("telefone") or ""
+            if not tel:
+                return jsonify({"erro": "Cadastro sem telefone — use o e-mail"}), 400
+            _reset_enviar_whatsapp(tel, codigo)
+            destino = "•••" + _so_digitos(tel)[-4:]
+    except Exception as e:
+        return jsonify({"erro": f"Falha no envio ({e}). Tente o outro canal."}), 502
+    return jsonify({"ok": True, "destino": destino})
+
+
+@bp_cashback.route("/cashback/api/senha/trocar", methods=["POST"])
+def api_senha_trocar():
+    d = request.get_json(silent=True) or {}
+    cpf = _so_digitos(d.get("cpf"))
+    codigo = _so_digitos(d.get("codigo"))
+    nova = str(d.get("senha") or "")
+    if len(nova) < 6:
+        return jsonify({"erro": "Senha deve ter pelo menos 6 caracteres"}), 400
+    rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1")
+    if not rows:
+        return jsonify({"erro": "CPF não encontrado"}), 404
+    cli = rows[0]
+    if not cli.get("reset_codigo") or int(cli.get("reset_expira") or 0) < time.time():
+        return jsonify({"erro": "Código expirado — peça um novo"}), 400
+    if not _confere_senha(codigo, cli["reset_codigo"]):
+        return jsonify({"erro": "Código incorreto"}), 401
+    _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}",
+            {"senha_hash": _hash_senha(nova), "reset_codigo": None, "reset_expira": None})
+    return jsonify({"ok": True, "token": _token_gerar(cpf)})
 
 
 # ------------------------------------------------------------------
@@ -904,7 +998,28 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   <label>Senha</label><input id="lg-senha" type="password" placeholder="Sua senha">
   <button onclick="fazerLogin()">Entrar</button>
   <button class="sec" onclick="mostrar('tela-cad')">Primeiro acesso? Cadastre-se</button>
+  <button class="sec" onclick="mostrar('tela-esqueci')">🔐 Esqueci minha senha</button>
   <div class="msg" id="lg-msg"></div>
+</div>
+
+<!-- ESQUECI A SENHA -->
+<div class="card esc" id="tela-esqueci">
+  <div style="font-weight:700;margin-bottom:4px">Recuperar senha</div>
+  <div class="sub">Enviamos um código de 6 dígitos para você criar uma senha nova.</div>
+  <label>CPF</label><input id="es-cpf" inputmode="numeric" placeholder="000.000.000-00" maxlength="14">
+  <label>Receber o código por</label>
+  <div style="display:flex;gap:8px;margin:6px 0 10px">
+    <button id="es-wpp" onclick="esqueciPedir('whatsapp')" style="flex:1">📱 WhatsApp</button>
+    <button id="es-eml" class="sec" onclick="esqueciPedir('email')" style="flex:1">✉️ E-mail</button>
+  </div>
+  <div id="es-passo2" class="esc">
+    <label>Código recebido</label><input id="es-codigo" inputmode="numeric" maxlength="6" placeholder="000000">
+    <label>Nova senha (mín. 6)</label><input id="es-senha" type="password">
+    <label>Repita a nova senha</label><input id="es-senha2" type="password">
+    <button onclick="esqueciTrocar()">Salvar nova senha</button>
+  </div>
+  <button class="sec" onclick="mostrar('tela-login')">← Voltar</button>
+  <div class="msg" id="es-msg"></div>
 </div>
 
 <!-- CADASTRO -->
@@ -1073,12 +1188,31 @@ if (BICO_URL) {
   setTimeout(()=>{ try{ carregarInfoBico(); }catch(e){} }, 400);   // ficha do bico do QR
 }
 
-function mostrar(id){["tela-login","tela-cad","tela-dash"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
+function mostrar(id){["tela-login","tela-cad","tela-dash","tela-esqueci"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
 function nomeForma(f){return f==="17"?"PIX":f==="05"?"A PRAZO":"Dinheiro";}
 function tok(){return localStorage.getItem("cb_token")||"";}
 function brl(v){return "R$ "+Number(v||0).toLocaleString("pt-BR",{minimumFractionDigits:2});}
 function mascaraCpf(el){el.addEventListener("input",()=>{let v=el.value.replace(/\D/g,"").slice(0,11);el.value=v.replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d{1,2})$/,"$1-$2");});}
-mascaraCpf(document.getElementById("lg-cpf"));mascaraCpf(document.getElementById("cd-cpf"));
+mascaraCpf(document.getElementById("lg-cpf"));mascaraCpf(document.getElementById("cd-cpf"));mascaraCpf(document.getElementById("es-cpf"));
+
+async function esqueciPedir(canal){
+  const m=document.getElementById("es-msg");m.className="msg";m.textContent="Enviando o código…";
+  const r=await req("/cashback/api/senha/pedir",{cpf:document.getElementById("es-cpf").value,canal:canal});
+  if(r.ok){document.getElementById("es-passo2").classList.remove("esc");
+    m.className="msg ok";m.textContent="Código enviado para "+(r.destino||"você")+" — vale 15 minutos.";}
+  else{m.className="msg erro";m.textContent=r.erro||"Falha no envio";}
+}
+async function esqueciTrocar(){
+  const m=document.getElementById("es-msg");
+  const s1=document.getElementById("es-senha").value,s2=document.getElementById("es-senha2").value;
+  if(s1!==s2){m.className="msg erro";m.textContent="As senhas não conferem";return;}
+  m.className="msg";m.textContent="Salvando…";
+  const r=await req("/cashback/api/senha/trocar",{cpf:document.getElementById("es-cpf").value,
+    codigo:document.getElementById("es-codigo").value,senha:s1});
+  if(r.ok&&r.token){localStorage.setItem("cb_token",r.token);m.className="msg ok";
+    m.textContent="Senha alterada! Entrando…";carregarDash();}
+  else{m.className="msg erro";m.textContent=r.erro||"Falha ao trocar a senha";}
+}
 
 // ---- CEP: máscara + autopreenchimento (ViaCEP) ----
 (function(){
