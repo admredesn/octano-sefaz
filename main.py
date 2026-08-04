@@ -7,6 +7,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 
 from webhook_pagbank import registrar_rotas_webhook
+from operadores_admin import registrar_rotas_operadores
 
 load_dotenv()
 
@@ -15,6 +16,9 @@ CORS(app, origins="*")
 
 # recebe as notificacoes de transacao do PagBank (teste da maquininha)
 registrar_rotas_webhook(app)
+
+# troca de senha de operador do PDV (exige service_key -> so no servidor)
+registrar_rotas_operadores(app)
 
 @app.route("/", methods=["GET"])
 def health():
