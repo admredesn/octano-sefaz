@@ -12,6 +12,7 @@ A NFC-e (mod 65) difere da NF-e (mod 55) em:
 
 import re
 import hashlib
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from lxml import etree
 import requests
@@ -20,6 +21,23 @@ from .cert import extrair_cert_pem, limpar_arquivos
 from .emissao import (
     NS, UF_CODIGO, montar_chave, assinar_nfe,
 )
+
+
+def _texto_xml(s, limite=4000):
+    """Sanitiza texto livre que vai para dentro do XML (hoje: infCpl).
+
+    O XML e montado por concatenacao de string, sem escape -- um '&' ou '<'
+    vindo do PDV quebraria o documento inteiro. Alem disso a SEFAZ rejeita
+    caracteres de controle. Tira acento tambem, no mesmo padrao do resto dos
+    campos (o cupom sai em maiusculas sem acento).
+    """
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode()
+    s = re.sub(r"[<>&\"']", " ", s)          # nada que possa fechar/abrir tag
+    s = re.sub(r"[\x00-\x1f\x7f]", " ", s)   # controle
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:limite]
 
 
 def _imposto_item_nfce(it):
@@ -382,8 +400,15 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<fone>{rt.get('fone','')}</fone></infRespTec>"
     )
 
-    # informacao adicional (opcional) - texto livre
-    inf_adic = "<infAdic><infCpl>Documento emitido por ME ou EPP optante. NFC-e</infCpl></infAdic>"
+    # informacao adicional (texto livre no cupom).
+    # Alem da frase padrao, aceita nota["inf_cpl"] vinda do PDV: e por AQUI que
+    # os dados da NOTA A PRAZO (placa, KM, motorista, requisicao) aparecem
+    # impressos no documento fiscal -- exigencia do cliente (07/08/2026), ja que
+    # o cupom e o que o motorista leva e o que a frota confere depois.
+    _cpl_extra = _texto_xml(nota.get("inf_cpl"))
+    _cpl_base = "Documento emitido por ME ou EPP optante. NFC-e"
+    _cpl = (_cpl_base + " | " + _cpl_extra) if _cpl_extra else _cpl_base
+    inf_adic = f"<infAdic><infCpl>{_cpl}</infCpl></infAdic>"
 
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
