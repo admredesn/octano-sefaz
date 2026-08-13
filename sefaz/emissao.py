@@ -184,6 +184,10 @@ def _imposto_item(it, crt="3"):
 def _comb_item(it):
     if str(it.get("ind_combustivel") or "N") != "S":
         return ""
+    if not it.get("cod_anp"):
+        # sem cProdANP não há grupo <comb> válido (ex.: NF-e consolidada CFOP 5929,
+        # que só referencia NFC-e já emitidas). Evita KeyError e XSD inválido.
+        return ""
     pbio = ""
     if it.get("perc_bio"):
         pbio = f"<pBio>{float(it['perc_bio']):.4f}</pBio>"
