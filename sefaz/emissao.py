@@ -21,6 +21,7 @@ from lxml import etree
 import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
+from . import ibpt
 
 NS = "http://www.portalfiscal.inf.br/nfe"
 SCHEMAS_DIR = os.path.join(os.path.dirname(__file__), "schemas")
@@ -252,6 +253,7 @@ def montar_infnfe(nota, ambiente):
     crt_emit = str(emit.get("crt", "3"))
     dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
+    v_tot_trib = ibpt.v_tot_trib(nota["itens"])  # Lei 12.741 (IBPT-MG); 0.00 se NCM ausente
     # ICMS proprio = 0 (CST 61/60). vICMSMono soma dos monofasicos:
     v_icms_mono = sum(
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
@@ -325,7 +327,7 @@ def montar_infnfe(nota, ambiente):
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>0.00</vTotTrib></ICMSTot>"
+        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
     )
     # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
     tag_gmono = (
