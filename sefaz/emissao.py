@@ -22,6 +22,7 @@ import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
 from . import ibpt
+from . import anp
 
 NS = "http://www.portalfiscal.inf.br/nfe"
 SCHEMAS_DIR = os.path.join(os.path.dirname(__file__), "schemas")
@@ -192,9 +193,11 @@ def _comb_item(it):
     pbio = ""
     if it.get("perc_bio"):
         pbio = f"<pBio>{float(it['perc_bio']):.4f}</pBio>"
+    # descANP: usa o do cadastro; se vier vazio, completa pela tabela oficial ANP.
+    desc_anp = it.get("desc_anp") or anp.descricao(it["cod_anp"])
     return (
         f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
-        f"<descANP>{it.get('desc_anp','')}</descANP>{pbio}"
+        f"<descANP>{desc_anp}</descANP>{pbio}"
         f"<UFCons>{it.get('uf_cons','MG')}</UFCons></comb>"
     )
 
