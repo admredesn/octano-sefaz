@@ -107,7 +107,10 @@ def _imposto_item_nfce(it):
                   f"<gIBSMun><pIBSMun>0.0000</pIBSMun><vIBSMun>0.00</vIBSMun></gIBSMun>"
                   f"<vIBS>{v_ibs_uf:.2f}</vIBS>"
                   f"<gCBS><pCBS>0.9000</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS></gIBSCBS></IBSCBS>")
-    return f"<imposto>{icms}{pis}{cof}{ibscbs}</imposto>"
+    # vTotTrib do item (Lei 12.741, IBPT). É o 1º elemento do <imposto> e a SOMA
+    # dos itens tem que bater com o <vTotTrib> do total (senão: rejeição 685).
+    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"))
+    return f"<imposto><vTotTrib>{v_trib:.2f}</vTotTrib>{icms}{pis}{cof}{ibscbs}</imposto>"
 
 
 def _det_item_nfce(it, n, cnpj_emit):
