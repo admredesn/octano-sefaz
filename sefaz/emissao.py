@@ -90,6 +90,14 @@ def _imposto_item(it, crt="3"):
         else:
             # XML autorizado do posto usa ICMS60 enxuto (so orig + CST).
             icms = f"<ICMS60><orig>{orig}</orig><CST>60</CST></ICMS60>"
+    elif cst == "90":
+        # CONSOLIDACAO / FATURAMENTO DE CUPONS (CFOP 5929): o ICMS ja foi recolhido
+        # nas NFC-e referenciadas (NFref). Aqui NAO recolhe de novo -> ICMS90/CSOSN900
+        # zerado. (Tratamento a confirmar com o contador; validar em homologacao.)
+        if simples:
+            icms = f"<ICMSSN900><orig>{orig}</orig><CSOSN>900</CSOSN><modBC>3</modBC><vBC>0.00</vBC><pICMS>0.0000</pICMS><vICMS>0.00</vICMS><pCredSN>0.0000</pCredSN><vCredICMSSN>0.00</vCredICMSSN></ICMSSN900>"
+        else:
+            icms = f"<ICMS90><orig>{orig}</orig><CST>90</CST><modBC>3</modBC><vBC>0.00</vBC><pICMS>0.0000</pICMS><vICMS>0.00</vICMS></ICMS90>"
     else:
         # demais (lubrificante, conveniencia, ARLA...).
         if simples:
@@ -259,6 +267,14 @@ def montar_infnfe(nota, ambiente):
     doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf", ""))
     tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
 
+    # NFref: referencia as NFC-e (cupons) consolidadas nesta NF-e de faturamento
+    # (CFOP 5929). Vem DEPOIS de verProc no <ide> (schema NFe 4.00, ate 999 refs).
+    # Sem duplicar imposto: a NF-e aponta os cupons que ja recolheram o ICMS.
+    refs = nota.get("refs") or []
+    nfref_xml = "".join(
+        "<NFref><refNFe>%s</refNFe></NFref>" % re.sub(r"\D", "", str(ch))
+        for ch in refs if ch and len(re.sub(r"\D", "", str(ch))) == 44
+    )
     ide = (
         f"<ide><cUF>{cuf}</cUF><cNF>{cnf_fmt}</cNF>"
         f"<natOp>{nota.get('natureza_op','VENDA')}</natOp>"
@@ -267,7 +283,8 @@ def montar_infnfe(nota, ambiente):
         f"<cMunFG>{emit.get('c_mun','3118601')}</cMunFG>"
         f"<tpImp>1</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
-        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc></ide>"
+        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc>"
+        f"{nfref_xml}</ide>"
     )
     cep_emit = re.sub(r"\D", "", emit.get("cep", ""))
     ie_emit = re.sub(r"\D", "", emit.get("ie", ""))
