@@ -276,7 +276,7 @@ def montar_infnfe(nota, ambiente):
     v_bc_rt_tot = sum(float(it["vProd"]) for it in nao_mono)
 
     # destinatario: CNPJ ou CPF
-    doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf", ""))
+    doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf") or dest.get("documento") or "")
     tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
 
     # NFref: referencia as NFC-e (cupons) consolidadas nesta NF-e de faturamento
