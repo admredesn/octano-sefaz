@@ -317,8 +317,12 @@ def montar_infnfe(nota, ambiente):
         f"<UF>{dest.get('uf','MG')}</UF><CEP>{cep_dest}</CEP>"
         f"<cPais>1058</cPais><xPais>BRASIL</xPais></enderDest>"
     )
+    # Em HOMOLOGAÇÃO a Razão Social do destinatário é obrigatoriamente esta
+    # (regra 598, análoga ao xProd da NFC-e). Em produção usa o nome real.
+    xnome_dest = ("NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+                  if tp_amb == "2" else dest["nome"])
     dest_xml = (
-        f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><xNome>{dest['nome']}</xNome>"
+        f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><xNome>{xnome_dest}</xNome>"
         f"{ender_dest}"
         f"<indIEDest>{dest.get('ind_ie','9')}</indIEDest>"
         + (f"<IE>{dest['ie']}</IE>" if dest.get("ie") else "")
