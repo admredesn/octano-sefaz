@@ -18,6 +18,7 @@ from lxml import etree
 import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
+from . import ibpt
 from .emissao import (
     NS, UF_CODIGO, montar_chave, assinar_nfe,
 )
@@ -283,6 +284,7 @@ def montar_infnfce(nota, empresa, ambiente):
         itens_emit[0]["xProd"] = "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
     dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(itens_emit))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
+    v_tot_trib = ibpt.v_tot_trib(nota["itens"])  # Lei 12.741 (IBPT-MG); 0.00 se NCM ausente
     v_icms_mono = sum(
         round(float(it["qCom"]) * float(it.get("aliq_icms_ad_rem") or 0), 2)
         for it in nota["itens"] if str(it.get("cst_icms")) == "61"
@@ -361,7 +363,7 @@ def montar_infnfce(nota, empresa, ambiente):
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>{v_pis_tot:.2f}</vPIS><vCOFINS>{v_cofins_tot:.2f}</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF></ICMSTot>"
+        f"<vNF>{v_prod:.2f}</vNF><vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
     )
     # IBSCBSTot espelhando o cupom de loja autorizado
     ibscbstot = (
