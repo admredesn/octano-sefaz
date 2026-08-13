@@ -180,7 +180,10 @@ def _imposto_item(it, crt="3"):
             f"</gIBSCBS></IBSCBS>"
         )
 
-    return f"<imposto><ICMS>{icms}</ICMS>{ipi}{pis}{cof}{ibscbs}</imposto>"
+    # vTotTrib do item (Lei 12.741, IBPT) — 1º elemento do <imposto>; a soma dos
+    # itens tem que bater com o <vTotTrib> do total (senão: rejeição 685).
+    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"))
+    return f"<imposto><vTotTrib>{v_trib:.2f}</vTotTrib><ICMS>{icms}</ICMS>{ipi}{pis}{cof}{ibscbs}</imposto>"
 
 
 def _comb_item(it):
