@@ -552,6 +552,15 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
                 nprot = inf_prot.findtext(f"{{{NS}}}nProt")
 
         autorizado = (cstat_nfe == "100")
+        # nfeProc = NFe assinada + protNFe (é o XML autorizado que gera a DANFE)
+        nfe_proc = None
+        if autorizado and prot is not None:
+            prot_xml = etree.tostring(prot, encoding="unicode")
+            _nfe = xml_assinada
+            if _nfe.lstrip().startswith("<?xml"):
+                _nfe = _nfe[_nfe.find("?>") + 2:].lstrip()
+            nfe_proc = (f'<?xml version="1.0" encoding="UTF-8"?>'
+                        f'<nfeProc versao="4.00" xmlns="{NS}">{_nfe}{prot_xml}</nfeProc>')
         return {
             "ok": autorizado,
             "etapa": "sefaz",
@@ -560,6 +569,7 @@ def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
             "cstat_nfe": cstat_nfe,
             "xmotivo": xmotivo,
             "protocolo": nprot,
+            "nfe_proc": nfe_proc,
             "aviso_xsd": aviso_xsd,
             "xml_debug": xml_assinada,
             "xml_assinado": xml_assinada,
