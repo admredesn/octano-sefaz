@@ -294,12 +294,38 @@ def api_senha_trocar():
 
 
 # ------------------------------------------------------------------
+# CHAVE GERAL do cashback por posto (pedido Ronan 20/08):
+# oct_empresas.cashback_ativo. Sem TRUE explícito o posto está DESLIGADO —
+# não lista no seletor, não cadastra elegibilidade, não aceita acionamento.
+# Fail-safe: erro na consulta = ninguém ligado.
+# ------------------------------------------------------------------
+_CB_LIGADO_CACHE = {"ts": 0.0, "ids": set()}
+
+
+def _cashback_ligados():
+    agora = time.time()
+    if agora - _CB_LIGADO_CACHE["ts"] > 60:
+        try:
+            rows = _sget("oct_empresas?cashback_ativo=eq.true&ativo=eq.true&select=id")
+            _CB_LIGADO_CACHE.update(ts=agora, ids={r["id"] for r in rows})
+        except Exception:
+            _CB_LIGADO_CACHE.update(ts=agora, ids=set())
+    return _CB_LIGADO_CACHE["ids"]
+
+
+def _cashback_ligado(empresa_id):
+    return empresa_id in _cashback_ligados()
+
+
+# ------------------------------------------------------------------
 # APIs
 # ------------------------------------------------------------------
 @bp_cashback.route("/cashback/api/postos", methods=["GET"])
 def api_postos():
     try:
         rows = _sget("oct_empresas?ativo=eq.true&select=id,nome,nome_fantasia&order=nome")
+        ligados = _cashback_ligados()
+        rows = [r for r in rows if r["id"] in ligados]
         return jsonify([{"id": r["id"], "nome": r.get("nome_fantasia") or r.get("nome") or "Posto"} for r in rows])
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
@@ -352,8 +378,10 @@ def api_cadastro():
                                           "sexo", "email", "chave_pix", "senha_hash", "empresa_origem")
                       if k in reg}
             _spost("oct_cashback_clientes", minimo, prefer="return=minimal")
-        # garante a PESSOA do PDV no posto de origem (elegível ao cashback)
-        if posto:
+        # garante a PESSOA do PDV no posto de origem (elegível ao cashback) —
+        # SÓ se o cashback do posto está LIGADO (chave geral); desligado, o
+        # cadastro do app vale, mas sem elegibilidade no posto
+        if posto and _cashback_ligado(posto):
             _garantir_pessoa(posto, reg)
         return jsonify({"ok": True, "token": _token_gerar(cpf), "nome": nome})
     except Exception as e:
@@ -465,6 +493,10 @@ def api_acionar():
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
+    # CHAVE GERAL: posto com cashback desligado não aceita acionamento de
+    # cashback (a venda A PRAZO tem liberação própria e continua valendo)
+    if forma != "05" and not _cashback_ligado(empresa):
+        return jsonify({"erro": "Este posto não oferece cashback no momento."}), 403
     # A PRAZO: só com liberação do POSTO (revalida no servidor); se o cliente é
     # colaborador de EMPRESA, a conta (e o cupom) é da empresa
     conta_prazo = None
