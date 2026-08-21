@@ -303,6 +303,33 @@ def emitir_nfce_empresa():
         return jsonify({"erro": str(e)}), 500
 
 
+@app.route("/emitir-empresa", methods=["POST"])
+def emitir_empresa():
+    """Emite NF-e modelo 55 usando o certificado guardado no servidor (por empresa_id).
+    Par do /emitir-nfce-empresa: o cliente (nucleo/retaguarda) NAO manda cert nem senha.
+    Criado 20/08/2026 para a RECOLHA de NF-e de frota (TicketLog/Edenred), em que a
+    nota sai em nome do cliente da frota devolvido pela API da operadora."""
+    try:
+        from sefaz.emissao import emitir_nfe
+        from sefaz.empresa_cert import carregar_empresa
+        import random
+        dados = request.get_json()
+        empresa_id = dados.get("empresa_id")
+        ambiente = dados.get("ambiente", "homologacao")
+        nota = dados.get("nota")
+        if not empresa_id or not nota:
+            return jsonify({"erro": "empresa_id e nota sao obrigatorios"}), 400
+        if not nota.get("itens"):
+            return jsonify({"erro": "nota.itens vazio"}), 400
+        ctx = carregar_empresa(empresa_id)
+        nota.setdefault("cnf", str(random.randint(10000000, 99999999)))
+        resultado = emitir_nfe(nota, ctx["cert_base64"], ctx["cert_senha"], ambiente)
+        codigo = 200 if resultado.get("ok") else 422
+        return jsonify(resultado), codigo
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
+
+
 @app.route("/cancelar-nfce-empresa", methods=["POST"])
 def cancelar_nfce_empresa():
     """Cancela NFC-e (evento 110111) usando cert/senha do servidor (por empresa_id)."""
