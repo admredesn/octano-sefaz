@@ -154,14 +154,38 @@ def _fornecedor(emp_id, cab):
     return r[0]["id"] if isinstance(r, list) and r else None
 
 
-def _produto_do_tanque(emp_id, tanque_id, it):
-    """Acha o produto ligado ao tanque; se nao existe, CADASTRA (titulo da NF)."""
+def _produto_do_item(emp_id, tanque_desc, it):
+    """Acha (produto_id, tanque_id) do ITEM pelo codigo ANP; se nao existe, CADASTRA.
+
+    O tanque da descarga e' so' o palpite inicial: uma mesma NF pode trazer dois
+    combustiveis (gasolina + diesel na mesma carreta) e cada item tem de cair no
+    SEU tanque. Casar pelo tanque da nota jogava o 2o item no produto do 1o.
+    """
+    anp = str(it.get("codAnp") or "")
     try:
-        pr = _rest_get("oct_produtos", f"?empresa_id=eq.{emp_id}&tanque_id=eq.{tanque_id}&select=id&limit=1")
-        if pr:
-            _rest("PATCH", f"oct_produtos?id=eq.{pr[0]['id']}",
+        if anp:
+            pr = _rest_get("oct_produtos",
+                           f"?empresa_id=eq.{emp_id}&cod_anp=eq.{anp}&select=id,tanque_id")
+            # prefere o produto que ja tem tanque; entre esses, o tanque da descarga
+            comtq = [x for x in (pr or []) if x.get("tanque_id")]
+            if comtq:
+                esc = next((x for x in comtq if x["tanque_id"] == tanque_desc), comtq[0])
+                _rest("PATCH", f"oct_produtos?id=eq.{esc['id']}",
+                      body={"preco_custo": it["vUnCom"]}, prefer="return=minimal")
+                return esc["id"], esc["tanque_id"]
+            if pr:
+                _rest("PATCH", f"oct_produtos?id=eq.{pr[0]['id']}",
+                      body={"preco_custo": it["vUnCom"], "tanque_id": tanque_desc},
+                      prefer="return=minimal")
+                return pr[0]["id"], tanque_desc
+        # ANP desconhecido: so' reaproveita o produto do tanque se o ANP bater ou
+        # estiver vazio -- reaproveitar produto de outro combustivel foi o bug.
+        pt = _rest_get("oct_produtos",
+                       f"?empresa_id=eq.{emp_id}&tanque_id=eq.{tanque_desc}&select=id,cod_anp&limit=1")
+        if pt and str(pt[0].get("cod_anp") or "") in ("", anp):
+            _rest("PATCH", f"oct_produtos?id=eq.{pt[0]['id']}",
                   body={"preco_custo": it["vUnCom"]}, prefer="return=minimal")
-            return pr[0]["id"]
+            return pt[0]["id"], tanque_desc
     except Exception:
         pass
     perfil = {
@@ -175,7 +199,7 @@ def _produto_do_tanque(emp_id, tanque_id, it):
         "unidade": it["unidade"], "categoria": "combustivel", "ncm": it["ncm"] or None,
         "cfop": it["cfop"] or None, "preco_custo": it["vUnCom"], "tanque_id": tanque_id,
         "estoque": 0, "ativo": True, **perfil})
-    return r[0]["id"] if isinstance(r, list) and r else None
+    return (r[0]["id"] if isinstance(r, list) and r else None), tanque_desc
 
 
 # ------------------------------------------------------------------
@@ -225,9 +249,9 @@ def _entrar_nota(emp_id, dados_emp, chave, cand):
     nfe_id = nfe[0]["id"]
 
     # 4) itens + estoque
-    tanque_id = cand.get("_tanque_id")
+    tanque_desc = cand.get("_tanque_id")
     for it in itens:
-        produto_id = _produto_do_tanque(emp_id, tanque_id, it)
+        produto_id, tanque_id = _produto_do_item(emp_id, tanque_desc, it)
         st, item = _rest("POST", "oct_nfe_entrada_itens", body={
             "nfe_id": nfe_id, "codigo": it["codigo"], "descricao": it["descricao"], "ncm": it["ncm"],
             "cest": it["cest"] or None, "cfop": it["cfop"], "unidade": it["unidade"], "quantidade": it["qCom"],
