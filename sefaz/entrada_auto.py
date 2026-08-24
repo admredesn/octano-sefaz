@@ -67,7 +67,30 @@ def _f(v):
 
 
 def _hoje():
-    return datetime.now(timezone.utc).date().isoformat()
+    # data LOCAL do posto. Era UTC: depois das 21h (00h UTC) a entrada caia no
+    # dia seguinte e o LMC do dia acusava sobra/falta de milhares de litros.
+    return datetime.now().date().isoformat()
+
+
+def _data_descarga(cab):
+    """Dia em que o combustivel ENTROU no tanque, para o LMC.
+
+    Nao e' a data em que o robo processou a nota: a nota costuma ser
+    manifestada/baixada no dia seguinte a' descarga, e o LMC e' diario. Media
+    de 21/08 no Tijuco: a sonda viu +5.000 L de gasolina no dia 20, a entrada
+    foi lancada no dia 21 -> o livro acusou +5.015 L de sobra num dia e
+    -5.007 L de falta no outro, com o mes fechando certo. O mesmo padrao
+    aparece nos tres postos, em todo tanque que recebeu descarga.
+
+    Ordem: saida da mercadoria (dhSaiEnt) > emissao (dhEmi) > hoje.
+    """
+    for campo in ("dhSaiEnt", "dhEmi"):
+        v = (cab or {}).get(campo)
+        if v and len(str(v)) >= 10:
+            d = str(v)[:10]
+            if d[4] == "-" and d[7] == "-":
+                return d
+    return _hoje()
 
 
 # ------------------------------------------------------------------
@@ -92,6 +115,7 @@ def _parse_nfe(xml):
         "serie": _txt(root, ".//n:ide/n:serie"),
         "natOp": _txt(root, ".//n:ide/n:natOp"),
         "dhEmi": _txt(root, ".//n:ide/n:dhEmi"),
+        "dhSaiEnt": _txt(root, ".//n:ide/n:dhSaiEnt"),
         "emitCnpj": _txt(emit, "n:CNPJ"),
         "emitNome": _txt(emit, "n:xNome"),
         "emitIE": _txt(emit, "n:IE"),
@@ -240,7 +264,7 @@ def _entrar_nota(emp_id, dados_emp, chave, cand):
     # 3) cabecalho da entrada
     st, nfe = _rest("POST", "oct_nfe_entrada", body={
         "empresa_id": emp_id, "numero": cab["numero"], "serie": cab["serie"], "chave_nfe": cab["chave"],
-        "emissao": cab["dhEmi"] or None, "entrada": _hoje(), "fornecedor_id": forn, "natureza": cab["natOp"],
+        "emissao": cab["dhEmi"] or None, "entrada": _data_descarga(cab), "fornecedor_id": forn, "natureza": cab["natOp"],
         "cfop": cab["cfopCapa"], "valor_total": cab["vNF"], "valor_icms": cab["vICMS"], "valor_pis": cab["vPIS"],
         "valor_cofins": cab["vCOFINS"], "valor_frete": cab["vFrete"], "valor_desconto": cab["vDesc"],
         "status": "importada", "xml_completo": nota["xml"], "n_prot": cab["nProt"] or None})
@@ -269,13 +293,22 @@ def _entrar_nota(emp_id, dados_emp, chave, cand):
             tq = _rest_get("oct_tanques", f"?id=eq.{tanque_id}&select=estoque_atual,capacidade&limit=1")
             if tq:
                 ant = _f(tq[0].get("estoque_atual"))
-                cap = _f(tq[0].get("capacidade")) or (ant + it["qCom"])
-                novo = min(ant + it["qCom"], cap)
+                cap = _f(tq[0].get("capacidade")) or 0.0
+                novo = ant + it["qCom"]
+                # NAO capar mais o estoque na capacidade. O `min(ant+q, cap)`
+                # descartava os litros excedentes EM SILENCIO: em 21/08 o Tijuco
+                # perdeu 4.939 L de gasolina assim. E o excesso nunca significa
+                # que o caminhao trouxe demais — significa que o estoque estava
+                # inflado (so' somava entrada, nunca baixava venda). Grava o
+                # valor real e deixa registrado quando passa do teto.
+                obs = f"NF-e {cab['numero']}/{cab['serie']} - {cab['emitNome']} (auto)"
+                if cap and novo > cap + 0.5:
+                    obs += f" [ATENCAO: estoque calculado {novo:.0f} L acima da capacidade {cap:.0f} L - conferir a sonda]"
                 _rest("PATCH", f"oct_tanques?id=eq.{tanque_id}", body={"estoque_atual": novo}, prefer="return=minimal")
                 _rest("POST", "oct_lmc", body={
-                    "empresa_id": emp_id, "tanque_id": tanque_id, "data": _hoje(), "saldo_anterior": ant,
-                    "entrada": it["qCom"], "saldo_final": novo,
-                    "observacoes": f"NF-e {cab['numero']}/{cab['serie']} - {cab['emitNome']} (auto)"}, prefer="return=minimal")
+                    "empresa_id": emp_id, "tanque_id": tanque_id, "data": _data_descarga(cab),
+                    "saldo_anterior": ant, "entrada": it["qCom"], "saldo_final": novo,
+                    "observacoes": obs}, prefer="return=minimal")
 
     _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{nota['id']}", body={"status": "importada"}, prefer="return=minimal")
     return True, f"entrada OK NF {cab['numero']}"
