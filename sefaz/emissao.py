@@ -200,10 +200,21 @@ def _comb_item(it):
     desc_anp = it.get("desc_anp") or anp.descricao(it["cod_anp"])
     # ordem do leiaute: ... UFCons, CIDE, encerrante, pBio — pBio antes de UFCons
     # quebrava o XSD (falha de schema na SEFAZ). Conferido 15/09/2026.
+    # origComb (UF de origem do combustível): a SEFAZ exige na NF-e (rejeição 909,
+    # 15/09/2026). Na devolução vem da nota de origem (mesmos percentuais); sem
+    # informação, uma origem só: nacional, UF de consumo, 100%.
+    origens = it.get("orig_comb") or [{"indImport": "0",
+                                       "cUFOrig": UF_CODIGO.get(it.get("uf_cons", "MG"), "31"),
+                                       "pOrig": 100}]
+    orig_xml = "".join(
+        f"<origComb><indImport>{o.get('indImport', '0')}</indImport>"
+        f"<cUFOrig>{o.get('cUFOrig')}</cUFOrig><pOrig>{float(o.get('pOrig') or 0):.4f}</pOrig></origComb>"
+        for o in origens[:30]
+    )
     return (
         f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
         f"<descANP>{desc_anp}</descANP>"
-        f"<UFCons>{it.get('uf_cons','MG')}</UFCons>{pbio}</comb>"
+        f"<UFCons>{it.get('uf_cons','MG')}</UFCons>{pbio}{orig_xml}</comb>"
     )
 
 
