@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-09-15-nfe-devolucao-3",
+                    "build": "2026-09-15-nfce-resposta-vazia",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -297,7 +297,8 @@ def emitir_nfce_empresa():
 
         nota.setdefault("cnf", str(random.randint(10000000, 99999999)))
         resultado = emitir_nfce(nota, empresa, ctx["cert_base64"], ctx["cert_senha"], csc, csc_id, ambiente)
-        codigo = 200 if resultado.get("ok") else 422
+        # 503 = SEFAZ nao processou (ex.: resposta vazia): o PDV reemite em contingencia
+        codigo = 200 if resultado.get("ok") else (503 if resultado.get("comunicacao_falhou") else 422)
         return jsonify(resultado), codigo
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
