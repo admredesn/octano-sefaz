@@ -537,6 +537,16 @@ def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="h
                 xmotivo = inf_prot.findtext(f"{{{NS}}}xMotivo") or xmotivo
                 nprot = inf_prot.findtext(f"{{{NS}}}nProt")
 
+        # 15/09/2026: a SEFAZ-MG passou a devolver <nfeResultMsg/> VAZIO (sem cStat)
+        # com o status do servico em 107. O PDV so' entra em contingencia quando a
+        # falha e' de comunicacao; resposta vazia caia como "rejeicao" sem motivo e
+        # a venda travava ("Falha na emissao"). Sem cStat nenhum = SEFAZ nao processou.
+        if cstat_lote is None and prot is None:
+            print("SEFAZ (nfce) respondeu sem cStat:", resp.text[:500])
+            return {"ok": False, "etapa": "sefaz_vazio", "comunicacao_falhou": True, "chave": chave,
+                    "erro": "SEFAZ respondeu sem conteudo (instabilidade) - emitir em contingencia",
+                    "sefaz_raw": resp.text[:2000]}
+
         autorizado = (cstat_nfe == "100")
         if autorizado and prot is not None:
             prot_xml = etree.tostring(prot, encoding="unicode")
@@ -747,6 +757,10 @@ def transmitir_nfce_assinada(xml_final, cert_base64, cert_senha, ambiente="homol
                 cstat_nfe = inf_prot.findtext(f"{{{NS}}}cStat")
                 xmotivo = inf_prot.findtext(f"{{{NS}}}xMotivo") or xmotivo
                 nprot = inf_prot.findtext(f"{{{NS}}}nProt")
+
+        if cstat_lote is None and prot is None:   # resposta vazia: SEFAZ nao processou, fica na fila
+            return {"ok": False, "etapa": "sefaz_vazio", "comunicacao_falhou": True, "chave": chave,
+                    "erro": "SEFAZ respondeu sem conteudo (instabilidade)", "sefaz_raw": resp.text[:2000]}
 
         autorizado = (cstat_nfe == "100")
         # 539 = duplicidade de NFe com a mesma chave porem ja autorizada antes;
