@@ -16,6 +16,7 @@ TESTAR SEMPRE EM HOMOLOGACAO (ambiente="homologacao") ANTES DE PRODUCAO.
 """
 import os
 import re
+from xml.sax.saxutils import escape as xml_escape
 from datetime import datetime, timezone, timedelta
 from lxml import etree
 import requests
@@ -198,10 +199,12 @@ def _comb_item(it):
         pbio = f"<pBio>{float(it['perc_bio']):.4f}</pBio>"
     # descANP: usa o do cadastro; se vier vazio, completa pela tabela oficial ANP.
     desc_anp = it.get("desc_anp") or anp.descricao(it["cod_anp"])
+    # ordem do leiaute: ... UFCons, CIDE, encerrante, pBio — pBio antes de UFCons
+    # quebrava o XSD (falha de schema na SEFAZ). Conferido 15/09/2026.
     return (
         f"<comb><cProdANP>{it['cod_anp']}</cProdANP>"
-        f"<descANP>{desc_anp}</descANP>{pbio}"
-        f"<UFCons>{it.get('uf_cons','MG')}</UFCons></comb>"
+        f"<descANP>{desc_anp}</descANP>"
+        f"<UFCons>{it.get('uf_cons','MG')}</UFCons>{pbio}</comb>"
     )
 
 
@@ -287,15 +290,23 @@ def montar_infnfe(nota, ambiente):
         "<NFref><refNFe>%s</refNFe></NFref>" % re.sub(r"\D", "", str(ch))
         for ch in refs if ch and len(re.sub(r"\D", "", str(ch))) == 44
     )
+    # FINALIDADE (15/09/2026): a tela so' emitia nota normal (finNFe=1, consumidor
+    # final). Devolucao de compra (finNFe=4) exige a NF-e de origem em NFref,
+    # destinatario contribuinte (indFinal=0), sem pagamento (tPag=90) e
+    # indPres=0 ("nao se aplica"). Sem os campos, tudo segue como antes.
+    fin_nfe = str(nota.get("finalidade") or "1")
+    ind_final = str(nota.get("ind_final") or "1")
+    ind_pres = str(nota.get("ind_presenca") or ("0" if fin_nfe in ("3", "4") else "1"))
+    id_dest = "1" if (dest.get("uf") or emit.get("uf") or "MG") == (emit.get("uf") or "MG") else "2"
     ide = (
         f"<ide><cUF>{cuf}</cUF><cNF>{cnf_fmt}</cNF>"
-        f"<natOp>{nota.get('natureza_op','VENDA')}</natOp>"
+        f"<natOp>{xml_escape(str(nota.get('natureza_op') or 'VENDA'))[:60]}</natOp>"
         f"<mod>{modelo}</mod><serie>{serie}</serie><nNF>{numero}</nNF>"
-        f"<dhEmi>{dh_emi}</dhEmi><tpNF>1</tpNF><idDest>1</idDest>"
+        f"<dhEmi>{dh_emi}</dhEmi><tpNF>1</tpNF><idDest>{id_dest}</idDest>"
         f"<cMunFG>{emit.get('c_mun','3118601')}</cMunFG>"
         f"<tpImp>1</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
-        f"<tpAmb>{tp_amb}</tpAmb><finNFe>1</finNFe><indFinal>1</indFinal>"
-        f"<indPres>1</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc>"
+        f"<tpAmb>{tp_amb}</tpAmb><finNFe>{fin_nfe}</finNFe><indFinal>{ind_final}</indFinal>"
+        f"<indPres>{ind_pres}</indPres><procEmi>0</procEmi><verProc>Octano1.0</verProc>"
         f"{nfref_xml}</ide>"
     )
     cep_emit = re.sub(r"\D", "", emit.get("cep", ""))
@@ -328,16 +339,20 @@ def montar_infnfe(nota, ambiente):
         + (f"<IE>{dest['ie']}</IE>" if dest.get("ie") else "")
         + "</dest>"
     )
-    # vICMSMono so entra quando ha item monofasico (CST 61).
-    tag_mono = f"<vICMSMono>{v_icms_mono:.2f}</vICMSMono>" if v_icms_mono > 0 else ""
+    # Monofasico cobrado anteriormente (CST 61) soma em qBCMonoRet/vICMSMonoRet,
+    # logo apos vFCPSTRet — como na NF-e da ALE (367793). vICMSMono e' do CST 02
+    # e ficava depois de vNF, fora do XSD (15/09/2026).
+    q_mono_ret = sum(float(it["qCom"]) for it in nota["itens"] if str(it.get("cst_icms")) == "61")
+    tag_mono = (f"<qBCMonoRet>{q_mono_ret:.2f}</qBCMonoRet><vICMSMonoRet>{v_icms_mono:.2f}</vICMSMonoRet>"
+                if v_icms_mono > 0 else "")
     icmstot = (
         f"<ICMSTot><vBC>0.00</vBC><vICMS>0.00</vICMS>"
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
-        f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>"
+        f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>{tag_mono}"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
         f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF>{tag_mono}<vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
+        f"<vNF>{v_prod:.2f}</vNF><vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
     )
     # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
     tag_gmono = (
@@ -358,11 +373,17 @@ def montar_infnfe(nota, ambiente):
     )
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
-    pag = "<pag><detPag><tPag>01</tPag><vPag>%.2f</vPag></detPag></pag>" % v_prod
+    if fin_nfe in ("3", "4"):
+        # ajuste/devolucao nao tem pagamento: tPag 90 com vPag zerado
+        pag = "<pag><detPag><tPag>90</tPag><vPag>0.00</vPag></detPag></pag>"
+    else:
+        pag = "<pag><detPag><tPag>01</tPag><vPag>%.2f</vPag></detPag></pag>" % v_prod
+    inf_cpl = " ".join(str(nota.get("inf_complementar") or "").split())[:5000]
+    inf_adic = f"<infAdic><infCpl>{xml_escape(inf_cpl)}</infCpl></infAdic>" if inf_cpl else ""
 
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
-        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}</infNFe>"
+        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_adic}</infNFe>"
     )
     nfe = f'<NFe xmlns="{NS}">{inf}</NFe>'
     return nfe, chave
