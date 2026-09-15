@@ -152,14 +152,13 @@ def _imposto_item(it, crt="3"):
         # Posto e substituido (tributo retido na cadeia) -> valores zerados.
         cst_rt = it.get("cst_ibscbs") or "620"
         cclass = it.get("cclasstrib") or "620006"
+        # 15/09/2026: igual à NFC-e autorizada (nfce.py) — só os totais do item.
+        # O gMonoRet zerado + gMono no total passavam no XSD local (antigo) e a
+        # SEFAZ-MG respondeu 225 (falha de schema) na 1ª devolução do Tijuco.
         ibscbs = (
             f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
-            f"<gIBSCBSMono>"
-            f"<gMonoRet><qBCMonoRet>0.0000</qBCMonoRet>"
-            f"<adRemIBSRet>0.0000</adRemIBSRet><vIBSMonoRet>0.00</vIBSMonoRet>"
-            f"<adRemCBSRet>0.0000</adRemCBSRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet>"
-            f"<vTotIBSMonoItem>0.00</vTotIBSMonoItem><vTotCBSMonoItem>0.00</vTotCBSMonoItem>"
-            f"</gIBSCBSMono></IBSCBS>"
+            f"<gIBSCBSMono><vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
+            f"<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>"
         )
     else:
         # Aliquotas-teste 2026: IBS estadual 0,10%, IBS municipal 0%, CBS 0,90%.
@@ -355,11 +354,7 @@ def montar_infnfe(nota, ambiente):
         f"<vNF>{v_prod:.2f}</vNF><vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
     )
     # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
-    tag_gmono = (
-        "<gMono><vIBSMono>0.00</vIBSMono><vCBSMono>0.00</vCBSMono>"
-        "<vIBSMonoReten>0.00</vIBSMonoReten><vCBSMonoReten>0.00</vCBSMonoReten>"
-        "<vIBSMonoRet>0.00</vIBSMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMono>"
-    ) if tem_mono else ""
+    tag_gmono = ""   # sem gMono: a NFC-e autorizada não manda (ver IBSCBS do item)
     ibscbstot = (
         f"<IBSCBSTot><vBCIBSCBS>{v_bc_rt_tot:.2f}</vBCIBSCBS>"
         f"<gIBS>"
