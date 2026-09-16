@@ -41,6 +41,52 @@ def _texto_xml(s, limite=4000):
     return s[:limite]
 
 
+_CNPJ_CACHE = {}
+
+
+def _dest_cnpj(cnpj, emit):
+    """Nome e <enderDest> de um CNPJ, pela BrasilAPI (mesma fonte da rota /cnpj).
+    Sem resposta, usa o endereco do proprio posto: a venda nao pode travar por
+    causa de uma consulta externa, e a SEFAZ aceita o grupo completo."""
+    if cnpj not in _CNPJ_CACHE:
+        dados = None
+        try:
+            r = requests.get("https://brasilapi.com.br/api/cnpj/v1/" + cnpj, timeout=6,
+                             headers={"User-Agent": "Octano-Sistemas/1.0"})
+            if r.status_code == 200:
+                dados = r.json()
+        except Exception:
+            dados = None
+        _CNPJ_CACHE[cnpj] = dados
+    d = _CNPJ_CACHE.get(cnpj)
+    if d and d.get("codigo_municipio_ibge"):
+        nome = _texto_xml(d.get("razao_social") or d.get("nome_fantasia") or "CONSUMIDOR", 60)
+        lgr = _texto_xml(" ".join(x for x in (d.get("descricao_tipo_de_logradouro"), d.get("logradouro")) if x), 60) or "NAO INFORMADO"
+        nro = _texto_xml(d.get("numero") or "S/N", 60) or "S/N"
+        cpl = _texto_xml(d.get("complemento") or "", 60)
+        bai = _texto_xml(d.get("bairro") or "", 60) or "NAO INFORMADO"
+        cmun = str(d.get("codigo_municipio_ibge"))
+        xmun = _texto_xml(d.get("municipio") or "", 60) or "NAO INFORMADO"
+        uf = str(d.get("uf") or "MG")
+        cep = re.sub(r"\D", "", str(d.get("cep") or ""))
+    else:
+        nome = "CONSUMIDOR"
+        lgr = _texto_xml(emit.get("logradouro") or "", 60) or "NAO INFORMADO"
+        nro = _texto_xml(emit.get("numero") or "S/N", 60) or "S/N"
+        cpl = ""
+        bai = _texto_xml(emit.get("bairro") or "", 60) or "NAO INFORMADO"
+        cmun = str(emit.get("c_mun") or "3123205")
+        xmun = _texto_xml(emit.get("municipio") or "", 60) or "NAO INFORMADO"
+        uf = str(emit.get("uf") or "MG")
+        cep = re.sub(r"\D", "", str(emit.get("cep") or ""))
+    ender = (f"<enderDest><xLgr>{lgr}</xLgr><nro>{nro}</nro>"
+             + (f"<xCpl>{cpl}</xCpl>" if cpl else "")
+             + f"<xBairro>{bai}</xBairro><cMun>{cmun}</cMun><xMun>{xmun}</xMun><UF>{uf}</UF>"
+             + (f"<CEP>{cep}</CEP>" if len(cep) == 8 else "")
+             + "<cPais>1058</cPais><xPais>BRASIL</xPais></enderDest>")
+    return nome, ender
+
+
 def _imposto_item_nfce(it):
     """Imposto do item da NFC-e, espelhando EXATAMENTE os cupons autorizados do posto.
     Diferencas vs modelo 55: SEM <IPI>; PIS/COFINS no grupo Aliq (CST 01) com valor real.
@@ -356,6 +402,15 @@ def montar_infnfce(nota, empresa, ambiente):
         tag_doc = "CNPJ" if len(doc_dest) == 14 else "CPF"
         # indIEDest=9 (nao contribuinte) e obrigatorio no <dest> da NFC-e
         dest_xml = f"<dest><{tag_doc}>{doc_dest}</{tag_doc}><indIEDest>9</indIEDest></dest>"
+        if tag_doc == "CNPJ":
+            # 16/09/2026: a SEFAZ-MG passou a devolver 999 "Erro nao catalogado"
+            # para NFC-e com CNPJ sem nome e endereco do destinatario (com CPF
+            # segue aceitando so o documento). Nome/endereco vem do CNPJ.
+            nome_d, ender_d = _dest_cnpj(doc_dest, emit)
+            if tp_amb == "2":
+                nome_d = "NF-E EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
+            dest_xml = (f"<dest><CNPJ>{doc_dest}</CNPJ><xNome>{nome_d}</xNome>"
+                        f"{ender_d}<indIEDest>9</indIEDest></dest>")
 
     tag_qbcmono = f"<qBCMonoRet>{q_bc_mono:.2f}</qBCMonoRet>" if q_bc_mono > 0 else ""
     icmstot = (
