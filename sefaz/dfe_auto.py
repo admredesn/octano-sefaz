@@ -233,6 +233,14 @@ def _ciclo():
             entrada_auto.processar_empresa(emp["id"])
         except Exception as e:
             print(f"[entrada] {emp.get('id')}: {e}")
+        # Fase 4: baixa de contas a pagar quando nota + descarga + pagamento
+        # coincidem (trava CONCILIAR_PAGAR). Roda depois da entrada porque
+        # depende da descarga estar 'entrada_feita'.
+        try:
+            from . import conciliador_pagar
+            conciliador_pagar.processar_empresa(emp["id"])
+        except Exception as e:
+            print(f"[conciliar-pagar] {emp.get('id')}: {e}")
 
 
 _on = False
