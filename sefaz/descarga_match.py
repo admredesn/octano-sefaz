@@ -245,19 +245,54 @@ def _casar(recon, fuel, dia, nfs):
 # ------------------------------------------------------------------
 # 5. grava candidato (idempotente; nao rebaixa status)
 # ------------------------------------------------------------------
+VIZINHANCA_H = 2   # mesma descarga re-detectada com `ini` deslocado (borda da janela)
+
+
 def _gravar(emp_id, d, fuel, recon, vend, match):
     chave_desc = _iso(d["ini"])
+    # A MESMA descarga fisica volta a ser detectada com `ini` deslocado alguns
+    # minutos quando a borda da janela de DESCARGA_DIAS passa por cima dela (o
+    # primeiro ponto da serie muda a cada ciclo, entao a "base" do salto muda).
+    # Chavear por descarga_ini EXATO criava uma linha nova a cada ciclo por ~1h,
+    # 7 dias depois da descarga (803 linhas excedentes em 23/09/2026). Por isso a
+    # busca e' por VIZINHANCA: mesma empresa+tanque, ini dentro de +-VIZINHANCA_H.
     # OBS: o '+00:00' do timestamp PRECISA de URL-encode ('+' cru vira espaco no
     # PostgREST -> busca falha -> POST duplicado silencioso e a linha nunca atualiza)
-    chave_q = urllib.parse.quote(chave_desc)
+    ini_de = urllib.parse.quote(_iso(d["ini"] - timedelta(hours=VIZINHANCA_H)))
+    ini_ate = urllib.parse.quote(_iso(d["ini"] + timedelta(hours=VIZINHANCA_H)))
     try:
         ex = _rest_get("oct_nfe_descarga",
                        f"?empresa_id=eq.{emp_id}&tanque_numero=eq.{d['tanque']}"
-                       f"&descarga_ini=eq.{chave_q}&select=id,status&limit=1")
+                       f"&descarga_ini=gte.{ini_de}&descarga_ini=lte.{ini_ate}"
+                       f"&select=id,status,diferenca,confianca,volume_salto,nf_chaves&order=criado_em.asc")
     except Exception:
         ex = []
-    if ex and ex[0].get("status") not in (None, "candidato", "sem_nf"):
+    # "mesma descarga" = vizinha no tempo E salto compativel (ou mesma NF). Dois
+    # compartimentos do mesmo produto no mesmo tanque, 1h um do outro, tem saltos
+    # diferentes (ex.: AC 10/09: 4.816 L e 8.029 L) e continuam sendo 2 linhas.
+    nf_new = ",".join(x.get("chave") or "" for x in match["nfs"]) if match else ""
+
+    def _mesma(e):
+        try:
+            vs = float(e.get("volume_salto") or 0)
+        except (TypeError, ValueError):
+            vs = 0.0
+        if abs(vs - d["salto"]) <= max(300.0, 0.10 * d["salto"]):
+            return True
+        return bool(nf_new) and (e.get("nf_chaves") or "") == nf_new
+    ex = [e for e in ex if _mesma(e)]
+    if any(e.get("status") not in (None, "candidato", "sem_nf") for e in ex):
         return  # ja confirmado/entrada feita -> nao mexe
+    if ex:
+        # ja existe candidato p/ essa descarga: so' atualiza se o casamento novo
+        # for igual ou melhor (a deteccao na borda da janela sai truncada e pode
+        # piorar a diferenca); e mantem o descarga_ini original da linha.
+        old = ex[0]
+        old_dif = old.get("diferenca")
+        new_dif = match["dif"] if match else None
+        if old.get("confianca") not in (None, "sem_nf"):
+            if new_dif is None or (old_dif is not None and new_dif > float(old_dif)):
+                return
     reg = {
         "empresa_id": emp_id, "tanque_numero": d["tanque"], "combustivel": fuel,
         "descarga_ini": chave_desc, "descarga_fim": _iso(d["fim"]),
@@ -270,6 +305,7 @@ def _gravar(emp_id, d, fuel, recon, vend, match):
         "status": "candidato", "atualizado_em": _iso(datetime.now(timezone.utc)),
     }
     if ex:
+        reg.pop("descarga_ini", None)   # chave original fica; nunca cria 2a linha
         _rest("PATCH", f"oct_nfe_descarga?id=eq.{ex[0]['id']}", body=reg, prefer="return=minimal")
     else:
         _rest("POST", "oct_nfe_descarga", body=reg, prefer="return=minimal")
@@ -330,6 +366,17 @@ def casar_empresa(emp_id):
         for l in med:
             por_tanque.setdefault(l["tanque_numero"], []).append((_t(l["medido_em"]), l.get("volume")))
         nfs = _nfs_combustivel(emp_id)
+        # NF ja' CONSUMIDA por uma descarga com entrada feita nao concorre de novo.
+        # Senao a 2a carga do mesmo produto (NF nova ainda chegando pelo DistDFe)
+        # casa com a NF velha em conf 'alta', o entrada_auto responde "ja importada"
+        # e a NF certa nunca da' entrada (13 NFs em 2 descargas ate 23/09/2026).
+        try:
+            feitas = _rest_get("oct_nfe_descarga",
+                               f"?empresa_id=eq.{emp_id}&status=eq.entrada_feita&select=nf_chaves&limit=1000")
+            usadas = {c for r in feitas for c in (r.get("nf_chaves") or "").split(",") if c}
+        except Exception:
+            usadas = set()
+        nfs = [nf for nf in nfs if nf.get("chave") not in usadas]
         n_casadas = 0
         n_descargas = 0
         datas_sem_nf = set()
@@ -337,7 +384,15 @@ def casar_empresa(emp_id):
             fuel = tq.get(t)
             if not fuel:
                 continue
-            for d in _detectar(sorted(serie, key=lambda x: x[0])):
+            serie_ord = sorted(serie, key=lambda x: x[0])
+            borda = serie_ord[0][0] + timedelta(minutes=JANELA_MIN)
+            for d in _detectar(serie_ord):
+                if d["ini"] < borda:
+                    # Descarga CORTADA pela borda da janela de DESCARGA_DIAS: a
+                    # "base" do salto e' o 1o ponto da serie (parcial) e o `ini`
+                    # anda a cada ciclo. Ela ja' foi gravada inteira quando era
+                    # recente -- ignora em vez de gerar linha nova/truncada.
+                    continue
                 n_descargas += 1
                 d["tanque"] = t
                 vend = _vendas(emp_id, fuel, d["ini"], d["fim"])
