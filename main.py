@@ -29,27 +29,16 @@ def health():
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
 def consultar_cnpj(cnpj):
-    """Consulta dados publicos de um CNPJ via BrasilAPI (proxy servidor-a-servidor
-    para evitar bloqueio de CORS no navegador). Retorna o JSON da BrasilAPI."""
-    import requests
+    """Dados publicos de um CNPJ (proxy servidor-a-servidor, sem CORS). Formato
+    da BrasilAPI + inscricao_estadual + _fonte. 30/09/2026: com fontes reserva
+    (cnpj.ws, ReceitaWS, CNPJa) — a BrasilAPI sozinha caia e o cadastro parava."""
     try:
-        cnpj_limpo = "".join(ch for ch in (cnpj or "") if ch.isdigit())
-        if len(cnpj_limpo) != 14:
-            return jsonify({"erro": "CNPJ deve ter 14 digitos"}), 400
-        r = requests.get(
-            "https://brasilapi.com.br/api/cnpj/v1/" + cnpj_limpo,
-            timeout=15,
-            headers={"User-Agent": "Octano-Sistemas/1.0"},
-        )
-        if r.status_code == 404:
-            return jsonify({"erro": "CNPJ nao encontrado"}), 404
-        if r.status_code != 200:
-            return jsonify({"erro": "Falha na consulta", "status": r.status_code}), 502
-        return jsonify(r.json())
-    except requests.exceptions.Timeout:
-        return jsonify({"erro": "Tempo de consulta esgotado"}), 504
+        from sefaz.cnpj_fontes import consultar_cnpj as _consultar
+        st, dados = _consultar(cnpj)
+        return jsonify(dados), st
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
+
 
 @app.route("/manifestar", methods=["POST"])
 def manifestar():
