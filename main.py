@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-09-16-nfce-dest-cnpj",
+                    "build": "2026-10-01-manif-cert-servidor",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -40,15 +40,32 @@ def consultar_cnpj(cnpj):
         return jsonify({"erro": str(e)}), 500
 
 
+def _cert_manifestacao(dados):
+    """cnpj + certificado + senha para a manifestacao.
+
+    Com `empresa_id`, usa o certificado e a senha guardados no SERVIDOR (os
+    mesmos do robo). O retaguarda guarda UMA senha no navegador para todos os
+    postos: ao trocar de posto no seletor, mandava o certificado da Florestal
+    com a senha de outro posto -> "Invalid password or PKCS12 data"
+    (01/10/2026). Sem empresa_id, vale o cert/senha que vierem (modo antigo)."""
+    empresa_id = (dados.get("empresa_id") or "").strip()
+    if empresa_id:
+        from sefaz.empresa_cert import carregar_empresa
+        ctx = carregar_empresa(empresa_id)
+        cnpj = str((ctx.get("empresa") or {}).get("cnpj") or "")
+        return (cnpj.replace(".", "").replace("/", "").replace("-", ""),
+                ctx["cert_base64"], ctx["cert_senha"])
+    cnpj = (dados.get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+    return cnpj, dados.get("cert_base64"), dados.get("cert_senha")
+
+
 @app.route("/manifestar", methods=["POST"])
 def manifestar():
     """Consulta NF-es emitidas contra o CNPJ na SEFAZ (DistDFe)"""
     try:
         from sefaz.distdfe import consultar_distdfe
         dados = request.get_json()
-        cnpj = dados.get("cnpj", "").replace(".", "").replace("/", "").replace("-", "")
-        cert_base64 = dados.get("cert_base64")
-        cert_senha = dados.get("cert_senha")
+        cnpj, cert_base64, cert_senha = _cert_manifestacao(dados)
         ambiente = dados.get("ambiente", "homologacao")
         ultimo_nsu = dados.get("ultimo_nsu", "0")
 
@@ -67,10 +84,8 @@ def manifestar_ciencia():
     try:
         from sefaz.evento import registrar_evento
         dados = request.get_json()
-        cnpj = dados.get("cnpj", "").replace(".", "").replace("/", "").replace("-", "")
+        cnpj, cert_base64, cert_senha = _cert_manifestacao(dados)
         chave = dados.get("chave_nfe")
-        cert_base64 = dados.get("cert_base64")
-        cert_senha = dados.get("cert_senha")
         ambiente = dados.get("ambiente", "homologacao")
 
         if not all([cnpj, chave, cert_base64, cert_senha]):
@@ -88,10 +103,8 @@ def manifestar_confirmacao():
     try:
         from sefaz.evento import registrar_evento
         dados = request.get_json()
-        cnpj = dados.get("cnpj", "").replace(".", "").replace("/", "").replace("-", "")
+        cnpj, cert_base64, cert_senha = _cert_manifestacao(dados)
         chave = dados.get("chave_nfe")
-        cert_base64 = dados.get("cert_base64")
-        cert_senha = dados.get("cert_senha")
         ambiente = dados.get("ambiente", "homologacao")
 
         if not all([cnpj, chave, cert_base64, cert_senha]):
@@ -109,9 +122,7 @@ def baixar_xml(chave):
     try:
         from sefaz.distdfe import baixar_xml_nfe
         dados = request.get_json()
-        cnpj = dados.get("cnpj", "").replace(".", "").replace("/", "").replace("-", "")
-        cert_base64 = dados.get("cert_base64")
-        cert_senha = dados.get("cert_senha")
+        cnpj, cert_base64, cert_senha = _cert_manifestacao(dados)
         ambiente = dados.get("ambiente", "homologacao")
         nsu = dados.get("nsu")
 
