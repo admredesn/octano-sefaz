@@ -52,7 +52,36 @@ def _storage_download(caminho):
         return base64.b64encode(r.read()).decode("utf-8")
 
 
+import threading as _threading
+import time as _time
+_CACHE = {}                 # empresa_id -> (instante, ctx)
+_CACHE_SEG = 300
+_CACHE_LOCK = _threading.Lock()
+
+
+def esquecer_empresa(empresa_id=None):
+    """Descarta o cache (cert trocado no retaguarda)."""
+    with _CACHE_LOCK:
+        if empresa_id:
+            _CACHE.pop(empresa_id, None)
+        else:
+            _CACHE.clear()
+
+
 def carregar_empresa(empresa_id):
+    """Com cache de 5 min (30/09/2026): cada NFC-e fazia REST + download do
+    certificado no Storage antes de montar a nota."""
+    with _CACHE_LOCK:
+        hit = _CACHE.get(empresa_id)
+    if hit and _time.time() - hit[0] < _CACHE_SEG:
+        return hit[1]
+    ctx = _carregar_empresa_sem_cache(empresa_id)
+    with _CACHE_LOCK:
+        _CACHE[empresa_id] = (_time.time(), ctx)
+    return ctx
+
+
+def _carregar_empresa_sem_cache(empresa_id):
     """Retorna dict com dados da empresa + cert_base64 + cert_senha (decifrada).
     Lanca RuntimeError com mensagem clara se algo faltar."""
     rows = _rest_get("oct_empresas", f"?id=eq.{empresa_id}&select=*")
