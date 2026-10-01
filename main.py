@@ -239,6 +239,11 @@ def cadastrar_cert():
             return jsonify({"erro": "empresa_id e senha sao obrigatorios"}), 400
 
         senha_cifrada = cifrar(senha)
+        try:
+            from sefaz.empresa_cert import esquecer_empresa
+            esquecer_empresa(empresa_id)
+        except Exception:
+            pass
 
         # grava via REST (service key)
         url = os.environ.get("SUPABASE_URL", "").strip().rstrip("/")
