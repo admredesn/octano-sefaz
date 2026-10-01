@@ -48,17 +48,22 @@ def _dest_cnpj(cnpj, emit):
     """Nome e <enderDest> de um CNPJ, pela BrasilAPI (mesma fonte da rota /cnpj).
     Sem resposta, usa o endereco do proprio posto: a venda nao pode travar por
     causa de uma consulta externa, e a SEFAZ aceita o grupo completo."""
-    if cnpj not in _CNPJ_CACHE:
+    import time as _t
+    hit = _CNPJ_CACHE.get(cnpj)
+    # cache: (instante, dados). Achado vale 7 dias; falha so 10 min (tenta de novo).
+    if not (isinstance(hit, tuple) and _t.time() - hit[0] < (7 * 86400 if hit[1] else 600)):
         dados = None
         try:
-            # 30/09/2026: com fontes reserva (a BrasilAPI sozinha caia)
+            # 30/09/2026: fontes reserva + PRAZO DE 2,5 s. Isto roda DENTRO da
+            # emissao: sem prazo, BrasilAPI fora segurava a NFC-e por 6-30 s.
+            # Sem resposta a tempo, usa o endereco do posto (a SEFAZ aceita).
             from .cnpj_fontes import consultar_cnpj
-            st, d = consultar_cnpj(cnpj)
+            st, d = consultar_cnpj(cnpj, prazo=2.5)
             dados = d if st == 200 else None
         except Exception:
             dados = None
-        _CNPJ_CACHE[cnpj] = dados
-    d = _CNPJ_CACHE.get(cnpj)
+        _CNPJ_CACHE[cnpj] = (_t.time(), dados)
+    d = (_CNPJ_CACHE.get(cnpj) or (0, None))[1]
     if d and d.get("codigo_municipio_ibge"):
         nome = _texto_xml(d.get("razao_social") or d.get("nome_fantasia") or "CONSUMIDOR", 60)
         lgr = _texto_xml(" ".join(x for x in (d.get("descricao_tipo_de_logradouro"), d.get("logradouro")) if x), 60) or "NAO INFORMADO"
