@@ -20,6 +20,14 @@ Tabelas (Supabase):
     criado_em, usado_em, venda_numero)
 
 Token de sessão: HMAC-SHA256("cpf|exp") com CHAVE_MESTRA (env) — sem dependências.
+
+VENDA A PRAZO COM FACIAL (01/10/2026, decisão do Ronan): a "assinatura" da compra a
+prazo é uma SELFIE tirada ANTES de abastecer (foto como prova — sem reconhecimento
+automático). No cadastro o cliente aceita o termo (LGPD) e tira a foto de referência;
+no acionamento forma 05 a selfie é OBRIGATÓRIA. O caixa vê as duas fotos lado a lado
+na contagem do PDV e o cupom sai com "autorizada por NOME — código". As fotos ficam
+num bucket PRIVADO (octano-faces): só este servidor lê/grava; o PDV recebe link
+assinado de 10 min, e só com operador logado. Selfie de compra: apagada após 60 dias.
 """
 
 import os
@@ -30,6 +38,7 @@ import base64
 import hashlib
 import secrets
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
 
 import requests as rq
@@ -121,6 +130,135 @@ def _spatch(q, body, prefer="return=minimal"):
     url, _ = _supa()
     r = _checa(rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=20))
     return r.json() if (r.text or "").strip() and "representation" in prefer else None
+
+
+# ------------------------------------------------------------------
+# FACIAL — fotos de rosto (bucket PRIVADO) + termo + código de autenticação
+# ------------------------------------------------------------------
+BUCKET_FACES = "octano-faces"
+FACE_GUARDA_DIAS = 60            # selfie de COMPRA; a foto do cadastro fica enquanto a conta existir
+TERMO_VERSAO = "2026-10-01"
+TERMO_TEXTO = (
+    "TERMO DE CONSENTIMENTO — USO DA IMAGEM DO ROSTO (LGPD, Lei 13.709/2018)\n\n"
+    "1. O que coletamos: uma foto do seu rosto no cadastro e uma foto a cada compra a prazo "
+    "feita pelo aplicativo, com data, hora, aparelho e endereço de rede usados.\n\n"
+    "2. Para que serve: confirmar que é você quem está autorizando a compra a prazo no posto e "
+    "servir de comprovante dessa autorização, no lugar da assinatura em papel. A foto NÃO é "
+    "usada para reconhecimento automático nem para outra finalidade.\n\n"
+    "3. Quem vê: o posto onde você compra (caixa e gerência) e a empresa que opera o sistema. "
+    "As fotos não são vendidas nem repassadas a terceiros.\n\n"
+    "4. Por quanto tempo: a foto de cada compra é apagada depois de 60 dias. A foto do cadastro "
+    "fica guardada enquanto a sua conta existir.\n\n"
+    "5. Seus direitos: você pode pedir a qualquer momento para ver, corrigir ou apagar as suas "
+    "fotos e retirar este consentimento, no próprio posto. Sem a foto, a compra a prazo continua "
+    "possível no caixa, com a via em papel.\n\n"
+    "Ao marcar o aceite e tirar a foto, você concorda com este termo."
+)
+
+
+def _st_headers(extra=None):
+    _, key = _supa()
+    h = {"apikey": key, "Authorization": "Bearer " + key}
+    if extra:
+        h.update(extra)
+    return h
+
+
+def _st_upload(caminho, dados):
+    url, _ = _supa()
+    _checa(rq.post(f"{url}/storage/v1/object/{BUCKET_FACES}/{caminho}", data=dados,
+                   headers=_st_headers({"Content-Type": "image/jpeg", "x-upsert": "true"}), timeout=30))
+
+
+def _st_assinar(caminho, seg=600):
+    """Link temporário para UMA foto (o bucket é privado). None se a foto não existe mais."""
+    if not caminho:
+        return None
+    url, _ = _supa()
+    r = rq.post(f"{url}/storage/v1/object/sign/{BUCKET_FACES}/{caminho}", json={"expiresIn": seg},
+                headers=_st_headers({"Content-Type": "application/json"}), timeout=15)
+    if r.status_code >= 400:
+        return None
+    u = (r.json() or {}).get("signedURL") or (r.json() or {}).get("signedUrl") or ""
+    return (f"{url}/storage/v1{u}" if u.startswith("/") else u) or None
+
+
+def _foto_bytes(dataurl):
+    """'data:image/jpeg;base64,...' -> bytes. Só JPEG, de 4 KB a 700 KB (a tela reduz para 640 px)."""
+    txt = str(dataurl or "")
+    if not txt.startswith("data:image/jpeg;base64,"):
+        raise ValueError("Tire a foto do rosto para autorizar a compra a prazo.")
+    try:
+        dados = base64.b64decode(txt.split(",", 1)[1], validate=True)
+    except Exception:
+        raise ValueError("Foto inválida — tire de novo.")
+    if dados[:2] != b"\xff\xd8" or not (4000 <= len(dados) <= 700000):
+        raise ValueError("Foto inválida — tire de novo.")
+    return dados
+
+
+def _cpf_mascara(cpf):
+    c = _so_digitos(cpf)
+    return f"***.{c[3:6]}.{c[6:9]}-**" if len(c) == 11 else "***"
+
+
+def _auth_codigo(ac_id, cpf, foto_hash):
+    """Código curto impresso no cupom: prova que ESTA selfie autorizou ESTE acionamento."""
+    return hmac.new(_segredo(), f"{ac_id}|{cpf}|{foto_hash}".encode(), hashlib.sha256).hexdigest()[:8].upper()
+
+
+_FACES_LIMPEZA = {"ts": 0.0}
+
+
+def _faces_limpar():
+    """Apaga as selfies de COMPRA com mais de 60 dias (pastas compras/AAAA-MM-DD). No máximo
+    1 vez por dia, de carona num acionamento — sem agendador."""
+    if time.time() - _FACES_LIMPEZA["ts"] < 86400:
+        return
+    _FACES_LIMPEZA["ts"] = time.time()
+    try:
+        url, _ = _supa()
+        hj = {"Content-Type": "application/json"}
+        corte = (datetime.now(timezone.utc) - timedelta(days=FACE_GUARDA_DIAS)).strftime("%Y-%m-%d")
+        r = rq.post(f"{url}/storage/v1/object/list/{BUCKET_FACES}", headers=_st_headers(hj), timeout=20,
+                    json={"prefix": "compras", "limit": 1000, "sortBy": {"column": "name", "order": "asc"}})
+        for pasta in (r.json() if r.status_code < 400 else []):
+            dia = pasta.get("name") or ""
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", dia) or dia >= corte:
+                continue
+            r2 = rq.post(f"{url}/storage/v1/object/list/{BUCKET_FACES}", headers=_st_headers(hj), timeout=20,
+                         json={"prefix": f"compras/{dia}", "limit": 1000})
+            nomes = [f"compras/{dia}/{o['name']}" for o in (r2.json() if r2.status_code < 400 else []) if o.get("name")]
+            if nomes:
+                rq.delete(f"{url}/storage/v1/object/{BUCKET_FACES}", headers=_st_headers(hj),
+                          json={"prefixes": nomes}, timeout=30)
+    except Exception:
+        pass
+
+
+_OPERADOR_CACHE = {}
+
+
+def _operador_logado():
+    """A chamada vem de um operador LOGADO no PDV/retaguarda? Confere o token do Supabase
+    (o mesmo da sessão dele). Guarda o resultado por 5 min."""
+    tok = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    if len(tok) < 40:
+        return False
+    ate = _OPERADOR_CACHE.get(tok)
+    if ate and ate > time.time():
+        return True
+    try:
+        url, key = _supa()
+        r = rq.get(f"{url}/auth/v1/user", headers={"apikey": key, "Authorization": "Bearer " + tok}, timeout=10)
+        if r.status_code == 200 and (r.json() or {}).get("id"):
+            if len(_OPERADOR_CACHE) > 500:
+                _OPERADOR_CACHE.clear()
+            _OPERADOR_CACHE[tok] = time.time() + 300
+            return True
+    except Exception:
+        pass
+    return False
 
 
 _RE_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -466,12 +604,80 @@ def api_me():
     return jsonify({
         "ok": True, "nome": cli["nome"], "chave_pix": chave, "total_pago": round(total_pago, 2),
         "proxima_liberacao": prox,
+        "tem_facial": bool(cli.get("foto_path") and cli.get("lgpd_aceito_em")),
         "acionamento": (ac[0] if ac else None),
         "cashbacks": [{
             "valor": c.get("valor_cashback"), "litros": c.get("litros"), "status": c.get("status"),
             "quando": c.get("pago_em") or c.get("criado_em"), "cupom": c.get("numero_nfe"),
             "posto": nomes.get(c.get("empresa_id"), ""),
         } for c in cbs],
+    })
+
+
+@bp_cashback.route("/cashback/api/termo", methods=["GET"])
+def api_termo():
+    return jsonify({"ok": True, "versao": TERMO_VERSAO, "texto": TERMO_TEXTO})
+
+
+@bp_cashback.route("/cashback/api/facial", methods=["POST"])
+def api_facial():
+    """Foto de REFERÊNCIA do rosto + aceite do termo (LGPD). Habilita a compra a prazo pelo app
+    (o prazo em si continua dependendo da liberação do posto)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    d = request.get_json(silent=True) or {}
+    if d.get("aceite") is not True:
+        return jsonify({"erro": "É preciso aceitar o termo para cadastrar a foto."}), 400
+    try:
+        foto = _foto_bytes(d.get("foto"))
+    except ValueError as e:
+        return jsonify({"erro": str(e)}), 400
+    try:
+        caminho = f"cadastro/{cli['cpf']}.jpg"
+        _st_upload(caminho, foto)
+        agora = datetime.now(timezone.utc).isoformat()
+        _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}",
+                {"foto_path": caminho, "foto_em": agora, "lgpd_aceito_em": agora, "lgpd_versao": TERMO_VERSAO})
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"erro": "não consegui guardar a foto: " + str(e)[:160]}), 500
+
+
+@bp_cashback.route("/cashback/api/pdv/assinatura", methods=["GET"])
+def api_pdv_assinatura():
+    """Para o CAIXA conferir quem autorizou a compra a prazo: foto do cadastro x selfie da
+    autorização (links de 10 min) + nome, CPF mascarado e código. Só com operador logado."""
+    if not _operador_logado():
+        return jsonify({"erro": "entre no sistema para ver a foto"}), 401
+    ac_id = _uuid_ok(request.args.get("acionamento"))
+    if not ac_id:
+        return jsonify({"erro": "acionamento inválido"}), 400
+    try:
+        acs = _sget(f"oct_cashback_acionamentos?id=eq.{ac_id}"
+                    f"&select=id,empresa_id,cliente_cpf,cliente_nome,assinante_nome,selfie_path,selfie_em,"
+                    f"auth_codigo,forma,placa,km&limit=1")
+    except Exception as e:
+        return jsonify({"erro": "banco: " + str(e)[:120]}), 500
+    if not acs:
+        return jsonify({"erro": "acionamento não encontrado"}), 404
+    ac = acs[0]
+    if not ac.get("auth_codigo") or not ac.get("selfie_path"):
+        return jsonify({"ok": True, "assinado": False})
+    cad = None
+    try:
+        cl = _sget(f"oct_cashback_clientes?cpf=eq.{ac['cliente_cpf']}&select=foto_path,foto_em&limit=1")
+        cad = cl[0] if cl else None
+    except Exception:
+        cad = None
+    return jsonify({
+        "ok": True, "assinado": True, "acionamento": ac["id"],
+        "assinante": ac.get("assinante_nome") or ac.get("cliente_nome"),
+        "cpf": _so_digitos(ac.get("cliente_cpf")), "cpf_mascarado": _cpf_mascara(ac.get("cliente_cpf")),
+        "auth_codigo": ac["auth_codigo"], "selfie_em": ac.get("selfie_em"), "selfie_path": ac["selfie_path"],
+        "selfie_url": _st_assinar(ac["selfie_path"]),
+        "cadastro_url": _st_assinar((cad or {}).get("foto_path")),
+        "cadastro_em": (cad or {}).get("foto_em"),
     })
 
 
@@ -500,10 +706,20 @@ def api_acionar():
     # A PRAZO: só com liberação do POSTO (revalida no servidor); se o cliente é
     # colaborador de EMPRESA, a conta (e o cupom) é da empresa
     conta_prazo = None
+    selfie = None
     if forma == "05":
         ok, motivo, conta_prazo = _prazo_liberado(empresa, cli["cpf"])
         if not ok:
             return jsonify({"erro": motivo}), 403
+        # A PRAZO pelo app = assinatura por SELFIE (antes de abastecer). Sem foto de referência
+        # + termo aceito, ou sem a selfie desta compra, não aciona: a compra é feita no caixa.
+        if not (cli.get("foto_path") and cli.get("lgpd_aceito_em")):
+            return jsonify({"erro": "Para comprar a prazo pelo app, aceite o termo e cadastre a foto do seu rosto.",
+                            "precisa_facial": True}), 428
+        try:
+            selfie = _foto_bytes(d.get("selfie"))
+        except ValueError as e:
+            return jsonify({"erro": str(e), "precisa_selfie": True}), 400
     # janela 2h (regra do CASHBACK — não vale pro A PRAZO, que pode repetir no dia)
     if forma != "05":
         corte2h = (datetime.now(timezone.utc) - timedelta(seconds=JANELA_2H_SEG)).isoformat()
@@ -556,14 +772,29 @@ def api_acionar():
             km = None
         if km:
             reg["km"] = km
+        if selfie:
+            # a selfie sobe ANTES do acionamento existir: o PDV nunca vê um a prazo sem a foto
+            agora_s = datetime.now(timezone.utc)
+            ac_id = str(uuid.uuid4())
+            caminho_s = f"compras/{agora_s.strftime('%Y-%m-%d')}/{ac_id}.jpg"
+            _st_upload(caminho_s, selfie)
+            hash_s = hashlib.sha256(selfie).hexdigest()
+            ip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+            reg.update({
+                "id": ac_id, "selfie_path": caminho_s, "selfie_em": agora_s.isoformat(), "selfie_hash": hash_s,
+                "auth_codigo": _auth_codigo(ac_id, cli["cpf"], hash_s), "assinante_nome": cli["nome"][:120],
+                "auth_ip": ip[:60], "auth_aparelho": (request.headers.get("User-Agent") or "")[:200],
+            })
         try:
             novo = _spost("oct_cashback_acionamentos", reg)
         except RuntimeError as e:
-            if "Could not find the" not in str(e):
-                raise
+            if "Could not find the" not in str(e) or selfie:
+                raise                                    # com selfie as colunas novas são obrigatórias
             for c in ("bico", "itens", "placa", "km"):   # tabela sem alguma coluna nova
                 reg.pop(c, None)
             novo = _spost("oct_cashback_acionamentos", reg)
+        if selfie:
+            _faces_limpar()
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
                         "validade_min": ACIONAMENTO_VALIDADE_MIN})
     except Exception as e:
@@ -728,7 +959,8 @@ def api_acionamento_live():
         return jsonify({"ok": True, "fase": "sem_acionamento"})
     ac = acs[0]
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
-            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens", "placa", "km")}}
+            ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens", "placa", "km",
+             "auth_codigo", "selfie_em")}}
     bico = ac.get("bico")
 
     # cashback gerado depois do acionamento? (fase final)
@@ -1176,6 +1408,21 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <button type="button" onclick="fecharScanner()" style="max-width:400px;background:#2a2d3e">Cancelar e digitar o número</button>
     <input id="scan-foto" type="file" accept="image/*" capture="environment" style="display:none">
   </div>
+
+  <!-- FOTO DO ROSTO: referência do cadastro (com o termo) e selfie que autoriza cada compra a prazo -->
+  <div id="face-overlay" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.94);z-index:9999;flex-direction:column;align-items:center;justify-content:center;padding:14px;overflow:auto">
+    <div id="face-titulo" style="color:#fff;font-weight:700;margin-bottom:8px;text-align:center"></div>
+    <div id="face-termo-box" style="display:none;max-width:400px;width:100%;margin-bottom:10px">
+      <div id="face-termo" style="max-height:150px;overflow:auto;background:#0d1017;border:1px solid #232838;border-radius:9px;padding:10px;font-size:.74rem;color:#cbd5e1;white-space:pre-wrap;text-align:left"></div>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px;font-size:.82rem;color:#fff;cursor:pointer"><input type="checkbox" id="face-aceite" style="width:auto;margin-top:3px"> Li e aceito o termo de uso da minha imagem.</label>
+    </div>
+    <video id="face-video" playsinline muted autoplay style="width:240px;height:240px;object-fit:cover;border-radius:50%;border:3px solid #f97316;transform:scaleX(-1);background:#000"></video>
+    <div id="face-msg" class="sub" style="margin-top:10px;text-align:center;min-height:1.2em"></div>
+    <button type="button" onclick="faceCapturar()" style="max-width:400px;background:#16a34a">📸 Tirar a foto</button>
+    <button type="button" onclick="facePorArquivo()" style="max-width:400px;background:#1a2233;border:1px solid #232838">Não abriu? Usar a câmera do celular</button>
+    <button type="button" onclick="faceFechar(null)" style="max-width:400px;background:#2a2d3e">Cancelar</button>
+    <input id="face-arq" type="file" accept="image/*" capture="user" style="display:none">
+  </div>
   <div id="js-erro" style="display:none;position:fixed;bottom:0;left:0;right:0;background:#7f1d1d;color:#fecaca;font-size:.72rem;padding:8px 12px;z-index:99999;word-break:break-all"></div>
 
   <div class="card esc" id="pwa-card">
@@ -1185,7 +1432,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão frota-veiculos-14</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão prazo-facial-15</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1294,8 +1541,71 @@ async function fazerCadastro(){
     cidade:document.getElementById("cd-cidade").value,uf:document.getElementById("cd-uf").value,
     chave_pix:document.getElementById("cd-pix").value,
     senha:s1,posto:POSTO||null});
-  if(r.token){localStorage.setItem("cb_token",r.token);carregarDash();}
+  if(r.token){
+    localStorage.setItem("cb_token",r.token);
+    await carregarDash();
+    // último passo do cadastro: termo + foto do rosto (para comprar a prazo pelo app; pode pular)
+    await facialCadastrar("Último passo: foto do seu rosto (para comprar a prazo pelo app)");
+  }
   else{m.className="msg erro";m.textContent=r.erro||"Falha no cadastro";}
+}
+
+// ---- FOTO DO ROSTO (referência do cadastro e selfie de cada compra a prazo) ----
+let TEM_FACIAL=false,_faceStream=null,_faceResolve=null;
+function faceAbrir(titulo,comTermo){
+  return new Promise(async resolve=>{
+    _faceResolve=resolve;
+    document.getElementById("face-titulo").textContent=titulo;
+    document.getElementById("face-termo-box").style.display=comTermo?"block":"none";
+    document.getElementById("face-aceite").checked=false;
+    const msg=document.getElementById("face-msg");msg.textContent="Abrindo a câmera…";
+    const ov=document.getElementById("face-overlay");
+    if(ov.parentElement!==document.body)document.body.appendChild(ov);   // nasce dentro de uma tela que pode estar escondida
+    ov.style.display="flex";
+    if(comTermo){try{const t=await req("/cashback/api/termo");document.getElementById("face-termo").textContent=t.texto||"";}catch(e){}}
+    try{
+      if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("sem câmera");
+      _faceStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:640}},audio:false});
+      const v=document.getElementById("face-video");v.srcObject=_faceStream;try{await v.play();}catch(e){}
+      msg.textContent="Enquadre o rosto no círculo e toque em tirar a foto.";
+    }catch(e){msg.textContent="Não consegui abrir a câmera aqui — use o botão da câmera do celular.";}
+  });
+}
+function _faceParar(){if(_faceStream){_faceStream.getTracks().forEach(t=>t.stop());_faceStream=null;}document.getElementById("face-video").srcObject=null;}
+function faceFechar(valor){_faceParar();document.getElementById("face-overlay").style.display="none";const r=_faceResolve;_faceResolve=null;if(r)r(valor);}
+function _faceAceiteOk(){
+  if(document.getElementById("face-termo-box").style.display==="none")return true;
+  if(document.getElementById("face-aceite").checked)return true;
+  document.getElementById("face-msg").textContent="Marque que leu e aceita o termo.";return false;
+}
+function _faceReduzir(fonte,w,h){
+  const esc=Math.min(1,640/Math.max(w,h)),c=document.createElement("canvas");
+  c.width=Math.round(w*esc);c.height=Math.round(h*esc);
+  c.getContext("2d").drawImage(fonte,0,0,c.width,c.height);
+  return c.toDataURL("image/jpeg",0.82);
+}
+function faceCapturar(){
+  if(!_faceAceiteOk())return;
+  const v=document.getElementById("face-video");
+  if(!_faceStream||!v.videoWidth){document.getElementById("face-msg").textContent="Câmera indisponível — use o botão da câmera do celular.";return;}
+  faceFechar(_faceReduzir(v,v.videoWidth,v.videoHeight));
+}
+function facePorArquivo(){if(_faceAceiteOk())document.getElementById("face-arq").click();}
+document.getElementById("face-arq").addEventListener("change",ev=>{
+  const f=ev.target.files&&ev.target.files[0];ev.target.value="";if(!f)return;
+  const u=URL.createObjectURL(f),im=new Image();
+  im.onload=()=>{URL.revokeObjectURL(u);faceFechar(_faceReduzir(im,im.naturalWidth,im.naturalHeight));};
+  im.onerror=()=>{URL.revokeObjectURL(u);document.getElementById("face-msg").textContent="Não consegui ler a foto — tente de novo.";};
+  im.src=u;
+});
+// termo + foto de referência. true = cadastrou
+async function facialCadastrar(titulo){
+  const foto=await faceAbrir(titulo||"Foto do seu rosto para o cadastro",true);
+  if(!foto)return false;
+  const r=await req("/cashback/api/facial",{foto:foto,aceite:true});
+  if(r.ok){TEM_FACIAL=true;return true;}
+  alert(r.erro||"Não consegui salvar a foto.");
+  return false;
 }
 
 function sair(){localStorage.removeItem("cb_token");mostrar("tela-login");}
@@ -1304,6 +1614,7 @@ async function carregarDash(){
   const r=await req("/cashback/api/me");
   if(!r.ok){sair();return;}
   mostrar("tela-dash");
+  TEM_FACIAL=!!r.tem_facial;
   document.getElementById("dh-nome").textContent=r.nome.split(" ")[0];
   document.getElementById("dh-total").textContent=brl(r.total_pago);
   const prox=document.getElementById("dh-prox");
@@ -1493,13 +1804,24 @@ async function acionar(){
     if(!bicoV&&!combV&&!temProduto){m.className="msg erro";m.textContent="Adicione produtos ao carrinho — ou informe o bico se for abastecer.";return;}
     if(!bicoV&&combV){m.className="msg erro";m.textContent="Escolheu o combustível: informe o Nº DO BICO (ou deixe o combustível vazio para só produtos).";return;}
   }
+  // A PRAZO: a sua foto é a assinatura da compra — tirada agora, antes de abastecer
+  let selfie=null;
+  if(fPag==="05"){
+    if(!TEM_FACIAL){
+      m.textContent="Para comprar a prazo pelo app precisamos da foto do seu rosto (uma vez só).";
+      if(!(await facialCadastrar())){m.className="msg erro";m.textContent="Sem a foto do cadastro, a compra a prazo é feita no caixa.";return;}
+    }
+    selfie=await faceAbrir("Sua foto autoriza esta compra a prazo",false);
+    if(!selfie){m.className="msg erro";m.textContent="Sem a foto, a compra a prazo não é autorizada pelo app.";return;}
+  }
   m.textContent="Acionando…";
-  const r=await req("/cashback/api/acionar",{posto:posto,bico:document.getElementById("ac-bico").value,
+  const r=await req("/cashback/api/acionar",{posto:posto,selfie:selfie,bico:document.getElementById("ac-bico").value,
     combustivel:document.getElementById("ac-comb").value,forma:document.getElementById("ac-forma").value,
     itens:(document.getElementById("ac-forma").value==="05"?CARRINHO:[]),
     placa:document.getElementById("ac-placa").value,km:document.getElementById("ac-km").value});
   if(r.ok){m.textContent="";CARRINHO=[];carrinhoRender();carregarDash();ligarEspelho();}
   else{m.className="msg erro";m.textContent=r.erro||"Falha ao acionar";
+    if(r.precisa_facial)TEM_FACIAL=false;
     if(r.proxima_liberacao){const d=new Date(r.proxima_liberacao);m.textContent+=" (libera às "+d.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"})+")";}}
 }
 
@@ -1539,7 +1861,8 @@ async function _lvTick(){
     num.textContent=brl(a.valor||a.valor_total||0);
     det.textContent=Number(a.litros||0).toFixed(2)+" L de "+(a.produto_nome||"combustível")+
       (ac.forma==="05"
-        ? ". Vai direto pra sua CONTA no posto — só assinar a via no caixa 🧾"
+        ? (ac.auth_codigo ? ". Vai direto pra sua CONTA no posto — já autorizada pela sua foto ✅"
+                          : ". Vai direto pra sua CONTA no posto — só assinar a via no caixa 🧾")
         : ". Agora pague no caixa em "+nomeForma(ac.forma)+" 💳");
   } else if(r.fase==="cashback"){
     const c=r.cashback||{};
@@ -1550,8 +1873,8 @@ async function _lvTick(){
   } else if(r.fase==="usado"&&ac.forma==="05"){
     fase.textContent="🧾 Venda A PRAZO lançada na sua conta!";
     num.textContent=ac.venda_numero?("cupom "+ac.venda_numero):"✓";
-    det.textContent="Obrigado pela preferência — bom trajeto! ⛽";
-    clearInterval(_lvTimer);_lvTimer=null;setTimeout(carregarDash,5000);
+    det.textContent=(ac.auth_codigo?("Autorizada pela sua foto · código "+ac.auth_codigo+". O cupom segue no seu WhatsApp/e-mail. "):"")+"Obrigado pela preferência — bom trajeto! ⛽";
+    clearInterval(_lvTimer);_lvTimer=null;setTimeout(carregarDash,ac.auth_codigo?12000:5000);
   } else { // usado / expirado / cancelado
     fase.textContent="Acionamento "+r.fase;num.textContent="—";det.textContent="";
     if(r.fase==="expirado"||r.fase==="cancelado")desligarEspelho();
