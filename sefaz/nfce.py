@@ -51,10 +51,10 @@ def _dest_cnpj(cnpj, emit):
     if cnpj not in _CNPJ_CACHE:
         dados = None
         try:
-            r = requests.get("https://brasilapi.com.br/api/cnpj/v1/" + cnpj, timeout=6,
-                             headers={"User-Agent": "Octano-Sistemas/1.0"})
-            if r.status_code == 200:
-                dados = r.json()
+            # 30/09/2026: com fontes reserva (a BrasilAPI sozinha caia)
+            from .cnpj_fontes import consultar_cnpj
+            st, d = consultar_cnpj(cnpj)
+            dados = d if st == 200 else None
         except Exception:
             dados = None
         _CNPJ_CACHE[cnpj] = dados
