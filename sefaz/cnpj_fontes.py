@@ -133,9 +133,12 @@ FONTES = [
 ]
 
 
-def consultar_cnpj(cnpj):
+def consultar_cnpj(cnpj, prazo=None):
     """Devolve (status, dados). status: 200 achou; 404 nenhuma fonte conhece o
-    CNPJ (e pelo menos uma respondeu 404); 502 nenhuma fonte respondeu."""
+    CNPJ (e pelo menos uma respondeu 404); 502 nenhuma fonte respondeu.
+    prazo: segundos no TOTAL (todas as fontes). Usado DENTRO da emissao da NFC-e,
+    que nao pode esperar 30 s por um endereco (30/09/2026)."""
+    fim = (time.time() + prazo) if prazo else None
     c = _so_digitos(cnpj)
     if len(c) != 14:
         return 400, {"erro": "CNPJ deve ter 14 digitos"}
@@ -144,6 +147,11 @@ def consultar_cnpj(cnpj):
         return 200, hit[1]
     viu_404 = False
     for nome, url, tmo, ler in FONTES:
+        if fim is not None:
+            resta = fim - time.time()
+            if resta < 0.4:
+                break
+            tmo = min(tmo, resta)
         st, bruto = _get(url.format(c=c), tmo)
         if st == 404:
             viu_404 = True
