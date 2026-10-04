@@ -169,7 +169,7 @@ def gerar_danfce_pdf(xml_proc, extras=None):
         # ===== PAGAMENTO =====
         DOIS("FORMA DE PAGAMENTO", "VALOR PAGO R$", size=7, h=3.2, frac=0.5)
         FORMAS = {"01": "Dinheiro", "02": "Cheque", "03": "Cartao Credito",
-                  "04": "Cartao Debito", "05": "Credito Loja", "15": "Boleto",
+                  "04": "Cartao Debito", "05": "NOTA A PRAZO", "15": "Boleto",   # 05 = credito loja: no posto e' a nota a prazo
                   "17": "PIX", "99": "Outros"}
         for p in root.findall(f".//{{{NS}}}detPag"):
             DOIS(FORMAS.get(_txt(p, "tPag"), "Pagamento"), _moeda(_txt(p, "vPag")), size=7, h=3.2)
