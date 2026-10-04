@@ -220,6 +220,11 @@ def gerar_danfce_pdf(xml_proc, extras=None):
 
         # ===== TRIBUTOS (IBPT) =====
         trib = extras.get("tributos")
+        if not trib:
+            # nota nova traz federal/estadual/municipal nas informações adicionais
+            _cpl = _txt(root.find(f".//{{{NS}}}infAdic"), "infCpl") or ""
+            _m = re.search(r"Val\. Aprox\. Tributos:[^|]*", _cpl)
+            trib = _m.group(0).strip() if _m else ""
         if trib:
             L(trib, size=5, h=2.5)
         elif v_trib and float(v_trib or 0) > 0:
