@@ -471,9 +471,13 @@ def montar_infnfce(nota, empresa, ambiente):
     # impressos no documento fiscal -- exigencia do cliente (07/08/2026), ja que
     # o cupom e o que o motorista leva e o que a frota confere depois.
     _cpl_extra = _texto_xml(nota.get("inf_cpl"))
-    _cpl_base = "Documento emitido por ME ou EPP optante. NFC-e"
-    _cpl = (_cpl_base + " | " + _cpl_extra) if _cpl_extra else _cpl_base
-    inf_adic = f"<infAdic><infCpl>{_cpl}</infCpl></infAdic>"
+    # "ME ou EPP optante" só vale para quem É do Simples (CRT 1, 2 ou 4 = MEI).
+    # Saía fixo em todo posto -- o Florestal (regime normal) imprimia como se
+    # fosse Simples; o TecnoX não imprime (03/10/2026).
+    _crt = str(emit.get("crt", "3") or "3")
+    _cpl_base = "Documento emitido por ME ou EPP optante. NFC-e" if _crt in ("1", "2", "4") else ""
+    _cpl = " | ".join(x for x in (_cpl_base, _cpl_extra) if x)
+    inf_adic = f"<infAdic><infCpl>{_cpl}</infCpl></infAdic>" if _cpl else ""
 
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
