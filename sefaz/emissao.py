@@ -182,7 +182,7 @@ def _imposto_item(it, crt="3"):
 
     # vTotTrib do item (Lei 12.741, IBPT) — 1º elemento do <imposto>; a soma dos
     # itens tem que bater com o <vTotTrib> do total (senão: rejeição 685).
-    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"))
+    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"), it)   # item: litros + ad rem (imposto real)
     return f"<imposto><vTotTrib>{v_trib:.2f}</vTotTrib><ICMS>{icms}</ICMS>{ipi}{pis}{cof}{ibscbs}</imposto>"
 
 
