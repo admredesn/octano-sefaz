@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-01-manif-cert-servidor",
+                    "build": "2026-10-03-ibpt-imposto-real",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -518,6 +518,28 @@ try:
     iniciar_agendador()
 except Exception as _e:
     print("[dfe-auto] nao iniciou:", _e)
+
+
+# ── Tabela IBPT (Lei 12.741): atualização automática de 6 em 6 h ─────────────
+# Espelho público das tabelas + API oficial do IBPT (se IBPT_TOKEN/IBPT_CNPJ).
+# Grava em oct_ibpt; os emissores (este servidor e os núcleos) leem de lá.
+try:
+    from sefaz.ibpt_sync import iniciar as _ibpt_iniciar
+    _ibpt_iniciar()
+except Exception as _e:
+    print("[ibpt] nao iniciou:", _e)
+
+
+@app.route("/ibpt/status", methods=["GET"])
+def ibpt_status():
+    """Só leitura: qual tabela IBPT está valendo e quando foi conferida."""
+    try:
+        from sefaz.ibpt_sync import _versao_gravada
+        from sefaz import ibpt as _ib
+        return jsonify({"ok": True, "nuvem": _versao_gravada(), "emissor_usa": _ib.versao(),
+                        "api_oficial": bool(os.environ.get("IBPT_TOKEN"))})
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
 
 
 if __name__ == "__main__":
