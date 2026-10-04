@@ -160,7 +160,7 @@ def _imposto_item_nfce(it):
                   f"<gCBS><pCBS>0.9000</pCBS><vCBS>{v_cbs:.2f}</vCBS></gCBS></gIBSCBS></IBSCBS>")
     # vTotTrib do item (Lei 12.741, IBPT). É o 1º elemento do <imposto> e a SOMA
     # dos itens tem que bater com o <vTotTrib> do total (senão: rejeição 685).
-    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"))
+    v_trib = ibpt.v_item_trib(it.get("vProd"), it.get("ncm"), it.get("origem", "0"), it)   # item: litros + ad rem (imposto real)
     return f"<imposto><vTotTrib>{v_trib:.2f}</vTotTrib>{icms}{pis}{cof}{ibscbs}</imposto>"
 
 
@@ -476,7 +476,13 @@ def montar_infnfce(nota, empresa, ambiente):
     # fosse Simples; o TecnoX não imprime (03/10/2026).
     _crt = str(emit.get("crt", "3") or "3")
     _cpl_base = "Documento emitido por ME ou EPP optante. NFC-e" if _crt in ("1", "2", "4") else ""
-    _cpl = " | ".join(x for x in (_cpl_base, _cpl_extra) if x)
+    # tributos por ente, no formato do TecnoX (Decreto 8.264: federal, estadual
+    # e municipal separados). O estadual do combustível é o ICMS real por litro.
+    try:
+        _cpl_trib = ibpt.texto_cupom(nota["itens"])
+    except Exception:
+        _cpl_trib = ""
+    _cpl = " | ".join(x for x in (_cpl_base, _cpl_trib, _cpl_extra) if x)
     inf_adic = f"<infAdic><infCpl>{_cpl}</infCpl></infAdic>" if _cpl else ""
 
     inf = (
