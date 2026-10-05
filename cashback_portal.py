@@ -53,6 +53,21 @@ COMBUSTIVEIS = ["GASOLINA COMUM", "GASOLINA ADITIVADA", "ETANOL", "DIESEL S10", 
 FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("05", "A Prazo")]
 
 
+def _prazo_conta_confirmada(empresa_id, cli):
+    """A prazo pelo app (05/10/2026, auditoria #17/#48): só para conta confirmada pelo
+    contato que o POSTO tem da pessoa, ou cujo telefone do app é o mesmo do cadastro do
+    posto (quem liberou o crédito conferiu esse cadastro)."""
+    if str(cli.get("verificado_via") or "").endswith("posto"):
+        return True
+    try:
+        p = _sget(f"oct_pessoas?empresa_id=eq.{empresa_id}&documento=eq.{cli['cpf']}"
+                  f"&select=telefone,whatsapp&limit=1")
+    except Exception:
+        return False
+    meu = _so_digitos(cli.get("telefone"))[-10:]
+    return bool(p and len(meu) == 10 and meu in {_so_digitos(p[0].get(k))[-10:] for k in ("telefone", "whatsapp")})
+
+
 def _prazo_liberado(empresa_id, cpf):
     """Cliente pode comprar A PRAZO neste posto? A liberação é do POSTO.
     Se a pessoa está VINCULADA a uma EMPRESA (frota_empresa_id), o crédito é
@@ -204,7 +219,7 @@ def _cpf_mascara(cpf):
 
 def _auth_codigo(ac_id, cpf, foto_hash):
     """Código curto impresso no cupom: prova que ESTA selfie autorizou ESTE acionamento."""
-    return hmac.new(_segredo(), f"{ac_id}|{cpf}|{foto_hash}".encode(), hashlib.sha256).hexdigest()[:8].upper()
+    return hmac.new(_chave("auth"), f"{ac_id}|{cpf}|{foto_hash}".encode(), hashlib.sha256).hexdigest()[:8].upper()
 
 
 _FACES_LIMPEZA = {"ts": 0.0}
@@ -288,35 +303,104 @@ def _confere_senha(senha, guardado):
 
 
 def _segredo():
-    return (os.environ.get("CHAVE_MESTRA") or "octano-cashback-dev").encode()
+    """CHAVE_MESTRA do ambiente. SEM valor padrão (05/10/2026, auditoria #226): com o
+    padrão escrito no código, qualquer um forjava sessão de qualquer CPF se a variável
+    faltasse no servidor. Faltou = o portal para, em vez de aceitar token forjável."""
+    m = (os.environ.get("CHAVE_MESTRA") or "").strip()
+    if not m:
+        raise RuntimeError("CHAVE_MESTRA não configurada no servidor")
+    return m.encode()
 
 
-def _token_gerar(cpf):
-    exp = int(time.time()) + 30 * 86400   # 30 dias
-    corpo = f"{cpf}|{exp}"
-    ass = hmac.new(_segredo(), corpo.encode(), hashlib.sha256).hexdigest()[:32]
+def _chave(uso):
+    """Uma chave por uso, derivada da CHAVE_MESTRA (que também cifra os certificados):
+    vazar o segredo de um uso não entrega o outro."""
+    return hmac.new(_segredo(), ("octano-cashback|" + uso).encode(), hashlib.sha256).digest()
+
+
+# Sessão v2 (05/10/2026): "v2|cpf|exp|versão|assinatura". A versão é
+# oct_cashback_clientes.token_versao: trocar a senha (ou "sair de todos os aparelhos")
+# soma 1 e derruba as sessões antigas. Token v1 (sem versão) não vale mais.
+TOKEN_DIAS = 30
+
+
+def _token_gerar(cpf, versao=0):
+    exp = int(time.time()) + TOKEN_DIAS * 86400
+    corpo = f"v2|{cpf}|{exp}|{int(versao or 0)}"
+    ass = hmac.new(_chave("token"), corpo.encode(), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode(f"{corpo}|{ass}".encode()).decode()
 
 
 def _token_validar(tok):
+    """(cpf, versão) ou None."""
     try:
         corpo = base64.urlsafe_b64decode(tok.encode()).decode()
-        cpf, exp, ass = corpo.rsplit("|", 2)
+        partes = corpo.split("|")
+        if len(partes) != 5 or partes[0] != "v2":
+            return None
+        _, cpf, exp, ver, ass = partes
         if int(exp) < time.time():
             return None
-        esperado = hmac.new(_segredo(), f"{cpf}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
-        return cpf if hmac.compare_digest(ass, esperado) else None
+        esperado = hmac.new(_chave("token"), f"v2|{cpf}|{exp}|{ver}".encode(), hashlib.sha256).hexdigest()[:32]
+        return (cpf, int(ver)) if hmac.compare_digest(ass, esperado) else None
     except Exception:
         return None
 
 
 def _cliente_do_token():
     tok = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
-    cpf = _token_validar(tok) if tok else None
-    if not cpf:
+    val = _token_validar(tok) if tok else None
+    if not val:
         return None
+    cpf, ver = val
     rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1")
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    cli = rows[0]
+    if int(cli.get("token_versao") or 0) != ver or not cli.get("verificado_em"):
+        return None                     # senha trocada / saiu de todos / conta não confirmada
+    return cli
+
+
+def _token_do_cliente(cli):
+    return _token_gerar(cli["cpf"], cli.get("token_versao") or 0)
+
+
+# ------------------------------------------------------------------
+# LIMITES DE TENTATIVA (05/10/2026, auditoria #224). Por IP: na memória do
+# processo (barato; cada worker conta o seu). Por CPF: na linha do cliente
+# (vale entre os workers e sobrevive a reinício).
+# ------------------------------------------------------------------
+_LIMITES = {}
+
+
+def _ip():
+    return (request.headers.get("X-Forwarded-For") or request.remote_addr or "").split(",")[0].strip()
+
+
+def _limite_ok(chave, maximo, janela_seg):
+    agora = time.time()
+    if len(_LIMITES) > 5000:
+        _LIMITES.clear()
+    lst = [t for t in _LIMITES.get(chave, []) if agora - t < janela_seg]
+    if len(lst) >= maximo:
+        _LIMITES[chave] = lst
+        return False
+    lst.append(agora)
+    _LIMITES[chave] = lst
+    return True
+
+
+def _muitas(msg="Muitas tentativas seguidas. Espere alguns minutos e tente de novo."):
+    return jsonify({"erro": msg}), 429
+
+
+LOGIN_MAX_FALHAS = 5          # erros de senha seguidos antes de bloquear o CPF
+LOGIN_BLOQUEIO_SEG = 15 * 60
+CODIGO_MAX_TENTATIVAS = 5     # erros no código antes de ele deixar de valer
+CODIGO_VALIDADE_SEG = 15 * 60
+CODIGO_INTERVALO_SEG = 60     # entre dois pedidos de código do mesmo CPF
+CODIGO_MAX_HORA = 5
 
 
 # ------------------------------------------------------------------
@@ -339,11 +423,50 @@ def _cpf_valido(cpf):
 
 
 # ------------------------------------------------------------------
-# RECUPERAÇÃO DE SENHA: código de 6 dígitos por WhatsApp (gateway octano-wpp,
-# envs WPP_URL/WPP_TOKEN) ou e-mail (envs SMTP_HOST/SMTP_PORT/SMTP_USER/
-# SMTP_SENHA). Código gravado no próprio cadastro (reset_codigo/reset_expira).
+# CÓDIGOS DE 6 DÍGITOS: confirmar o cadastro e recuperar a senha (05/10/2026).
+#
+# Auditoria #17/#48: o cadastro aceitava qualquer CPF válido sem prova de nada;
+# quem cadastrasse primeiro o CPF de um cliente a prazo comprava na conta dele. Agora
+# a conta só vale depois de confirmada por código, e o código vai para o CONTATO
+# OFICIAL: o WhatsApp/telefone/e-mail que o POSTO tem da pessoa (oct_pessoas). Só
+# quando o posto não tem contato nenhum vale o que a pessoa digitou no app — e aí a
+# conta fica "confirmada pelo app", que não compra a prazo (ver api_acionar).
+#
+# Envio: WhatsApp pelo gateway da rede (WPP_URL/WPP_TOKEN). E-mail pelo SMTP do
+# servidor (SMTP_*), que no Railway costuma estar bloqueado — o WhatsApp é o canal.
 # ------------------------------------------------------------------
-def _reset_enviar_whatsapp(tel, codigo):
+def _mascara_fone(d):
+    return "WhatsApp •••" + _so_digitos(d)[-4:]
+
+
+def _mascara_email(e):
+    u, _, dom = str(e or "").partition("@")
+    return (u[:1] + "•••@" + dom) if dom else "e-mail"
+
+
+def _contatos_oficiais(cpf, cli=None):
+    """(fones, emails, origem). origem 'posto' = contato que o POSTO cadastrou;
+    'app' = o posto não tem nenhum contato desta pessoa e vale o digitado no app."""
+    fones, emails = [], []
+    try:
+        for p in _sget(f"oct_pessoas?documento=eq.{cpf}&select=whatsapp,telefone,email&limit=10"):
+            for t in (p.get("whatsapp"), p.get("telefone")):
+                d = _so_digitos(t)
+                if len(d) >= 10 and d[-10:] not in [x[-10:] for x in fones]:
+                    fones.append(d)
+            e = str(p.get("email") or "").strip()
+            if "@" in e and e.lower() not in [x.lower() for x in emails]:
+                emails.append(e)
+    except Exception:
+        pass
+    if fones or emails:
+        return fones[:3], emails[:2], "posto"
+    d = _so_digitos((cli or {}).get("telefone"))
+    e = str((cli or {}).get("email") or "").strip()
+    return ([d] if len(d) >= 10 else []), ([e] if "@" in e else []), "app"
+
+
+def _wpp_texto(tel, msg):
     import urllib.request as _rq
     base = (os.environ.get("WPP_URL") or "").rstrip("/")
     tok = os.environ.get("WPP_TOKEN") or ""
@@ -352,8 +475,6 @@ def _reset_enviar_whatsapp(tel, codigo):
     tel = _so_digitos(tel)
     if len(tel) <= 11:
         tel = "55" + tel
-    msg = (f"🔐 *Recuperação de senha — Octano*\n\nSeu código é: *{codigo}*\n\n"
-           "Ele vale por 15 minutos. Se você não pediu, ignore esta mensagem.")
     req = _rq.Request(base + "/send-text",
                       data=json.dumps({"phone": tel, "message": msg}).encode(),
                       headers={"Content-Type": "application/json", "x-wpp-token": tok})
@@ -361,7 +482,7 @@ def _reset_enviar_whatsapp(tel, codigo):
         pass
 
 
-def _reset_enviar_email(email, codigo):
+def _email_texto(email, assunto, texto):
     import smtplib
     from email.mime.text import MIMEText
     host = os.environ.get("SMTP_HOST") or ""
@@ -370,9 +491,8 @@ def _reset_enviar_email(email, codigo):
     porta = int(os.environ.get("SMTP_PORT") or 587)
     if not host or not user:
         raise RuntimeError("E-mail indisponível")
-    m = MIMEText(f"Seu código de recuperação de senha do Octano é: {codigo}\n\n"
-                 "Ele vale por 15 minutos. Se você não pediu, ignore este e-mail.")
-    m["Subject"] = "Octano — código de recuperação de senha"
+    m = MIMEText(texto)
+    m["Subject"] = assunto
     m["From"] = user
     m["To"] = email
     with smtplib.SMTP(host, porta, timeout=30) as s:
@@ -381,32 +501,103 @@ def _reset_enviar_email(email, codigo):
         s.send_message(m)
 
 
+_CODIGO_CAMPOS = {   # motivo -> (coluna do código, coluna da validade, coluna das tentativas)
+    "verificar": ("verif_codigo", "verif_expira", "verif_tentativas"),
+    "reset": ("reset_codigo", "reset_expira", "reset_tentativas"),
+}
+
+
+def _enviar_codigo(cli, motivo, canal="whatsapp"):
+    """Gera, grava (hash) e envia o código ao contato oficial.
+    Devolve (ok, destino_mascarado, origem, erro)."""
+    agora = int(time.time())
+    if agora - int(cli.get("envio_ultimo") or 0) < CODIGO_INTERVALO_SEG:
+        return False, None, None, "Já enviamos um código agora há pouco. Espere 1 minuto para pedir outro."
+    ini, qtd = int(cli.get("envio_janela_ini") or 0), int(cli.get("envio_qtd") or 0)
+    if agora - ini > 3600:
+        ini, qtd = agora, 0
+    if qtd >= CODIGO_MAX_HORA:
+        return False, None, None, "Muitos códigos pedidos para este CPF. Tente de novo em 1 hora."
+    fones, emails, origem = _contatos_oficiais(cli["cpf"], cli)
+    codigo = str(secrets.randbelow(900000) + 100000)
+    col_cod, col_exp, col_tent = _CODIGO_CAMPOS[motivo]
+    _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}",
+            {col_cod: _hash_senha(codigo), col_exp: agora + CODIGO_VALIDADE_SEG, col_tent: 0,
+             "envio_ultimo": agora, "envio_janela_ini": ini, "envio_qtd": qtd + 1})
+    if motivo == "verificar":
+        titulo, assunto = "Confirmação do cadastro", "confirmação do cadastro"
+    else:
+        titulo, assunto = "Recuperação de senha", "recuperação de senha"
+    msg = (f"🔐 *{titulo} — Cashback do Posto (Rede SN)*\n\nSeu código é: *{codigo}*\n\n"
+           "Ele vale por 15 minutos. Não passe este código para ninguém. Se você não pediu, ignore.")
+    enviados, erros = [], []
+    if canal == "email":
+        for e in emails:
+            try:
+                _email_texto(e, f"Cashback do Posto — código de {assunto}",
+                             f"Seu código de {assunto} é: {codigo}\n\nEle vale por 15 minutos. "
+                             "Não passe este código para ninguém. Se você não pediu, ignore este e-mail.")
+                enviados.append(_mascara_email(e))
+            except Exception as ex:
+                erros.append(str(ex)[:80])
+        if not emails:
+            erros.append("sem e-mail cadastrado")
+    else:
+        for t in fones:
+            try:
+                _wpp_texto(t, msg)
+                enviados.append(_mascara_fone(t))
+            except Exception as ex:
+                erros.append(str(ex)[:80])
+        if not fones:
+            erros.append("sem WhatsApp cadastrado")
+    if not enviados:
+        dica = (" O posto não tem um contato seu atualizado: fale com o caixa para atualizar o seu WhatsApp."
+                if origem == "posto" else "")
+        return False, None, origem, "Não consegui enviar o código (" + "; ".join(erros) + ")." + dica
+    return True, " e ".join(enviados), origem, None
+
+
+def _conferir_codigo(cli, motivo, codigo):
+    """None se o código confere; senão a mensagem de erro. Erros contam: no 5º o código morre."""
+    col_cod, col_exp, col_tent = _CODIGO_CAMPOS[motivo]
+    if not cli.get(col_cod) or int(cli.get(col_exp) or 0) < time.time():
+        return "Código expirado — peça um novo."
+    tent = int(cli.get(col_tent) or 0)
+    if tent >= CODIGO_MAX_TENTATIVAS:
+        return "Código bloqueado depois de várias tentativas erradas — peça um novo."
+    if not _confere_senha(_so_digitos(codigo), cli[col_cod]):
+        corpo = {col_tent: tent + 1}
+        if tent + 1 >= CODIGO_MAX_TENTATIVAS:
+            corpo[col_cod] = None
+        _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}", corpo)
+        resta = CODIGO_MAX_TENTATIVAS - tent - 1
+        return ("Código incorreto." + (f" Restam {resta} tentativa(s)." if resta > 0
+                                       else " O código deixou de valer — peça um novo."))
+    return None
+
+
+def _cliente_por_cpf(cpf):
+    rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1") if cpf else []
+    return rows[0] if rows else None
+
+
 @bp_cashback.route("/cashback/api/senha/pedir", methods=["POST"])
 def api_senha_pedir():
     d = request.get_json(silent=True) or {}
     cpf = _so_digitos(d.get("cpf"))
-    canal = str(d.get("canal") or "whatsapp")
-    rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1")
-    if not rows:
-        return jsonify({"erro": "CPF não encontrado — faça seu cadastro"}), 404
-    cli = rows[0]
-    codigo = str(secrets.randbelow(900000) + 100000)
-    _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}",
-            {"reset_codigo": _hash_senha(codigo), "reset_expira": int(time.time()) + 900})
-    try:
-        if canal == "email":
-            if not cli.get("email"):
-                return jsonify({"erro": "Cadastro sem e-mail — use o WhatsApp"}), 400
-            _reset_enviar_email(cli["email"], codigo)
-            destino = cli["email"]
-        else:
-            tel = cli.get("telefone") or ""
-            if not tel:
-                return jsonify({"erro": "Cadastro sem telefone — use o e-mail"}), 400
-            _reset_enviar_whatsapp(tel, codigo)
-            destino = "•••" + _so_digitos(tel)[-4:]
-    except Exception as e:
-        return jsonify({"erro": f"Falha no envio ({e}). Tente o outro canal."}), 502
+    canal = "email" if str(d.get("canal") or "") == "email" else "whatsapp"
+    if not _limite_ok("pedir:" + _ip(), 10, 3600):
+        return _muitas()
+    generico = {"ok": True, "destino": None,
+                "aviso": "Se este CPF já tiver conta no app, o código chega em instantes no WhatsApp que o posto "
+                         "tem de você. Se você nunca criou a conta, volte e toque em 'Primeiro acesso? Cadastre-se'."}
+    cli = _cliente_por_cpf(cpf) if _cpf_valido(cpf) else None
+    if not cli:
+        return jsonify(generico)          # não diz se o CPF existe (auditoria #224)
+    ok, destino, _origem, erro = _enviar_codigo(cli, "reset", canal)
+    if not ok:
+        return jsonify({"erro": erro}), 429 if "Espere" in (erro or "") or "Muitos" in (erro or "") else 502
     return jsonify({"ok": True, "destino": destino})
 
 
@@ -414,21 +605,104 @@ def api_senha_pedir():
 def api_senha_trocar():
     d = request.get_json(silent=True) or {}
     cpf = _so_digitos(d.get("cpf"))
-    codigo = _so_digitos(d.get("codigo"))
     nova = str(d.get("senha") or "")
     if len(nova) < 6:
         return jsonify({"erro": "Senha deve ter pelo menos 6 caracteres"}), 400
-    rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1")
-    if not rows:
-        return jsonify({"erro": "CPF não encontrado"}), 404
-    cli = rows[0]
-    if not cli.get("reset_codigo") or int(cli.get("reset_expira") or 0) < time.time():
-        return jsonify({"erro": "Código expirado — peça um novo"}), 400
-    if not _confere_senha(codigo, cli["reset_codigo"]):
-        return jsonify({"erro": "Código incorreto"}), 401
+    if not _limite_ok("trocar:" + _ip(), 30, 3600):
+        return _muitas()
+    cli = _cliente_por_cpf(cpf)
+    if not cli:
+        return jsonify({"erro": "Código expirado — peça um novo."}), 400
+    erro = _conferir_codigo(cli, "reset", d.get("codigo"))
+    if erro:
+        return jsonify({"erro": erro}), 401
+    # o código chegou no contato oficial: isso também CONFIRMA a conta (mesma prova do cadastro)
+    _, _, origem = _contatos_oficiais(cpf, cli)
+    versao = int(cli.get("token_versao") or 0) + 1        # derruba as sessões antigas
+    corpo = {"senha_hash": _hash_senha(nova), "reset_codigo": None, "reset_expira": None, "reset_tentativas": 0,
+             "token_versao": versao, "login_falhas": 0, "login_bloqueado_ate": None}
+    if not cli.get("verificado_em") or origem == "posto":
+        corpo.update({"verificado_em": datetime.now(timezone.utc).isoformat(), "verificado_via": "codigo-" + origem})
+    _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}", corpo)
+    return jsonify({"ok": True, "token": _token_gerar(cpf, versao), "nome": cli.get("nome")})
+
+
+@bp_cashback.route("/cashback/api/cadastro/confirmar", methods=["POST"])
+def api_cadastro_confirmar():
+    """Último passo do cadastro (e do 1º login de conta antiga): o código enviado ao
+    contato oficial. Confirmou = a conta passa a valer e recebe a sessão."""
+    d = request.get_json(silent=True) or {}
+    cpf = _so_digitos(d.get("cpf"))
+    if not _limite_ok("confirmar:" + _ip(), 30, 3600):
+        return _muitas()
+    cli = _cliente_por_cpf(cpf)
+    if not cli:
+        return jsonify({"erro": "Código expirado — peça um novo."}), 400
+    erro = _conferir_codigo(cli, "verificar", d.get("codigo"))
+    if erro:
+        return jsonify({"erro": erro}), 401
+    _, _, origem = _contatos_oficiais(cpf, cli)
+    agora = datetime.now(timezone.utc).isoformat()
     _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}",
-            {"senha_hash": _hash_senha(nova), "reset_codigo": None, "reset_expira": None})
-    return jsonify({"ok": True, "token": _token_gerar(cpf)})
+            {"verificado_em": agora, "verificado_via": "codigo-" + origem, "verif_codigo": None,
+             "verif_expira": None, "verif_tentativas": 0, "login_falhas": 0, "login_bloqueado_ate": None})
+    cli["verificado_via"] = "codigo-" + origem
+    # só agora o cliente entra no cadastro do posto (elegível ao cashback) — se o posto está ligado
+    posto = cli.get("empresa_origem")
+    if posto and _cashback_ligado(posto):
+        _garantir_pessoa(posto, cli, cli)
+    return jsonify({"ok": True, "token": _token_do_cliente(cli), "nome": cli.get("nome")})
+
+
+@bp_cashback.route("/cashback/api/cadastro/reenviar", methods=["POST"])
+def api_cadastro_reenviar():
+    d = request.get_json(silent=True) or {}
+    cpf = _so_digitos(d.get("cpf"))
+    if not _limite_ok("reenviar:" + _ip(), 10, 3600):
+        return _muitas()
+    cli = _cliente_por_cpf(cpf)
+    if not cli or cli.get("verificado_em"):
+        return jsonify({"ok": True, "destino": None})
+    ok, destino, _origem, erro = _enviar_codigo(cli, "verificar")
+    if not ok:
+        return jsonify({"erro": erro}), 429 if "Espere" in (erro or "") or "Muitos" in (erro or "") else 502
+    return jsonify({"ok": True, "destino": destino})
+
+
+@bp_cashback.route("/cashback/api/conta/sair-todos", methods=["POST"])
+def api_conta_sair_todos():
+    """Encerra a sessão em TODOS os aparelhos (celular perdido, senha vazada)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}", {"token_versao": int(cli.get("token_versao") or 0) + 1})
+    return jsonify({"ok": True})
+
+
+@bp_cashback.route("/cashback/api/conta/excluir", methods=["POST"])
+def api_conta_excluir():
+    """Excluir a conta pelo próprio app (exigência da App Store e do Google Play; LGPD).
+    Apaga a conta do app e a foto do rosto e desliga o cashback no cadastro dos postos.
+    Fica o que é registro de venda e de pagamento (cashbacks pagos, acionamentos, títulos):
+    obrigação fiscal e financeira do posto. Pede a senha de novo."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    d = request.get_json(silent=True) or {}
+    if not _confere_senha(str(d.get("senha") or ""), cli.get("senha_hash") or ""):
+        return jsonify({"erro": "Senha incorreta"}), 401
+    cpf = cli["cpf"]
+    try:
+        url, _ = _supa()
+        if cli.get("foto_path"):
+            rq.delete(f"{url}/storage/v1/object/{BUCKET_FACES}", headers=_st_headers({"Content-Type": "application/json"}),
+                      json={"prefixes": [cli["foto_path"]]}, timeout=20)
+        _spatch(f"oct_pessoas?documento=eq.{cpf}&cashback_ativo=eq.true", {"cashback_ativo": False})
+        rq.delete(f"{url}/rest/v1/oct_app_dispositivos?cliente_cpf=eq.{cpf}", headers=_sh(), timeout=20)
+        _checa(rq.delete(f"{url}/rest/v1/oct_cashback_clientes?cpf=eq.{cpf}", headers=_sh(), timeout=20))
+    except Exception as e:
+        return jsonify({"erro": "não consegui excluir agora: " + str(e)[:120]}), 500
+    return jsonify({"ok": True})
 
 
 # ------------------------------------------------------------------
@@ -488,9 +762,23 @@ def api_cadastro():
     if len(tel) < 10:
         return jsonify({"erro": "Telefone/WhatsApp inválido"}), 400
     posto = _uuid_ok(d.get("posto"))
+    if not _limite_ok("cadastro:" + _ip(), 10, 3600):
+        return _muitas()
     try:
-        if _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&select=id&limit=1"):
-            return jsonify({"erro": "CPF já cadastrado — use 'Entrar' com sua senha"}), 409
+        existe = _cliente_por_cpf(cpf)
+        if existe and existe.get("verificado_em"):
+            return jsonify({"erro": "CPF já cadastrado — use 'Entrar' com sua senha "
+                                    "(ou 'Esqueci minha senha')."}), 409
+        if existe:
+            # cadastro iniciado e não confirmado: só pode ser refeito depois de 30 min
+            # (quem digitou o CPF de outra pessoa não trava o dono por mais que isso)
+            try:
+                criado = datetime.fromisoformat(str(existe.get("criado_em")).replace("Z", "+00:00"))
+            except Exception:
+                criado = datetime.now(timezone.utc) - timedelta(days=1)
+            if datetime.now(timezone.utc) - criado < timedelta(minutes=30):
+                return jsonify({"erro": "Este CPF já tem um cadastro esperando confirmação. Use o código que "
+                                        "enviamos, ou tente de novo em 30 minutos."}), 409
         reg = {
             "cpf": cpf, "nome": nome[:120],
             "endereco": str(d.get("endereco") or "").strip()[:160] or None,
@@ -505,44 +793,57 @@ def api_cadastro():
             "chave_pix": chave_pix[:120], "senha_hash": _hash_senha(senha),
             "empresa_origem": posto,
         }
-        try:
+        reg["verificado_em"] = None
+        if existe:
+            # refaz o cadastro que ninguém confirmou (dados novos, senha nova)
+            _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}", {**reg, "token_versao": int(existe.get("token_versao") or 0) + 1})
+        else:
             _spost("oct_cashback_clientes", reg, prefer="return=minimal")
-        except RuntimeError as e:
-            # tabela ainda sem alguma coluna opcional (ex.: bairro/cidade) ->
-            # grava sem os opcionais em vez de falhar o cadastro
-            if "Could not find the" not in str(e):
-                raise
-            minimo = {k: reg[k] for k in ("cpf", "nome", "endereco", "telefone", "nascimento",
-                                          "sexo", "email", "chave_pix", "senha_hash", "empresa_origem")
-                      if k in reg}
-            _spost("oct_cashback_clientes", minimo, prefer="return=minimal")
-        # garante a PESSOA do PDV no posto de origem (elegível ao cashback) —
-        # SÓ se o cashback do posto está LIGADO (chave geral); desligado, o
-        # cadastro do app vale, mas sem elegibilidade no posto
-        if posto and _cashback_ligado(posto):
-            _garantir_pessoa(posto, reg)
-        return jsonify({"ok": True, "token": _token_gerar(cpf), "nome": nome})
+        cli = _cliente_por_cpf(cpf)
+        # a conta só passa a valer com o código enviado ao contato OFICIAL (auditoria #17/#48);
+        # a entrada no cadastro do posto acontece na confirmação (api_cadastro_confirmar)
+        ok, destino, origem, erro = _enviar_codigo(cli, "verificar")
+        return jsonify({"ok": True, "verificar": True, "nome": nome, "destino": destino,
+                        "contato_do_posto": origem == "posto", "erro_envio": None if ok else erro})
     except Exception as e:
         return jsonify({"erro": "falha no cadastro: " + str(e)[:200]}), 500
 
 
-def _garantir_pessoa(empresa_id, cad):
-    """Cria/atualiza o cliente em oct_pessoas do posto (o PDV usa essa tabela
-    p/ elegibilidade do cashback: cashback_ativo + chave_pix)."""
+def _garantir_pessoa(empresa_id, cad, cli=None):
+    """Garante o cliente em oct_pessoas do posto (o PDV usa essa tabela p/ elegibilidade
+    do cashback: cashback_ativo + chave_pix).
+
+    05/10/2026 (auditoria #48): o app NÃO sobrescreve mais o cadastro do posto. Antes,
+    todo acionamento trocava nome, telefone, e-mail, endereço e chave Pix da pessoa pelo
+    que veio do app — quem cadastrasse o CPF de outra pessoa passava a receber a cobrança
+    e o cashback dela. Agora: pessoa que não existe nasce com os dados do app; pessoa que
+    já existe só ganha o que está VAZIO, e a chave Pix só muda se a conta foi confirmada
+    pelo contato que o próprio posto tem (verificado_via 'codigo-posto')."""
     try:
-        ex = _sget(f"oct_pessoas?empresa_id=eq.{empresa_id}&documento=eq.{cad['cpf']}&select=id&limit=1")
-        corpo = {
-            "nome": cad["nome"], "documento": cad["cpf"], "telefone": cad.get("telefone"),
-            "whatsapp": cad.get("telefone"), "email": cad.get("email"),
-            "chave_pix": cad["chave_pix"], "cashback_ativo": True, "ativo": True,
+        ex = _sget(f"oct_pessoas?empresa_id=eq.{empresa_id}&documento=eq.{cad['cpf']}"
+                   f"&select=id,telefone,whatsapp,email,chave_pix,endereco,num_endereco,bairro,cidade,cep,uf,cashback_ativo"
+                   f"&limit=1")
+        dados = {
+            "telefone": cad.get("telefone"), "whatsapp": cad.get("telefone"), "email": cad.get("email"),
             "endereco": cad.get("endereco"), "num_endereco": cad.get("numero"),
             "bairro": cad.get("bairro"), "cidade": cad.get("cidade"),
             "cep": cad.get("cep"), "uf": cad.get("uf"),
         }
         if ex:
-            _spatch(f"oct_pessoas?id=eq.{ex[0]['id']}", corpo)
-            return ex[0]["id"]
-        corpo.update({"empresa_id": empresa_id, "tipo": "cliente", "tipo_pessoa": "fisica"})
+            p = ex[0]
+            corpo = {k: v for k, v in dados.items() if v and not p.get(k)}
+            if not p.get("cashback_ativo"):
+                corpo["cashback_ativo"] = True
+            confirmado_pelo_posto = str((cli or {}).get("verificado_via") or "").endswith("posto")
+            if cad.get("chave_pix") and (not p.get("chave_pix") or confirmado_pelo_posto) \
+                    and p.get("chave_pix") != cad.get("chave_pix"):
+                corpo["chave_pix"] = cad["chave_pix"]
+            if corpo:
+                _spatch(f"oct_pessoas?id=eq.{p['id']}", corpo)
+            return p["id"]
+        corpo = {**dados, "nome": cad["nome"], "documento": cad["cpf"], "chave_pix": cad.get("chave_pix"),
+                 "cashback_ativo": True, "ativo": True,
+                 "empresa_id": empresa_id, "tipo": "cliente", "tipo_pessoa": "fisica"}
         novo = _spost("oct_pessoas", corpo)
         return novo[0]["id"] if novo else None
     except Exception:
@@ -553,13 +854,36 @@ def _garantir_pessoa(empresa_id, cad):
 def api_login():
     d = request.get_json(silent=True) or {}
     cpf = _so_digitos(d.get("cpf"))
+    if not _limite_ok("login:" + _ip(), 20, 600):
+        return _muitas()
     try:
-        rows = _sget(f"oct_cashback_clientes?cpf=eq.{cpf}&limit=1") if cpf else []
+        cli = _cliente_por_cpf(cpf) if _cpf_valido(cpf) else None
     except Exception as e:
         return jsonify({"erro": "serviço indisponível: " + str(e)[:120]}), 500
-    if not rows or not _confere_senha(str(d.get("senha") or ""), rows[0].get("senha_hash") or ""):
+    agora = int(time.time())
+    if cli and int(cli.get("login_bloqueado_ate") or 0) > agora:
+        minutos = max(1, (int(cli["login_bloqueado_ate"]) - agora + 59) // 60)
+        return jsonify({"erro": f"Muitas senhas erradas seguidas. Tente de novo em {minutos} min "
+                                "ou use 'Esqueci minha senha'."}), 429
+    if not cli or not _confere_senha(str(d.get("senha") or ""), cli.get("senha_hash") or ""):
+        if cli:
+            falhas = int(cli.get("login_falhas") or 0) + 1
+            corpo = {"login_falhas": falhas}
+            if falhas >= LOGIN_MAX_FALHAS:
+                corpo = {"login_falhas": 0, "login_bloqueado_ate": agora + LOGIN_BLOQUEIO_SEG}
+            try:
+                _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}", corpo)
+            except Exception:
+                pass
         return jsonify({"erro": "CPF ou senha incorretos"}), 401
-    return jsonify({"ok": True, "token": _token_gerar(cpf), "nome": rows[0]["nome"]})
+    if cli.get("login_falhas") or cli.get("login_bloqueado_ate"):
+        _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}", {"login_falhas": 0, "login_bloqueado_ate": None})
+    if not cli.get("verificado_em"):
+        # conta anterior a 05/10/2026 (ou cadastro não confirmado): confirma uma vez pelo código
+        ok, destino, origem, erro = _enviar_codigo(cli, "verificar")
+        return jsonify({"ok": True, "verificar": True, "nome": cli["nome"], "destino": destino,
+                        "contato_do_posto": origem == "posto", "erro_envio": None if ok else erro})
+    return jsonify({"ok": True, "token": _token_do_cliente(cli), "nome": cli["nome"]})
 
 
 @bp_cashback.route("/cashback/api/me", methods=["GET"])
@@ -673,7 +997,8 @@ def api_pdv_assinatura():
     return jsonify({
         "ok": True, "assinado": True, "acionamento": ac["id"],
         "assinante": ac.get("assinante_nome") or ac.get("cliente_nome"),
-        "cpf": _so_digitos(ac.get("cliente_cpf")), "cpf_mascarado": _cpf_mascara(ac.get("cliente_cpf")),
+        # só o CPF mascarado (auditoria #136): o completo ia junto e ninguém usava
+        "cpf_mascarado": _cpf_mascara(ac.get("cliente_cpf")),
         "auth_codigo": ac["auth_codigo"], "selfie_em": ac.get("selfie_em"), "selfie_path": ac["selfie_path"],
         "selfie_url": _st_assinar(ac["selfie_path"]),
         "cadastro_url": _st_assinar((cad or {}).get("foto_path")),
@@ -711,6 +1036,9 @@ def api_acionar():
         ok, motivo, conta_prazo = _prazo_liberado(empresa, cli["cpf"])
         if not ok:
             return jsonify({"erro": motivo}), 403
+        if not _prazo_conta_confirmada(empresa, cli):
+            return jsonify({"erro": "Para comprar a prazo pelo app, o seu WhatsApp precisa ser o mesmo do "
+                                    "cadastro do posto — fale com o caixa para conferir."}), 403
         # A PRAZO pelo app = assinatura por SELFIE (antes de abastecer). Sem foto de referência
         # + termo aceito, ou sem a selfie desta compra, não aciona: a compra é feita no caixa.
         if not (cli.get("foto_path") and cli.get("lgpd_aceito_em")):
@@ -740,7 +1068,7 @@ def api_acionar():
         pessoa_id = _garantir_pessoa(empresa, {
             "cpf": cli["cpf"], "nome": cli["nome"], "telefone": cli.get("telefone"),
             "email": cli.get("email"), "chave_pix": cli.get("chave_pix"),
-        })
+        }, cli)
         reg = {
             "empresa_id": empresa, "cliente_cpf": cli["cpf"], "cliente_nome": cli["nome"],
             "pessoa_id": pessoa_id, "combustivel": comb or None, "forma": forma,
@@ -1016,6 +1344,116 @@ def api_acionar_cancelar():
         return jsonify({"erro": "sessão expirada"}), 401
     _spatch(f"oct_cashback_acionamentos?cliente_cpf=eq.{cli['cpf']}&status=eq.aguardando",
             {"status": "cancelado"})
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------
+# APP POSTOS SN (05/10/2026): vitrine (ofertas e parceiros), celular e notificações.
+# Ofertas e parceiros são públicos (é publicidade); o resto exige a sessão do cliente.
+# ------------------------------------------------------------------
+def _vale_no_posto(linha, posto):
+    emp = [e for e in (linha.get("empresa_ids") or []) if e]
+    return not emp or not posto or posto in emp
+
+
+@bp_cashback.route("/cashback/api/ofertas", methods=["GET"])
+def api_ofertas():
+    posto = _uuid_ok(request.args.get("posto"))
+    agora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        rows = _sget(f"oct_app_campanhas?ativo=eq.true&inicio=lte.{agora}&or=(fim.is.null,fim.gte.{agora})"
+                     "&select=id,tipo,titulo,texto,imagem_url,link,itens,fim,destaque,ordem,empresa_ids"
+                     "&order=ordem,inicio.desc&limit=60")
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+    return jsonify([{k: r.get(k) for k in ("id", "tipo", "titulo", "texto", "imagem_url", "link", "itens",
+                                           "fim", "destaque")}
+                    for r in rows if _vale_no_posto(r, posto)])
+
+
+@bp_cashback.route("/cashback/api/parceiros", methods=["GET"])
+def api_parceiros():
+    posto = _uuid_ok(request.args.get("posto"))
+    hoje = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        rows = _sget(f"oct_app_parceiros?ativo=eq.true"
+                     f"&and=(or(inicio.is.null,inicio.lte.{hoje}),or(fim.is.null,fim.gte.{hoje}))"
+                     "&select=id,nome,logo_url,beneficio,descricao,endereco,cidade,telefone,link,empresa_ids"
+                     "&order=ordem,nome&limit=100")
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+    return jsonify([{k: v for k, v in r.items() if k != "empresa_ids"} for r in rows if _vale_no_posto(r, posto)])
+
+
+@bp_cashback.route("/cashback/api/dispositivo", methods=["POST"])
+def api_dispositivo():
+    """O app registra o celular: token de notificação do Firebase e os DOIS consentimentos
+    (avisos de serviço x publicidade — separados, como pede a LGPD). Chamado ao entrar e
+    toda vez que a pessoa muda a escolha em Perfil › Notificações."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    d = request.get_json(silent=True) or {}
+    token = str(d.get("token") or "").strip()
+    plat = str(d.get("plataforma") or "").strip().lower()
+    if len(token) < 20 or len(token) > 4096 or plat not in ("android", "ios", "web"):
+        return jsonify({"erro": "aparelho inválido"}), 400
+    agora = datetime.now(timezone.utc).isoformat()
+    mkt = d.get("aceita_marketing") is True
+    linha = {"cliente_cpf": cli["cpf"], "token": token, "plataforma": plat,
+             "app_versao": str(d.get("app_versao") or "")[:30] or None,
+             "aceita_avisos": d.get("aceita_avisos") is not False, "aceita_marketing": mkt,
+             "aceita_marketing_em": agora if mkt else None,
+             "posto_favorito": _uuid_ok(d.get("posto_favorito")) or cli.get("posto_favorito"),
+             "ativo": True, "falhas": 0, "visto_em": agora}
+    try:
+        url, _ = _supa()
+        _checa(rq.post(f"{url}/rest/v1/oct_app_dispositivos?on_conflict=token", json=linha, timeout=20,
+                       headers=_sh({"Prefer": "resolution=merge-duplicates,return=minimal"})))
+        if mkt != bool(cli.get("aceita_marketing")):
+            _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}",
+                    {"aceita_marketing": mkt, "aceita_marketing_em": agora})
+    except Exception as e:
+        return jsonify({"erro": "não consegui registrar o aparelho: " + str(e)[:120]}), 500
+    return jsonify({"ok": True})
+
+
+@bp_cashback.route("/cashback/api/dispositivo/sair", methods=["POST"])
+def api_dispositivo_sair():
+    """Ao sair da conta o app tira o celular da lista (para de receber notificação)."""
+    d = request.get_json(silent=True) or {}
+    token = str(d.get("token") or "").strip()
+    if len(token) < 20:
+        return jsonify({"ok": True})
+    try:
+        url, _ = _supa()
+        rq.delete(f"{url}/rest/v1/oct_app_dispositivos?token=eq.{rq.utils.quote(token, safe='')}",
+                  headers=_sh(), timeout=20)
+    except Exception:
+        pass
+    return jsonify({"ok": True})
+
+
+@bp_cashback.route("/cashback/api/notificacao/aberta", methods=["POST"])
+def api_notificacao_aberta():
+    """O cliente tocou na notificação: conta a abertura da campanha."""
+    d = request.get_json(silent=True) or {}
+    camp = _uuid_ok(d.get("campanha_id"))
+    if not camp or not _limite_ok("aberta:" + _ip(), 60, 3600):
+        return jsonify({"ok": True})
+    cli = _cliente_do_token()
+    try:
+        if cli:
+            env = _sget(f"oct_app_envios?campanha_id=eq.{camp}&cliente_cpf=eq.{cli['cpf']}&aberto_em=is.null"
+                        "&select=id&limit=1")
+            if not env:
+                return jsonify({"ok": True})                 # já contada (ou não foi para ele)
+            _spatch(f"oct_app_envios?id=eq.{env[0]['id']}", {"aberto_em": datetime.now(timezone.utc).isoformat()})
+        c = _sget(f"oct_app_campanhas?id=eq.{camp}&select=push_aberturas")
+        if c:
+            _spatch(f"oct_app_campanhas?id=eq.{camp}", {"push_aberturas": int(c[0].get("push_aberturas") or 0) + 1})
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
@@ -1315,6 +1753,17 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   <div class="msg" id="cd-msg"></div>
 </div>
 
+<!-- CONFIRMAR: código de 6 dígitos no WhatsApp que o posto tem (05/10/2026) -->
+<div class="card esc" id="tela-confirmar">
+  <div style="font-weight:700;margin-bottom:4px">Confirme que é você</div>
+  <div class="sub" id="cf-txt">Enviamos um código de 6 dígitos para o seu WhatsApp.</div>
+  <label>Código</label><input id="cf-codigo" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+  <button onclick="confirmarCodigo()">Confirmar</button>
+  <button class="sec" onclick="reenviarCodigo()">Reenviar o código</button>
+  <button class="sec" onclick="mostrar('tela-login')">← Voltar</button>
+  <div class="msg" id="cf-msg"></div>
+</div>
+
 <!-- DASHBOARD -->
 <div class="esc" id="tela-dash">
   <div class="card">
@@ -1397,6 +1846,18 @@ PAGINA_HTML = r"""<!DOCTYPE html>
     <div class="lista" id="dh-lista"><div class="sub">Carregando…</div></div>
   </div>
 
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:6px">⚙️ Minha conta</div>
+    <button class="sec" onclick="sairTodos()">Sair de todos os aparelhos</button>
+    <button class="sec" onclick="document.getElementById('ex-box').classList.toggle('esc')">Excluir minha conta</button>
+    <div id="ex-box" class="esc">
+      <div class="sub" style="margin-top:8px">Apaga a sua conta do app e a foto do seu rosto e desliga o cashback. O que é registro de venda e de pagamento fica com o posto. Não dá para desfazer.</div>
+      <label>Sua senha</label><input id="ex-senha" type="password">
+      <button onclick="excluirConta()" style="background:#b91c1c">Excluir definitivamente</button>
+    </div>
+    <div class="msg" id="mc-msg"></div>
+  </div>
+
   <!-- SCANNER de QR (câmera) -->
   <!-- display controlado SÓ por style.display (inline display:flex vencia a
        classe .esc e a tela nascia ABERTA por cima de tudo — era ESSE o travamento) -->
@@ -1432,7 +1893,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão prazo-facial-15</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão app-base-16</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -1467,10 +1928,13 @@ if (BICO_URL) {
   setTimeout(()=>{ try{ carregarInfoBico(); }catch(e){} }, 400);   // ficha do bico do QR
 }
 
-function mostrar(id){["tela-login","tela-cad","tela-dash","tela-esqueci"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
+function mostrar(id){["tela-login","tela-cad","tela-dash","tela-esqueci","tela-confirmar"].forEach(t=>document.getElementById(t).classList.toggle("esc",t!==id));}
 function nomeForma(f){return f==="17"?"PIX":f==="05"?"A PRAZO":"Dinheiro";}
 function tok(){return localStorage.getItem("cb_token")||"";}
 function brl(v){return "R$ "+Number(v||0).toLocaleString("pt-BR",{minimumFractionDigits:2});}
+// texto que vem do banco NUNCA entra cru no HTML (auditoria #225: nome de produto com
+// <script> roubava a sessão de quem buscasse produtos)
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 function mascaraCpf(el){el.addEventListener("input",()=>{let v=el.value.replace(/\D/g,"").slice(0,11);el.value=v.replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d)/,"$1.$2").replace(/(\d{3})(\d{1,2})$/,"$1-$2");});}
 mascaraCpf(document.getElementById("lg-cpf"));mascaraCpf(document.getElementById("cd-cpf"));mascaraCpf(document.getElementById("es-cpf"));
 
@@ -1478,7 +1942,7 @@ async function esqueciPedir(canal){
   const m=document.getElementById("es-msg");m.className="msg";m.textContent="Enviando o código…";
   const r=await req("/cashback/api/senha/pedir",{cpf:document.getElementById("es-cpf").value,canal:canal});
   if(r.ok){document.getElementById("es-passo2").classList.remove("esc");
-    m.className="msg ok";m.textContent="Código enviado para "+(r.destino||"você")+" — vale 15 minutos.";}
+    m.className="msg ok";m.textContent=r.destino?("Código enviado para "+r.destino+" — vale 15 minutos."):(r.aviso||"Se este CPF tiver cadastro, o código chega em instantes.");}
   else{m.className="msg erro";m.textContent=r.erro||"Falha no envio";}
 }
 async function esqueciTrocar(){
@@ -1524,7 +1988,37 @@ async function fazerLogin(){
   const m=document.getElementById("lg-msg");m.className="msg";m.textContent="Entrando…";
   const r=await req("/cashback/api/login",{cpf:document.getElementById("lg-cpf").value,senha:document.getElementById("lg-senha").value});
   if(r.token){localStorage.setItem("cb_token",r.token);carregarDash();}
+  else if(r.verificar){abrirConfirmar(document.getElementById("lg-cpf").value,r,false);}
   else{m.className="msg erro";m.textContent=r.erro||"Falha no login";}
+}
+
+// ---- CONFIRMAÇÃO do cadastro (código no WhatsApp que o posto tem de você) ----
+let _CONF={cpf:"",novo:false};
+function abrirConfirmar(cpf,r,novo){
+  _CONF={cpf:cpf,novo:!!novo};
+  mostrar("tela-confirmar");
+  document.getElementById("cf-codigo").value="";
+  document.getElementById("cf-txt").textContent=r.destino
+    ?("Enviamos um código de 6 dígitos para "+r.destino+(r.contato_do_posto?" (o contato que o posto tem de você).":"."))
+    :"Precisamos confirmar que é você antes de entrar.";
+  const m=document.getElementById("cf-msg");
+  m.className="msg"+(r.erro_envio?" erro":"");m.textContent=r.erro_envio||"";
+}
+async function confirmarCodigo(){
+  const m=document.getElementById("cf-msg");m.className="msg";m.textContent="Conferindo…";
+  const r=await req("/cashback/api/cadastro/confirmar",{cpf:_CONF.cpf,codigo:document.getElementById("cf-codigo").value});
+  if(r.ok&&r.token){
+    localStorage.setItem("cb_token",r.token);
+    await carregarDash();
+    // cadastro novo: último passo é o termo + foto do rosto (para comprar a prazo pelo app; pode pular)
+    if(_CONF.novo)await facialCadastrar("Último passo: foto do seu rosto (para comprar a prazo pelo app)");
+  } else {m.className="msg erro";m.textContent=r.erro||"Não consegui confirmar";}
+}
+async function reenviarCodigo(){
+  const m=document.getElementById("cf-msg");m.className="msg";m.textContent="Enviando…";
+  const r=await req("/cashback/api/cadastro/reenviar",{cpf:_CONF.cpf});
+  if(r.ok){m.className="msg ok";m.textContent=r.destino?("Código reenviado para "+r.destino+"."):"Se o código não chegar, peça ajuda no caixa do posto.";}
+  else{m.className="msg erro";m.textContent=r.erro||"Falha no envio";}
 }
 
 async function fazerCadastro(){
@@ -1541,12 +2035,7 @@ async function fazerCadastro(){
     cidade:document.getElementById("cd-cidade").value,uf:document.getElementById("cd-uf").value,
     chave_pix:document.getElementById("cd-pix").value,
     senha:s1,posto:POSTO||null});
-  if(r.token){
-    localStorage.setItem("cb_token",r.token);
-    await carregarDash();
-    // último passo do cadastro: termo + foto do rosto (para comprar a prazo pelo app; pode pular)
-    await facialCadastrar("Último passo: foto do seu rosto (para comprar a prazo pelo app)");
-  }
+  if(r.verificar){m.textContent="";abrirConfirmar(document.getElementById("cd-cpf").value,r,true);}
   else{m.className="msg erro";m.textContent=r.erro||"Falha no cadastro";}
 }
 
@@ -1609,6 +2098,19 @@ async function facialCadastrar(titulo){
 }
 
 function sair(){localStorage.removeItem("cb_token");mostrar("tela-login");}
+async function sairTodos(){
+  const m=document.getElementById("mc-msg");m.className="msg";m.textContent="Encerrando…";
+  const r=await req("/cashback/api/conta/sair-todos",{});
+  if(r.ok)sair(); else{m.className="msg erro";m.textContent=r.erro||"Falha";}
+}
+async function excluirConta(){
+  const m=document.getElementById("mc-msg");m.className="msg";m.textContent="Excluindo…";
+  const r=await req("/cashback/api/conta/excluir",{senha:document.getElementById("ex-senha").value});
+  if(r.ok){
+    localStorage.removeItem("cb_token");mostrar("tela-login");
+    const lg=document.getElementById("lg-msg");lg.className="msg ok";lg.textContent="Sua conta foi excluída.";
+  } else {m.className="msg erro";m.textContent=r.erro||"Não consegui excluir";}
+}
 
 async function carregarDash(){
   const r=await req("/cashback/api/me");
@@ -1630,8 +2132,8 @@ async function carregarDash(){
     at.innerHTML="✅ <b>"+(r.acionamento.forma==="05"?"Compra A PRAZO acionada!":"Benefício acionado!")+"</b><br>"+
       (soProd
         ? ("🛍 Só produtos · " + nomeForma(r.acionamento.forma) + "<br>Retire seus produtos no caixa — a emissão sai sozinha.")
-        : ((r.acionamento.bico?("Bico "+r.acionamento.bico+" · "):"")+
-           (r.acionamento.combustivel||"Combustível") + " · " + nomeForma(r.acionamento.forma) +
+        : ((r.acionamento.bico?("Bico "+esc(r.acionamento.bico)+" · "):"")+
+           esc(r.acionamento.combustivel||"Combustível") + " · " + nomeForma(r.acionamento.forma) +
            "<br>Vá até a bomba e abasteça — acompanhe abaixo."))+
       "<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
     ligarEspelho();
@@ -1642,7 +2144,7 @@ async function carregarDash(){
     const cls=c.status==="pago"?"t-pago":(c.status==="pendente"||c.status==="processando")?"t-pendente":"t-outros";
     const rot=c.status==="pago"?"PAGO":(c.status==="pendente"||c.status==="processando")?"A RECEBER":String(c.status||"").toUpperCase();
     const q=c.quando?new Date(c.quando).toLocaleDateString("pt-BR")+" "+new Date(c.quando).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}):"";
-    return `<div class="item"><div><b>${brl(c.valor)}</b> <span class="sub">· ${Number(c.litros||0).toFixed(1)} L${c.posto?" · "+c.posto:""}</span><br><span class="sub">${q}</span></div><span class="tag ${cls}">${rot}</span></div>`;
+    return `<div class="item"><div><b>${brl(c.valor)}</b> <span class="sub">· ${Number(c.litros||0).toFixed(1)} L${c.posto?" · "+esc(c.posto):""}</span><br><span class="sub">${q}</span></div><span class="tag ${cls}">${esc(rot)}</span></div>`;
   }).join("");
 }
 
@@ -1657,7 +2159,7 @@ async function verificarPrazo(){
     const mot=document.getElementById("prazo-motivo");
     if(r.prazo){
       if(opt)opt.textContent=rotulo;
-      else sel.insertAdjacentHTML("beforeend",'<option value="05">'+rotulo+'</option>');
+      else sel.insertAdjacentHTML("beforeend",'<option value="05">'+esc(rotulo)+'</option>');
       mot.classList.add("esc");
     } else {
       if(opt){opt.remove();carrinhoVisibilidade();}
@@ -1677,7 +2179,7 @@ async function garantirPosto(){
     try{
       const ps=await fetch(API+"/cashback/api/postos").then(r=>r.json());
       sel.innerHTML='<option value="">Escolha o posto…</option>'+
-        (Array.isArray(ps)?ps:[]).map(p=>`<option value="${p.id}">${p.nome}</option>`).join("");
+        (Array.isArray(ps)?ps:[]).map(p=>`<option value="${esc(p.id)}">${esc(p.nome)}</option>`).join("");
     }catch(e){sel.innerHTML='<option value="">Falha ao listar postos</option>';}
   }
   sel.onchange=()=>{if(sel.value){POSTO=sel.value;localStorage.setItem("cb_posto",POSTO);}};
@@ -1705,7 +2207,7 @@ async function carregarFrota(){
     if(!Array.isArray(lista)||!lista.length)return;
     const sel=document.getElementById("ac-frota");
     sel.innerHTML='<option value="">— escolha a placa —</option>'+
-      lista.map(v=>`<option value="${v.placa}">${v.placa}${v.veiculo?" · "+v.veiculo:""}${v.minha?" ⭐":""}</option>`).join("")+
+      lista.map(v=>`<option value="${esc(v.placa)}">${esc(v.placa)}${v.veiculo?" · "+esc(v.veiculo):""}${v.minha?" ⭐":""}</option>`).join("")+
       '<option value="__outra__">outra placa (digitar)…</option>';
     document.getElementById("frota-sel-box").classList.remove("esc");
     document.getElementById("ac-placa").parentElement.style.display="none";  // esconde só a PLACA (KM continua)
@@ -1725,7 +2227,7 @@ function carrinhoRender(){
   let html=bicoP?`<div class="item"><div>⛽ Abastecimento — bico <b>${bicoP}</b></div><span class="sub">principal</span></div>`:"";
   html+=CARRINHO.map((it,i)=>it.tipo==="bico"
     ?`<div class="item"><div>⛽ Abastecimento — bico <b>${it.bico}</b></div><a href="#" onclick="carrinhoRemover(${i});return false" style="color:#f87171">✕</a></div>`
-    :`<div class="item"><div>🛍 ${it.qtd}x ${it.nome} <span class="sub">· ${brl(it.preco*it.qtd)}</span></div><a href="#" onclick="carrinhoRemover(${i});return false" style="color:#f87171">✕</a></div>`
+    :`<div class="item"><div>🛍 ${esc(it.qtd)}x ${esc(it.nome)} <span class="sub">· ${brl(it.preco*it.qtd)}</span></div><a href="#" onclick="carrinhoRemover(${i});return false" style="color:#f87171">✕</a></div>`
   ).join("");
   el.innerHTML=html||'<div class="sub">Nenhum item ainda.</div>';
 }
@@ -1769,7 +2271,7 @@ document.getElementById("cb-q").addEventListener("input",()=>{
       _cbResultados=Array.isArray(lista)?lista:[];
       res.innerHTML=_cbResultados.length
         ?_cbResultados.map((p,i)=>`<div class="item">
-            <div style="flex:1;min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.nome}</div><span class="sub">${brl(p.preco)}</span></div>
+            <div style="flex:1;min-width:0"><div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.nome)}</div><span class="sub">${brl(p.preco)}</span></div>
             <div style="display:flex;gap:6px;align-items:center">
               <input id="cb-qtd-${i}" inputmode="numeric" value="1" style="width:54px;padding:8px;text-align:center">
               <button type="button" onclick="carrinhoAddProduto(${i})" style="width:auto;margin:0;padding:8px 14px;background:#16a34a">+</button>
@@ -1927,9 +2429,9 @@ async function carregarInfoBico(){
     if(!r.ok||!r.combustivel){info.textContent="Bico "+bico+" sem histórico — confira o combustível abaixo.";return;}
     const sel=document.getElementById("ac-comb");
     if(![...sel.options].some(o=>o.value===r.combustivel||o.text===r.combustivel))
-      sel.insertAdjacentHTML("beforeend",`<option>${r.combustivel}</option>`);
+      sel.insertAdjacentHTML("beforeend",`<option>${esc(r.combustivel)}</option>`);
     sel.value=r.combustivel;
-    info.innerHTML="⛽ <b style='color:#4ade80'>"+r.combustivel+"</b>"+
+    info.innerHTML="⛽ <b style='color:#4ade80'>"+esc(r.combustivel)+"</b>"+
       (r.preco_litro?(" · ≈ R$ "+Number(r.preco_litro).toLocaleString("pt-BR",{minimumFractionDigits:2})+"/L"):"");
   }catch(e){info.textContent="";}
 }
