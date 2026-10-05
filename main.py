@@ -530,6 +530,27 @@ except Exception as _e:
     print("[ibpt] nao iniciou:", _e)
 
 
+# ── App Postos SN: fila de notificações (Firebase) ───────────────────────────
+# Campanhas do retaguarda (oct_app_campanhas.push_em). Sem FIREBASE_SA, fica parado.
+try:
+    from app_push import iniciar as _push_iniciar
+    _push_iniciar()
+except Exception as _e:
+    print("[app-push] nao iniciou:", _e)
+
+
+@app.route("/app/push/status", methods=["GET"])
+def app_push_status():
+    """Só leitura: a credencial do Firebase está configurada?"""
+    try:
+        import app_push as _ap
+        # chave_mestra: o portal do cliente não roda sem ela desde 05/10/2026 (só diz se existe)
+        return jsonify({"ok": True, "firebase": _ap.configurado(),
+                        "chave_mestra": bool((os.environ.get("CHAVE_MESTRA") or "").strip())})
+    except Exception as e:
+        return jsonify({"ok": False, "erro": str(e)}), 500
+
+
 @app.route("/ibpt/status", methods=["GET"])
 def ibpt_status():
     """Só leitura: qual tabela IBPT está valendo e quando foi conferida."""
