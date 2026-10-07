@@ -361,6 +361,102 @@ def _ciencia_resumos(emp_id, datas_descarga):
 
 
 _RECIENCIA_ULT = {}     # chave -> quando este processo tentou pela ultima vez
+CIENCIA_DIAS = int(os.environ.get("CIENCIA_DIAS", "10"))
+_DISTRIB = {"quando": None, "raizes": set()}
+
+
+def _raizes_distribuidoras():
+    """Raiz do CNPJ (8 digitos) de quem ja' mandou nota com combustivel de tanque
+    para algum posto do grupo -- ALE, Setta, Rio Branco, Royal FIC, Raizen...
+    O resumo que a SEFAZ entrega (resNFe) so' traz emitente e valor, sem os
+    itens: a unica forma de saber que e' combustivel e' pelo emitente.
+    Relido de 6 em 6 h; se a consulta falhar, vale a lista anterior."""
+    agora = datetime.utcnow()
+    if _DISTRIB["quando"] and agora - _DISTRIB["quando"] < timedelta(hours=6):
+        return _DISTRIB["raizes"]
+    try:
+        desde = (agora - timedelta(days=365)).date().isoformat()
+        ou = ",".join("xml.like.*" + urllib.parse.quote(f"<cProdANP>{p}") + "*" for p in ("320102", "810101", "820101"))
+        linhas = _rest_get("oct_nfe_manifestadas",
+                           f"?tipo=eq.nfe_completa&emissao=gte.{desde}&or=({ou})&select=emit_cnpj&limit=20000")
+        raizes = {"".join(c for c in str(l.get("emit_cnpj") or "") if c.isdigit())[:8] for l in linhas or []}
+        _DISTRIB["raizes"] = {r for r in raizes if len(r) == 8}
+        _DISTRIB["quando"] = agora
+    except Exception as e:
+        print(f"[descarga] nao li as distribuidoras: {e}")
+    return _DISTRIB["raizes"]
+
+
+def _ciencia_distribuidoras(emp_id):
+    """Ciencia (210210) em TODA nota de distribuidora de combustivel assim que
+    ela chega como resumo. Decisao do Ronan em 07/10/2026, para o custo do
+    combustivel acompanhar a compra no mesmo dia: sem a ciencia o XML completo
+    nao vem, e sem o XML o custo (entrada_auto.atualizar_custos) nao enxerga a
+    nota. Antes a ciencia so' saia quando havia descarga sem NF na janela
+    (_ciencia_resumos, que continua valendo para emitente desconhecido).
+
+    So' nota dos ultimos CIENCIA_DIAS dias, de emitente que ja' vendeu
+    combustivel para o grupo, e nao cancelada. Nao depende da sonda.
+    Desliga com CIENCIA_DISTRIBUIDORA=0 no Railway."""
+    if os.environ.get("CIENCIA_DISTRIBUIDORA", "1").strip().lower() in ("0", "false", "nao", "off"):
+        return 0
+    agora = datetime.utcnow()
+    desde = (agora - timedelta(days=CIENCIA_DIAS)).date().isoformat()
+    try:
+        resumos = _rest_get("oct_nfe_manifestadas",
+                            f"?empresa_id=eq.{emp_id}&status=eq.sem_manifestacao&tipo=eq.resumo"
+                            f"&chave_nfe=not.is.null&emissao=gte.{desde}"
+                            f"&select=id,chave_nfe,emit_cnpj&limit=100")
+    except Exception:
+        return 0
+    if not resumos:
+        return 0
+    raizes = _raizes_distribuidoras()
+    alvo = []
+    for r in resumos:
+        cnpj = "".join(c for c in str(r.get("emit_cnpj") or "") if c.isdigit()) or str(r["chave_nfe"])[6:20]
+        if cnpj[:8] not in raizes:
+            continue
+        ult = _RECIENCIA_ULT.get(r["chave_nfe"])
+        if ult and agora - ult < timedelta(hours=6):
+            continue                      # recusada ha' pouco: nao insiste a cada ciclo
+        alvo.append(r)
+    if not alvo:
+        return 0
+    try:
+        from .entrada_auto import chaves_canceladas
+        canceladas = chaves_canceladas(emp_id)
+        dados = carregar_empresa(emp_id)
+        cnpj_emp = str((dados.get("empresa") or {}).get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+        from .evento import registrar_evento
+    except Exception as e:
+        print(f"[descarga] {emp_id}: ciencia de distribuidora adiada: {e}")
+        return 0
+    amb = os.environ.get("DFE_AMBIENTE", "producao")
+    feitas = 0
+    for r in alvo:
+        if r["chave_nfe"] in canceladas:
+            continue
+        _RECIENCIA_ULT[r["chave_nfe"]] = agora
+        # RESERVA a linha antes de falar com a SEFAZ: o servidor roda 2 processos
+        # e os dois passam por aqui no mesmo ciclo. So' quem conseguir trocar
+        # sem_manifestacao -> ciencia manda o evento; o outro nao recebe a linha.
+        st, pego = _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{r['id']}&status=eq.sem_manifestacao",
+                         body={"status": "ciencia"}, prefer="return=representation")
+        if not (isinstance(pego, list) and pego):
+            continue
+        try:
+            res = registrar_evento(cnpj_emp, r["chave_nfe"], dados["cert_base64"], dados["cert_senha"], amb, tipo="210210") or {}
+        except Exception as e:
+            res = {"erro": str(e)}
+        if res.get("ok") is True or str(res.get("cstat")) in ("135", "136", "573"):
+            feitas += 1
+            print(f"[descarga] {emp_id}: ciencia na nota de distribuidora {r['chave_nfe'][:12]} (chegou como resumo)")
+        else:
+            _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{r['id']}", body={"status": "sem_manifestacao"}, prefer="return=minimal")
+            print(f"[descarga] {emp_id}: ciencia de distribuidora RECUSADA {r['chave_nfe'][:12]}: "
+                  f"{res.get('cstat')} {res.get('xmotivo') or res.get('erro') or ''}")
+    return feitas
 
 
 def _reciencia_presas(emp_id):
@@ -372,10 +468,13 @@ def _reciencia_presas(emp_id):
     Roda a cada ciclo de 10 min, entao tem freio: a mesma nota so' e' reenviada
     de 6 em 6 h (se a SEFAZ responde 573 e o XML nao vem, sem o freio seriam 6
     eventos por hora, para sempre). E nota CANCELADA pelo fornecedor fica fora:
-    o XML completo dela nunca vem."""
+    o XML completo dela nunca vem. Nota emitida ha' mais de CIENCIA_DIAS + 5
+    dias tambem: se o XML nao veio ate' ai', reenviar nao resolve (as duas ALE
+    de 30/06 do Tijuco seriam reenviadas de 6 em 6 h para sempre)."""
+    desde = (datetime.utcnow() - timedelta(days=CIENCIA_DIAS + 5)).date().isoformat()
     try:
         presas = _rest_get("oct_nfe_manifestadas",
-                           f"?empresa_id=eq.{emp_id}&status=eq.ciencia&tipo=eq.resumo"
+                           f"?empresa_id=eq.{emp_id}&status=eq.ciencia&tipo=eq.resumo&emissao=gte.{desde}"
                            f"&chave_nfe=neq.null&select=id,chave_nfe,criado_em&limit=50")
     except Exception:
         return
@@ -432,6 +531,11 @@ def _reciencia_presas(emp_id):
 # ENTRADA: casa as descargas de uma empresa
 # ------------------------------------------------------------------
 def casar_empresa(emp_id):
+    # a ciencia das notas de distribuidora nao depende da sonda: vem antes de tudo
+    try:
+        _ciencia_distribuidoras(emp_id)
+    except Exception as e:
+        print(f"[descarga] {emp_id}: ciencia de distribuidora: {e}")
     try:
         med = _puxar_medicoes(emp_id)
         if not med:
