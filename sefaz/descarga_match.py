@@ -345,11 +345,87 @@ def _ciencia_resumos(emp_id, datas_descarga):
     amb = os.environ.get("DFE_AMBIENTE", "producao")
     for r in alvo:
         try:
-            registrar_evento(cnpj, r["chave_nfe"], dados["cert_base64"], dados["cert_senha"], amb, tipo="210210")
+            # registrar_evento NAO levanta erro quando a SEFAZ rejeita: devolve
+            # ok=False. Antes marcava "ciencia" de qualquer jeito e a nota ficava
+            # presa como resumo para sempre (KR 1655 e 3 ALE de 29/09 no
+            # Florestal, 01/10/2026). So' marca se a SEFAZ registrou.
+            res = registrar_evento(cnpj, r["chave_nfe"], dados["cert_base64"], dados["cert_senha"], amb, tipo="210210") or {}
+            if not (res.get("ok") is True or str(res.get("cstat")) in ("135", "136", "573")):
+                print(f"[descarga] {emp_id}: ciencia RECUSADA {r['chave_nfe'][:12]}: "
+                      f"{res.get('cstat')} {res.get('xmotivo') or res.get('erro') or ''}")
+                continue
             _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{r['id']}", body={"status": "ciencia"}, prefer="return=minimal")
             print(f"[descarga] {emp_id}: ciencia p/ puxar XML da nota {r['chave_nfe'][:12]} (descarga sem NF)")
         except Exception as e:
             print(f"[descarga] {emp_id}: ciencia falhou {str(r.get('chave_nfe'))[:12]}: {e}")
+
+
+_RECIENCIA_ULT = {}     # chave -> quando este processo tentou pela ultima vez
+
+
+def _reciencia_presas(emp_id):
+    """Resumo marcado 'ciencia' ha' mais de 3 h e SEM o XML completo = a ciencia
+    nao foi registrada na SEFAZ (ou o XML nao veio). Reenvia: 573 (duplicidade)
+    tambem vale -- quer dizer que ja' estava registrada. Se a SEFAZ recusar,
+    devolve a nota para 'sem_manifestacao' para aparecer de novo em Pendentes.
+
+    Roda a cada ciclo de 10 min, entao tem freio: a mesma nota so' e' reenviada
+    de 6 em 6 h (se a SEFAZ responde 573 e o XML nao vem, sem o freio seriam 6
+    eventos por hora, para sempre). E nota CANCELADA pelo fornecedor fica fora:
+    o XML completo dela nunca vem."""
+    try:
+        presas = _rest_get("oct_nfe_manifestadas",
+                           f"?empresa_id=eq.{emp_id}&status=eq.ciencia&tipo=eq.resumo"
+                           f"&chave_nfe=neq.null&select=id,chave_nfe,criado_em&limit=50")
+    except Exception:
+        return
+    if not presas:
+        return
+    try:
+        from .entrada_auto import chaves_canceladas
+        canceladas = chaves_canceladas(emp_id)
+    except Exception as e:
+        print(f"[descarga] {emp_id}: nao li os cancelamentos, re-ciencia adiada: {e}")
+        return
+    agora = datetime.utcnow()
+    limite = agora - timedelta(hours=3)
+    alvo = []
+    for r in presas:
+        try:
+            if r["chave_nfe"] in canceladas:
+                continue
+            ult = _RECIENCIA_ULT.get(r["chave_nfe"])
+            if ult and agora - ult < timedelta(hours=6):
+                continue
+            if datetime.fromisoformat((r.get("criado_em") or "")[:19]) > limite:
+                continue
+            comp = _rest_get("oct_nfe_manifestadas",
+                             f"?empresa_id=eq.{emp_id}&chave_nfe=eq.{r['chave_nfe']}&tipo=eq.nfe_completa&select=id&limit=1")
+            if not comp:
+                alvo.append(r)
+        except Exception:
+            continue
+    if not alvo:
+        return
+    try:
+        dados = carregar_empresa(emp_id)
+        cnpj = str((dados.get("empresa") or {}).get("cnpj") or "").replace(".", "").replace("/", "").replace("-", "")
+        from .evento import registrar_evento
+    except Exception as e:
+        print(f"[descarga] {emp_id}: cert p/ re-ciencia falhou: {e}")
+        return
+    amb = os.environ.get("DFE_AMBIENTE", "producao")
+    for r in alvo:
+        _RECIENCIA_ULT[r["chave_nfe"]] = agora
+        try:
+            res = registrar_evento(cnpj, r["chave_nfe"], dados["cert_base64"], dados["cert_senha"], amb, tipo="210210") or {}
+            ok = res.get("ok") is True or str(res.get("cstat")) in ("135", "136", "573")
+            print(f"[descarga] {emp_id}: re-ciencia {r['chave_nfe'][:12]} -> {res.get('cstat')} "
+                  f"{res.get('xmotivo') or res.get('erro') or ''}")
+            if not ok:
+                _rest("PATCH", f"oct_nfe_manifestadas?id=eq.{r['id']}", body={"status": "sem_manifestacao"}, prefer="return=minimal")
+        except Exception as e:
+            print(f"[descarga] {emp_id}: re-ciencia falhou {str(r.get('chave_nfe'))[:12]}: {e}")
 
 
 # ------------------------------------------------------------------
@@ -405,6 +481,7 @@ def casar_empresa(emp_id):
                     datas_sem_nf.add(d["ini"].date())
         # descarga sem nota casada -> da ciencia nas resumo da janela p/ puxar o XML completo
         _ciencia_resumos(emp_id, datas_sem_nf)
+        _reciencia_presas(emp_id)
         if n_casadas:
             print(f"[descarga] {emp_id}: {n_casadas} descarga(s) casada(s) com NF")
         return {"ok": True, "casadas": n_casadas, "descargas": n_descargas,
