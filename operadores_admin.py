@@ -63,7 +63,7 @@ def _quem_e(url, key, token):
 
 def _perfil(url, key, uid):
     status, corpo = _req(
-        f"{url}/rest/v1/oct_perfis?id=eq.{uid}&select=id,empresa_id,master,ativo",
+        f"{url}/rest/v1/oct_perfis?id=eq.{uid}&select=id,empresa_id,master,ativo,papel,empresas",
         headers={"apikey": key, "Authorization": f"Bearer {key}"})
     if status != 200 or not corpo:
         return None
@@ -102,7 +102,14 @@ def registrar_rotas_operadores(app):
             dele = _perfil(url, key, alvo)
             if not dele:
                 return jsonify({"erro": "operador nao encontrado"}), 404
-            if str(dele.get("empresa_id")) != str(eu.get("empresa_id")):
+            # O DONO do grupo (papel master) troca de posto no seletor do
+            # retaguarda, mas o perfil dele fica gravado num posto so' (Ronan =
+            # Gloria) -- antes ele era barrado nos outros (01/10/2026, Estevao
+            # da Florestal). Gerente comum segue preso ao proprio posto ou aos
+            # postos listados em `empresas` no perfil dele.
+            dono = (eu.get("papel") or "") == "master"
+            meus = {str(eu.get("empresa_id"))} | {str(e) for e in (eu.get("empresas") or [])}
+            if not dono and str(dele.get("empresa_id")) not in meus:
                 return jsonify({"erro": "operador de outra empresa"}), 403
 
             # 4) troca a senha pela Admin API
