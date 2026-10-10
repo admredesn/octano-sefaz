@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-10-app-cliente",
+                    "build": "2026-10-10-app-cliente-2",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -554,26 +554,40 @@ def app_web_raiz():
     return redirect("/app/", code=302)
 
 
+_APP_ICONE = {}
+
+
 @app.route("/app/icone.png", methods=["GET"])
 def app_web_icone():
-    """Ícone do app (tela inicial do celular): quadrado azul da Rede SN com "SN" e a
-    faixa vermelha. Desenhado na hora porque o publicador só envia texto."""
+    """Ícone do app (tela inicial do celular): o logo da Rede SN sobre fundo branco, igual ao
+    quadro do topo do app. Montado do próprio app_www/js/marca.js, porque o publicador só
+    envia texto. NÃO depende de fonte do sistema: a 1ª versão (10/10/2026) escrevia "SN" com
+    a DejaVu, que o servidor não tem, e o ícone saiu com as letras minúsculas."""
+    import base64
     import io
-    from PIL import Image, ImageDraw, ImageFont
+    import re
+    from PIL import Image, ImageDraw
     from flask import request, Response
     tam = 512 if str(request.args.get("t") or "") == "512" else 192
-    img = Image.new("RGB", (tam, tam), "#06253E")
-    dr = ImageDraw.Draw(img)
-    try:
-        fonte = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(tam * .42))
-    except Exception:
-        fonte = ImageFont.load_default()
-    w = dr.textlength("SN", font=fonte)
-    dr.text(((tam - w) / 2, tam * .2), "SN", fill="white", font=fonte)
-    dr.rectangle([tam * .22, tam * .74, tam * .78, tam * .80], fill="#DF1A24")
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return Response(buf.getvalue(), mimetype="image/png", headers={"Cache-Control": "public, max-age=86400"})
+    if tam not in _APP_ICONE:
+        img = Image.new("RGB", (tam, tam), "#FFFFFF")
+        try:
+            marca = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_www", "js", "marca.js")
+            with open(marca, encoding="utf-8") as f:
+                b64 = re.search(r'LOGO_AZUL\s*=\s*"data:image/png;base64,([^"]+)"', f.read()).group(1)
+            logo = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
+            larg = int(tam * .76)
+            alt = int(logo.height * larg / logo.width)
+            logo = logo.resize((larg, alt), getattr(Image, "Resampling", Image).LANCZOS)
+            img.paste(logo, ((tam - larg) // 2, (tam - alt) // 2), logo)
+        except Exception as e:                      # sem o logo: as cores da marca, sem texto
+            print("[app] icone sem o logo:", e)
+            img = Image.new("RGB", (tam, tam), "#06253E")
+            ImageDraw.Draw(img).rectangle([tam * .22, tam * .46, tam * .78, tam * .54], fill="#DF1A24")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        _APP_ICONE[tam] = buf.getvalue()
+    return Response(_APP_ICONE[tam], mimetype="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.route("/app/", methods=["GET"])
