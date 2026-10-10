@@ -1695,10 +1695,21 @@ def _operador_do_posto(empresa_id):
         u = rq.get(f"{url}/auth/v1/user", headers=h, timeout=10)
         if u.status_code != 200 or not (u.json() or {}).get("id"):
             return None
-        vis = rq.post(f"{url}/rest/v1/rpc/oct_empresas_visiveis", headers=h, json={}, timeout=10)
-        ids = set()
-        for x in (vis.json() if vis.status_code == 200 else []):
-            ids.add(x if isinstance(x, str) else (x.get("oct_empresas_visiveis") or x.get("id")))
+        # 10/10/2026: a regra do banco (oct_empresas_visiveis) só conhece o posto PRINCIPAL de quem
+        # não é dono; o gerente com posto EXTRA liberado (oct_perfis.empresas, 08/10) seria recusado
+        # ao dar baixa nele. Vale: cadastro ATIVO e (posto principal ou posto liberado); o dono
+        # continua pela regra do banco (todas as empresas dele).
+        perf = _sget(f"oct_perfis?id=eq.{u.json()['id']}&select=empresa_id,empresas,master,ativo&limit=1")
+        p = perf[0] if perf else None
+        if not p or p.get("ativo") is False:
+            return None
+        if p.get("master") is True:
+            vis = rq.post(f"{url}/rest/v1/rpc/oct_empresas_visiveis", headers=h, json={}, timeout=10)
+            ids = set()
+            for x in (vis.json() if vis.status_code == 200 else []):
+                ids.add(x if isinstance(x, str) else (x.get("oct_empresas_visiveis") or x.get("id")))
+        else:
+            ids = {str(e) for e in ([p.get("empresa_id")] + list(p.get("empresas") or [])) if e}
         if empresa_id not in ids:
             return None
         quem = (u.json().get("email") or u.json()["id"])[:80]
