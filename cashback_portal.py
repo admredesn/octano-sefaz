@@ -927,6 +927,10 @@ def api_me():
     total_pago = sum(float(c.get("valor_cashback") or 0) for c in cbs if c.get("status") == "pago")
     return jsonify({
         "ok": True, "nome": cli["nome"], "chave_pix": chave, "total_pago": round(total_pago, 2),
+        # app Postos SN: dados do próprio cliente para a tela Perfil
+        "cpf_mascarado": _cpf_mascara(cli["cpf"]), "email": cli.get("email"), "telefone": cli.get("telefone"),
+        "posto_favorito": cli.get("posto_favorito"), "aceita_marketing": bool(cli.get("aceita_marketing")),
+        "codigo": cli.get("id") and str(cli["id"])[:6].upper(),
         "proxima_liberacao": prox,
         "tem_facial": bool(cli.get("foto_path") and cli.get("lgpd_aceito_em")),
         "acionamento": (ac[0] if ac else None),
@@ -1024,10 +1028,14 @@ def api_acionar():
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
     if forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
-    # CHAVE GERAL: posto com cashback desligado não aceita acionamento de
-    # cashback (a venda A PRAZO tem liberação própria e continua valendo)
-    if forma != "05" and not _cashback_ligado(empresa):
-        return jsonify({"erro": "Este posto não oferece cashback no momento."}), 403
+    # CHAVE GERAL do cashback. 05/10/2026 (app Postos SN): o acionamento também IDENTIFICA
+    # o cliente na venda, e é isso que dá os PONTOS (1 por R$ 1). Posto com cashback
+    # desligado agora aceita o acionamento — só não gera cashback (o PDV já não gera:
+    # a trava dele é oct_parametros 'cashback' / oct_empresas.cashback_ativo no gateway).
+    com_cashback = forma != "05" and _cashback_ligado(empresa)
+    aviso = None
+    if forma != "05" and not com_cashback:
+        aviso = "Este posto não está com cashback agora — mas você ganha os pontos da compra."
     # A PRAZO: só com liberação do POSTO (revalida no servidor); se o cliente é
     # colaborador de EMPRESA, a conta (e o cupom) é da empresa
     conta_prazo = None
@@ -1055,10 +1063,12 @@ def api_acionar():
             rec = _sget("oct_cashback?chave_pix=eq." + rq.utils.quote(cli.get("chave_pix") or "", safe="")
                         + "&status=in.(pendente,processando,pago)"
                         + f"&criado_em=gte.{rq.utils.quote(corte2h, safe='')}&select=criado_em&limit=1")
-            if rec:
+            if rec and com_cashback:
+                # janela de 2h é do CASHBACK; o acionamento segue valendo para os pontos
                 lib = datetime.fromisoformat(str(rec[0]["criado_em"]).replace("Z", "+00:00")) + timedelta(seconds=JANELA_2H_SEG)
-                return jsonify({"erro": "Você já recebeu cashback nas últimas 2 horas.",
-                                "proxima_liberacao": lib.isoformat()}), 429
+                aviso = ("Você já recebeu cashback nas últimas 2 horas: o próximo libera às "
+                         + lib.astimezone(timezone(timedelta(hours=-3))).strftime("%H:%M")
+                         + ". Esta compra vale os pontos.")
         except Exception:
             pass
     try:
@@ -1124,7 +1134,7 @@ def api_acionar():
         if selfie:
             _faces_limpar()
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
-                        "validade_min": ACIONAMENTO_VALIDADE_MIN})
+                        "validade_min": ACIONAMENTO_VALIDADE_MIN, "cashback": com_cashback, "aviso": aviso})
     except Exception as e:
         return jsonify({"erro": "falha ao acionar: " + str(e)[:200]}), 500
 
@@ -1455,6 +1465,283 @@ def api_notificacao_aberta():
     except Exception:
         pass
     return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------
+# APP POSTOS SN — telas do cliente (05/10/2026): postos da rede, histórico de compras,
+# caixa de notificações e preferências do perfil.
+# ------------------------------------------------------------------
+_MINUSCULAS_NOME = {"de", "da", "do", "das", "dos", "e"}
+
+
+def _nome_bonito(nome):
+    """Nome como o cliente lê: 'POSTO SEVEN BH' -> 'Posto Seven BH', 'RIBEIRAO DAS NEVES' ->
+    'Ribeirao das Neves'. Só mexe no que veio TODO em maiúsculas (cadastro fiscal); palavra
+    de até 2 letras fica como sigla (BH, SN), menos de/da/do/e."""
+    nome = str(nome or "").strip()
+    if not nome or not nome.isupper():
+        return nome
+    out = []
+    for i, p in enumerate(nome.split()):
+        if i and p.lower() in _MINUSCULAS_NOME:
+            out.append(p.lower())
+        elif len(p) <= 2 and p.isalpha():
+            out.append(p)
+        else:
+            out.append(p.capitalize())
+    return " ".join(out)
+
+
+@bp_cashback.route("/cashback/api/rede/postos", methods=["GET"])
+def api_rede_postos():
+    """Postos da rede para o app (lista, distância, posto favorito). Público."""
+    try:
+        rows = _sget("oct_empresas?ativo=eq.true&select=id,nome,nome_fantasia,endereco,cidade,uf,latitude,longitude,"
+                     "app_foto_url,cashback_ativo&order=nome_fantasia")
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+    out = []
+    for r in rows:
+        nome = r.get("nome_fantasia") or r.get("nome") or "Posto"
+        if re.search(r"BANCADA|TESTE", nome, re.I):
+            continue
+        out.append({"id": r["id"], "nome": _nome_bonito(nome),
+                    "endereco": r.get("endereco"), "cidade": _nome_bonito(r.get("cidade")), "uf": r.get("uf"),
+                    "latitude": r.get("latitude"), "longitude": r.get("longitude"), "foto_url": r.get("app_foto_url"),
+                    "cashback": bool(r.get("cashback_ativo"))})
+    return jsonify(out)
+
+
+@bp_cashback.route("/cashback/api/historico", methods=["GET"])
+def api_historico():
+    """Últimas compras do cliente (vendas do PDV com o CPF dele)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    try:
+        rows = _sget(f"oct_pdv_vendas?cliente_cpf=eq.{cli['cpf']}&status=eq.concluida"
+                     "&select=id,empresa_id,data_venda,created_at,valor_total,itens,numero&order=created_at.desc&limit=30")
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+    nomes = _nomes_postos()
+    out = []
+    for v in rows:
+        itens = []
+        for it in (v.get("itens") or []):
+            if not isinstance(it, dict):
+                continue
+            q = it.get("qtd") or it.get("litros")
+            itens.append({"desc": str(it.get("desc") or it.get("nome") or "")[:60],
+                          "tipo": it.get("tipo"), "qtd": q, "total": it.get("total")})
+        out.append({"id": v["id"], "posto": nomes.get(v.get("empresa_id"), ""), "empresa_id": v.get("empresa_id"),
+                    "quando": v.get("data_venda") or v.get("created_at"), "valor": v.get("valor_total"),
+                    "cupom": v.get("numero"), "itens": itens})
+    return jsonify(out)
+
+
+@bp_cashback.route("/cashback/api/notificacoes", methods=["GET"])
+def api_notificacoes():
+    """Caixa de entrada do sino: as notificações enviadas a este cliente."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    try:
+        rows = _sget(f"oct_app_envios?cliente_cpf=eq.{cli['cpf']}&status=eq.ok"
+                     "&select=id,campanha_id,tipo,titulo,texto,enviado_em,aberto_em&order=enviado_em.desc&limit=40")
+    except Exception:
+        rows = []
+    vistos, out = set(), []
+    for r in rows:                      # 2 celulares = 2 envios: mostra uma vez só
+        chave = (r.get("campanha_id") or r["id"], r.get("titulo"))
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        out.append(r)
+    return jsonify(out)
+
+
+@bp_cashback.route("/cashback/api/perfil", methods=["POST"])
+def api_perfil():
+    """Preferências do cliente: posto favorito e o aceite de publicidade (LGPD: o avisos
+    de serviço é outro consentimento, por aparelho, em /dispositivo)."""
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    d = request.get_json(silent=True) or {}
+    corpo, disp = {}, {}
+    if "posto_favorito" in d:
+        corpo["posto_favorito"] = disp["posto_favorito"] = _uuid_ok(d.get("posto_favorito"))
+    if "aceita_marketing" in d:
+        mkt = d.get("aceita_marketing") is True
+        agora = datetime.now(timezone.utc).isoformat()
+        corpo.update({"aceita_marketing": mkt, "aceita_marketing_em": agora})
+        disp.update({"aceita_marketing": mkt, "aceita_marketing_em": agora if mkt else None})
+    if not corpo:
+        return jsonify({"ok": True})
+    try:
+        _spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}", corpo)
+        if disp:
+            _spatch(f"oct_app_dispositivos?cliente_cpf=eq.{cli['cpf']}", disp)
+    except Exception as e:
+        return jsonify({"erro": "não consegui salvar: " + str(e)[:120]}), 500
+    return jsonify({"ok": True})
+
+
+# ------------------------------------------------------------------
+# PONTOS (05/10/2026): 1 ponto por R$ 1, valem 6 meses, saldo único na rede pelo CPF.
+# A conta (saldo, troca, vencimento) é feita pelas funções do banco (SQL-APP-PONTOS.sql),
+# que travam o CPF; o crédito das vendas é o worker app_pontos.py.
+# ------------------------------------------------------------------
+def _rpc(nome, args):
+    url, _ = _supa()
+    r = _checa(rq.post(f"{url}/rest/v1/rpc/{nome}", headers=_sh(), json=args, timeout=30))
+    return r.json()
+
+
+def _nomes_postos():
+    try:
+        return {e["id"]: _nome_bonito(e.get("nome_fantasia") or e.get("nome") or "Posto")
+                for e in _sget("oct_empresas?select=id,nome,nome_fantasia")}
+    except Exception:
+        return {}
+
+
+@bp_cashback.route("/cashback/api/pontos", methods=["GET"])
+def api_pontos():
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    try:
+        saldo = _rpc("oct_app_pontos_saldo", {"p_cpf": cli["cpf"]})
+        limite = (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        abertos = _sget(f"oct_app_pontos?cliente_cpf=eq.{cli['cpf']}&restante=gt.0&vence_em=lte.{limite}"
+                        "&select=restante,vence_em&order=vence_em&limit=50")
+        agora = datetime.now(timezone.utc).isoformat()
+        a_vencer = sum(int(a["restante"]) for a in abertos if str(a["vence_em"]) > agora[:19])
+        prox = next((a["vence_em"] for a in abertos if str(a["vence_em"]) > agora[:19]), None)
+        mov = _sget(f"oct_app_pontos?cliente_cpf=eq.{cli['cpf']}&select=tipo,pontos,obs,criado_em,empresa_id,vence_em"
+                    "&order=criado_em.desc&limit=60")
+    except Exception as e:
+        return jsonify({"erro": "pontos indisponíveis: " + str(e)[:120]}), 500
+    nomes = _nomes_postos()
+    return jsonify({"ok": True, "saldo": int(saldo or 0), "a_vencer_30d": a_vencer, "proximo_vencimento": prox,
+                    "extrato": [{"tipo": m["tipo"], "pontos": m["pontos"], "obs": m.get("obs"),
+                                 "quando": m["criado_em"], "posto": nomes.get(m.get("empresa_id"), "")}
+                                for m in mov]})
+
+
+@bp_cashback.route("/cashback/api/premios", methods=["GET"])
+def api_premios():
+    posto = _uuid_ok(request.args.get("posto"))
+    try:
+        rows = _sget("oct_app_premios?ativo=eq.true&select=id,nome,descricao,foto_url,pontos,categoria,empresa_ids,"
+                     "estoque,destaque&order=destaque.desc,ordem,pontos&limit=200")
+    except Exception as e:
+        return jsonify({"erro": str(e)[:120]}), 500
+    return jsonify([{k: v for k, v in r.items() if k != "empresa_ids"} | {"disponivel": r.get("estoque") is None
+                                                                          or int(r["estoque"]) > 0}
+                    for r in rows if _vale_no_posto(r, posto)])
+
+
+@bp_cashback.route("/cashback/api/resgatar", methods=["POST"])
+def api_resgatar():
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    d = request.get_json(silent=True) or {}
+    premio, posto = _uuid_ok(d.get("premio_id")), _uuid_ok(d.get("posto"))
+    if not premio or not posto:
+        return jsonify({"erro": "Escolha o prêmio e o posto onde vai retirar."}), 400
+    if not _limite_ok("resgatar:" + cli["cpf"], 10, 3600):
+        return _muitas()
+    try:
+        r = _rpc("oct_app_resgatar", {"p_cpf": cli["cpf"], "p_nome": cli.get("nome"), "p_premio": premio,
+                                      "p_empresa": posto})
+    except Exception as e:
+        return jsonify({"erro": "não consegui trocar agora: " + str(e)[:120]}), 500
+    if not (r or {}).get("ok"):
+        return jsonify({"erro": (r or {}).get("erro") or "não deu para trocar", "saldo": (r or {}).get("saldo")}), 409
+    r["posto"] = _nomes_postos().get(posto, "posto")
+    return jsonify(r)
+
+
+@bp_cashback.route("/cashback/api/resgates", methods=["GET"])
+def api_resgates():
+    cli = _cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    rows = _sget(f"oct_app_resgates?cliente_cpf=eq.{cli['cpf']}&select=codigo,premio_nome,empresa_id,pontos,status,"
+                 "criado_em,expira_em,usado_em&order=criado_em.desc&limit=30")
+    nomes = _nomes_postos()
+    return jsonify([{**r, "posto": nomes.get(r.get("empresa_id"), "")} for r in rows])
+
+
+_OPERADOR_USER = {}
+
+
+def _operador_do_posto(empresa_id):
+    """Operador LOGADO (token do Supabase) que enxerga este posto. Devolve o nome/e-mail
+    para registrar quem entregou, ou None."""
+    tok = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    if len(tok) < 40 or not empresa_id:
+        return None
+    chave = (tok, empresa_id)
+    c = _OPERADOR_USER.get(chave)
+    if c and c[0] > time.time():
+        return c[1]
+    try:
+        url, key = _supa()
+        h = {"apikey": key, "Authorization": "Bearer " + tok, "Content-Type": "application/json"}
+        u = rq.get(f"{url}/auth/v1/user", headers=h, timeout=10)
+        if u.status_code != 200 or not (u.json() or {}).get("id"):
+            return None
+        vis = rq.post(f"{url}/rest/v1/rpc/oct_empresas_visiveis", headers=h, json={}, timeout=10)
+        ids = set()
+        for x in (vis.json() if vis.status_code == 200 else []):
+            ids.add(x if isinstance(x, str) else (x.get("oct_empresas_visiveis") or x.get("id")))
+        if empresa_id not in ids:
+            return None
+        quem = (u.json().get("email") or u.json()["id"])[:80]
+        if len(_OPERADOR_USER) > 500:
+            _OPERADOR_USER.clear()
+        _OPERADOR_USER[chave] = (time.time() + 300, quem)
+        return quem
+    except Exception:
+        return None
+
+
+@bp_cashback.route("/cashback/api/pdv/resgate", methods=["GET"])
+def api_pdv_resgate_ver():
+    """O caixa digita o código: mostra o prêmio ANTES de dar baixa."""
+    empresa = _uuid_ok(request.args.get("empresa"))
+    if not _operador_do_posto(empresa):
+        return jsonify({"erro": "entre no sistema deste posto para conferir o código"}), 401
+    cod = re.sub(r"[^A-Za-z0-9]", "", str(request.args.get("codigo") or "")).upper()[:10]
+    rows = _sget(f"oct_app_resgates?codigo=eq.{cod}&order=criado_em.desc&limit=1"
+                 "&select=codigo,cliente_nome,premio_nome,pontos,status,empresa_id,expira_em,usado_em,usado_por") if cod else []
+    if not rows:
+        return jsonify({"erro": "Código não encontrado."}), 404
+    r = rows[0]
+    nome = (r.get("cliente_nome") or "").split()
+    return jsonify({"ok": True, "codigo": r["codigo"], "premio": r["premio_nome"], "pontos": r["pontos"],
+                    "status": r["status"], "outro_posto": r["empresa_id"] != empresa, "expira_em": r["expira_em"],
+                    "usado_em": r.get("usado_em"), "usado_por": r.get("usado_por"),
+                    "cliente": " ".join(nome[:1] + [n[:1] + "." for n in nome[1:]])})   # "RONAN J."
+
+
+@bp_cashback.route("/cashback/api/pdv/resgate/usar", methods=["POST"])
+def api_pdv_resgate_usar():
+    d = request.get_json(silent=True) or {}
+    empresa = _uuid_ok(d.get("empresa"))
+    quem = _operador_do_posto(empresa)
+    if not quem:
+        return jsonify({"erro": "entre no sistema deste posto para dar baixa"}), 401
+    try:
+        r = _rpc("oct_app_resgate_usar", {"p_codigo": str(d.get("codigo") or ""), "p_empresa": empresa,
+                                          "p_operador": quem})
+    except Exception as e:
+        return jsonify({"erro": "não consegui dar baixa: " + str(e)[:120]}), 500
+    return (jsonify(r), 200) if (r or {}).get("ok") else (jsonify(r), 409)
 
 
 # ------------------------------------------------------------------
@@ -1847,6 +2134,22 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 
   <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline">
+      <div style="font-weight:700">⭐ Meus pontos</div>
+      <div class="grande" id="pt-saldo" style="font-size:1.3rem;color:#fbbf24">—</div>
+    </div>
+    <div class="sub" style="margin:2px 0 0">1 ponto a cada R$ 1 nas compras identificadas com o seu CPF. Cada ponto vale 6 meses.</div>
+    <div id="pt-vencer" class="aviso esc"></div>
+    <div id="pt-codigo" class="cta esc" style="text-align:center"></div>
+    <button onclick="abrirPremios()">🎁 Trocar pontos</button>
+    <div id="pt-premios" class="esc" style="margin-top:10px"></div>
+    <div id="pt-resgates" style="margin-top:10px"></div>
+    <button class="sec" onclick="document.getElementById('pt-extrato').classList.toggle('esc')">Ver extrato de pontos</button>
+    <div id="pt-extrato" class="lista esc"></div>
+    <div class="msg" id="pt-msg"></div>
+  </div>
+
+  <div class="card">
     <div style="font-weight:700;margin-bottom:6px">⚙️ Minha conta</div>
     <button class="sec" onclick="sairTodos()">Sair de todos os aparelhos</button>
     <button class="sec" onclick="document.getElementById('ex-box').classList.toggle('esc')">Excluir minha conta</button>
@@ -1893,7 +2196,7 @@ PAGINA_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão app-base-16</div>
+<div class="sub" style="text-align:center;margin-top:14px;opacity:.45">versão app-pontos-17</div>
 
 <script>
 // qualquer erro de JS aparece na tela (diagnóstico remoto: o cliente manda o texto)
@@ -2138,6 +2441,7 @@ async function carregarDash(){
       "<br><br><a href='#' onclick='cancelarAcionamento();return false'>cancelar</a>";
     ligarEspelho();
   } else {fm.classList.remove("esc");at.classList.add("esc");garantirPosto();verificarPrazo();}
+  carregarPontos();
   const lst=document.getElementById("dh-lista");
   if(!(r.cashbacks||[]).length){lst.innerHTML='<div class="sub">Nenhum cashback ainda — abasteça para começar! 🚗</div>';}
   else lst.innerHTML=r.cashbacks.map(c=>{
@@ -2146,6 +2450,62 @@ async function carregarDash(){
     const q=c.quando?new Date(c.quando).toLocaleDateString("pt-BR")+" "+new Date(c.quando).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"}):"";
     return `<div class="item"><div><b>${brl(c.valor)}</b> <span class="sub">· ${Number(c.litros||0).toFixed(1)} L${c.posto?" · "+esc(c.posto):""}</span><br><span class="sub">${q}</span></div><span class="tag ${cls}">${esc(rot)}</span></div>`;
   }).join("");
+}
+
+// ---- PONTOS (05/10/2026): 1 por R$ 1, valem 6 meses, troca por prêmio com código no caixa ----
+let PT_SALDO=0;
+const PT_TIPO={ganho:"Ganhou",estorno:"Voltou",resgate:"Trocou",vencido:"Venceu",cancelado:"Venda cancelada",ajuste:"Ajuste"};
+async function carregarPontos(){
+  const r=await req("/cashback/api/pontos");
+  const sd=document.getElementById("pt-saldo");
+  if(!r.ok){sd.textContent="—";return;}
+  PT_SALDO=r.saldo||0;
+  sd.textContent=PT_SALDO.toLocaleString("pt-BR")+" pts";
+  const av=document.getElementById("pt-vencer");
+  if(r.a_vencer_30d>0&&r.proximo_vencimento){
+    av.classList.remove("esc");
+    av.textContent="⏳ "+r.a_vencer_30d+" ponto(s) vencem nos próximos 30 dias (o primeiro em "+new Date(r.proximo_vencimento).toLocaleDateString("pt-BR")+"). Troque antes!";
+  } else av.classList.add("esc");
+  const ex=document.getElementById("pt-extrato");
+  ex.innerHTML=(r.extrato||[]).length?r.extrato.map(m=>{
+    const q=new Date(m.quando);
+    return `<div class="item"><div><b style="color:${m.pontos>=0?"#4ade80":"#f87171"}">${m.pontos>0?"+":""}${esc(m.pontos)}</b> <span class="sub">· ${esc(PT_TIPO[m.tipo]||m.tipo)}</span><br><span class="sub">${esc(m.obs||"")}${m.posto?" · "+esc(m.posto):""} · ${q.toLocaleDateString("pt-BR")}</span></div></div>`;
+  }).join(""):'<div class="sub">Nenhum ponto ainda. Informe o seu CPF no caixa (ou acione pelo app) e ganhe 1 ponto a cada R$ 1.</div>';
+  carregarResgates();
+}
+async function carregarResgates(){
+  const lst=await fetch(API+"/cashback/api/resgates",{headers:{"Authorization":"Bearer "+tok()}}).then(x=>x.json()).catch(()=>[]);
+  const vivos=(Array.isArray(lst)?lst:[]).filter(x=>x.status==="emitido");
+  document.getElementById("pt-resgates").innerHTML=vivos.map(x=>
+    `<div class="item"><div>🎟 <b style="letter-spacing:2px;font-size:1.05rem">${esc(x.codigo)}</b> · ${esc(x.premio_nome)}<br><span class="sub">Retire no ${esc(x.posto)} até ${new Date(x.expira_em).toLocaleDateString("pt-BR")}</span></div><span class="tag t-pendente">A RETIRAR</span></div>`).join("");
+}
+async function abrirPremios(){
+  const box=document.getElementById("pt-premios");
+  if(!box.classList.contains("esc")){box.classList.add("esc");return;}
+  const postoSel=document.getElementById("ac-posto");
+  const posto=POSTO||(postoSel&&postoSel.value)||"";
+  if(!posto){const m=document.getElementById("pt-msg");m.className="msg erro";m.textContent="Escolha o posto (no quadro acima) ou leia o QR de uma bomba.";garantirPosto();return;}
+  box.classList.remove("esc");box.innerHTML='<div class="sub">Carregando prêmios…</div>';
+  const lst=await fetch(API+"/cashback/api/premios?posto="+posto).then(x=>x.json()).catch(()=>[]);
+  const ps=Array.isArray(lst)?lst:[];
+  box.innerHTML=ps.length?ps.map(p=>{
+    const pode=p.disponivel&&PT_SALDO>=p.pontos;
+    return `<div class="item" style="align-items:center;gap:10px">
+      ${p.foto_url?`<img src="${esc(p.foto_url)}" alt="" style="width:54px;height:54px;object-fit:cover;border-radius:8px;flex:0 0 auto">`:""}
+      <div style="flex:1;min-width:0"><b>${esc(p.nome)}</b><br><span class="sub" style="color:#fbbf24">${esc(p.pontos)} pontos${p.disponivel?"":" · esgotado"}</span></div>
+      <button onclick="resgatarPremio('${esc(p.id)}','${esc(posto)}')" ${pode?"":"disabled"} style="width:auto;margin:0;padding:8px 12px;${pode?"":"opacity:.4"}">Trocar</button></div>`;
+  }).join(""):'<div class="sub">Este posto ainda não tem prêmios para troca.</div>';
+}
+async function resgatarPremio(premio,posto){
+  const m=document.getElementById("pt-msg");m.className="msg";m.textContent="Trocando…";
+  const r=await req("/cashback/api/resgatar",{premio_id:premio,posto:posto});
+  if(!r.ok){m.className="msg erro";m.textContent=r.erro||"Não deu para trocar";return;}
+  m.textContent="";
+  document.getElementById("pt-premios").classList.add("esc");
+  const c=document.getElementById("pt-codigo");c.classList.remove("esc");
+  c.innerHTML="🎟 Mostre este código no caixa do <b>"+esc(r.posto)+"</b>:<div style='font-size:2rem;font-weight:800;letter-spacing:6px;margin:6px 0'>"+esc(r.codigo)+"</div>"+
+    esc(r.premio)+" · vale até "+new Date(r.expira_em).toLocaleDateString("pt-BR")+". Se não retirar, os pontos voltam.";
+  carregarPontos();
 }
 
 // mostra a opção A PRAZO só pra cliente LIBERADO pelo posto (revalidado no servidor)

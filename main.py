@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-03-ibpt-imposto-real",
+                    "build": "2026-10-10-app-cliente",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -537,6 +537,53 @@ try:
     _push_iniciar()
 except Exception as _e:
     print("[app-push] nao iniciou:", _e)
+
+# ── App Postos SN: pontos (1 por R$ 1, valem 6 meses) — crédito das vendas a cada 5 min ──
+try:
+    from app_pontos import iniciar as _pontos_iniciar
+    _pontos_iniciar()
+except Exception as _e:
+    print("[app-pontos] nao iniciou:", _e)
+
+
+# ── App Postos SN: versão web do app (o mesmo código que vai para as lojas) ─────
+# Serve app_www/ em /app/ para testar no celular antes das contas da Apple/Google.
+@app.route("/app", methods=["GET"])
+def app_web_raiz():
+    from flask import redirect
+    return redirect("/app/", code=302)
+
+
+@app.route("/app/icone.png", methods=["GET"])
+def app_web_icone():
+    """Ícone do app (tela inicial do celular): quadrado azul da Rede SN com "SN" e a
+    faixa vermelha. Desenhado na hora porque o publicador só envia texto."""
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+    from flask import request, Response
+    tam = 512 if str(request.args.get("t") or "") == "512" else 192
+    img = Image.new("RGB", (tam, tam), "#06253E")
+    dr = ImageDraw.Draw(img)
+    try:
+        fonte = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", int(tam * .42))
+    except Exception:
+        fonte = ImageFont.load_default()
+    w = dr.textlength("SN", font=fonte)
+    dr.text(((tam - w) / 2, tam * .2), "SN", fill="white", font=fonte)
+    dr.rectangle([tam * .22, tam * .74, tam * .78, tam * .80], fill="#DF1A24")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.route("/app/", methods=["GET"])
+@app.route("/app/<path:arq>", methods=["GET"])
+def app_web(arq="index.html"):
+    from flask import send_from_directory
+    pasta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_www")
+    resp = send_from_directory(pasta, arq)          # send_from_directory recusa ../
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 
 @app.route("/app/push/status", methods=["GET"])

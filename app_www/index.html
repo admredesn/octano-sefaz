@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#06253E">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Postos SN">
+<title>Postos SN</title>
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icone.png?t=192">
+<link rel="icon" type="image/png" href="icone.png?t=192">
+<link rel="stylesheet" href="css/app.css?v=1">
+</head>
+<body>
+<div class="app"><main id="tela"></main></div>
+
+<nav class="barra" id="barra" style="display:none" aria-label="Navegação">
+  <div class="barra-in">
+    <button data-aba="inicio" onclick="ir('#/inicio')"><span data-ico="inicio"></span>Início</button>
+    <button data-aba="resgatar" onclick="S.cat='';ir('#/resgatar')"><span data-ico="presente"></span>Resgatar</button>
+    <button class="fab" onclick="ir('#/bomba')" aria-label="Vou abastecer"><span data-ico="bomba" data-tam="30"></span></button>
+    <button data-aba="cupons" onclick="ir('#/cupons')"><span data-ico="cupom"></span>Cupons</button>
+    <button data-aba="perfil" onclick="ir('#/perfil')"><span data-ico="perfil"></span>Perfil</button>
+  </div>
+</nav>
+
+<nav class="barra" id="barra-eq" style="display:none" aria-label="Navegação da equipe">
+  <div class="barra-in quatro">
+    <button data-aba="eq-painel" onclick="ir('#/eq-painel')"><span data-ico="painel"></span>Painel</button>
+    <button data-aba="eq-aprovacoes" onclick="ir('#/eq-aprovacoes')"><span data-ico="aprovar"></span>Aprovações<i class="conta" id="eq-pend-n"></i></button>
+    <button data-aba="eq-postos" onclick="ir('#/eq-postos')"><span data-ico="loja"></span>Postos</button>
+    <button data-aba="eq-conta" onclick="ir('#/eq-conta')"><span data-ico="perfil"></span>Conta</button>
+  </div>
+</nav>
+
+<script src="js/marca.js?v=1"></script>
+<script src="js/base.js?v=1"></script>
+<script src="js/telas.js?v=1"></script>
+<script src="js/bomba.js?v=1"></script>
+<script src="js/equipe.js?v=1"></script>
+<script>
+  document.querySelectorAll("[data-ico]").forEach(s => { s.innerHTML = ICO[s.dataset.ico](+(s.dataset.tam || 24)); });
+</script>
+</body>
+</html>
