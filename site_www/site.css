@@ -1,0 +1,101 @@
+/* Site da Rede SN (10/10/2026). Cores da marca: azul-marinho #06253E e vermelho #DF1A24.
+   Fonte do sistema, sem dependência externa: o site abre rápido e não quebra se um serviço de fora cair. */
+:root {
+  --azul: #06253E; --azul-2: #0D3A5E; --verm: #DF1A24; --fundo: #F4F6F9; --card: #FFFFFF;
+  --txt: #142230; --mut: #5F6B78; --borda: #E1E6EC; --raio: 16px;
+  --sombra: 0 1px 3px rgba(6, 37, 62, .08), 0 6px 20px rgba(6, 37, 62, .06);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+       background: var(--fundo); color: var(--txt); font-size: 17px; line-height: 1.55; -webkit-font-smoothing: antialiased; }
+img { display: block; max-width: 100%; }
+a { color: var(--azul-2); }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--verm); outline-offset: 3px; border-radius: 6px; }
+.centro { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+/* aviso de rascunho: sai quando a empresa e os contatos estiverem definidos */
+.rascunho { background: #FFF6E0; color: #6B4700; font-size: .88rem; padding: 10px 20px; text-align: center; border-bottom: 1px solid #F0DCA8; }
+
+/* topo */
+.topo { background: var(--card); border-bottom: 1px solid var(--borda); position: sticky; top: 0; z-index: 10; }
+.topo .centro { display: flex; align-items: center; gap: 24px; height: 68px; }
+.topo .marca img { height: 44px; width: auto; }
+.topo nav { margin-left: auto; display: flex; gap: 22px; flex-wrap: wrap; }
+.topo nav a { text-decoration: none; font-weight: 650; font-size: .95rem; color: var(--azul); padding: 8px 0; }
+.topo nav a:hover { color: var(--verm); }
+
+/* abertura */
+.abertura { background: radial-gradient(120% 140% at 100% 0%, var(--azul-2) 0%, var(--azul) 60%); color: #fff;
+            position: relative; overflow: hidden; }
+.abertura::after { content: ""; position: absolute; right: -70px; top: -60px; width: 300px; height: 420px;
+                   border-radius: 0 0 0 300px; border-left: 44px solid var(--verm); border-bottom: 44px solid var(--verm);
+                   opacity: .92; transform: rotate(8deg); }
+.abertura .centro { position: relative; z-index: 1; padding-top: 64px; padding-bottom: 72px; }
+.abertura img { width: 190px; margin-bottom: 26px; }
+.abertura h1 { font-size: clamp(2rem, 5vw, 3.1rem); line-height: 1.08; font-weight: 800; letter-spacing: -.02em;
+               max-width: 15em; text-wrap: balance; }
+.abertura p { margin-top: 16px; font-size: 1.12rem; opacity: .9; max-width: 34em; }
+.botao { display: inline-block; margin-top: 26px; background: #fff; color: var(--azul); font-weight: 750; text-decoration: none;
+         padding: 14px 22px; border-radius: 14px; }
+.botao:hover { background: #E7EEF5; }
+
+/* blocos */
+.bloco { padding: 56px 0; }
+.bloco.branco { background: var(--card); border-top: 1px solid var(--borda); border-bottom: 1px solid var(--borda); }
+.bloco h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 800; letter-spacing: -.015em; text-wrap: balance; }
+.bloco .sub { color: var(--mut); margin-top: 8px; max-width: 40em; }
+.grade { display: grid; gap: 16px; margin-top: 28px; }
+.grade.postos { grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+.grade.vantagens { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 28px; }   /* 4 lado a lado, 2 no tablet, 1 no celular */
+.posto { background: var(--card); border-radius: var(--raio); box-shadow: var(--sombra); padding: 20px; display: flex;
+         flex-direction: column; gap: 6px; }
+.posto h3 { font-size: 1.15rem; font-weight: 750; }
+.posto .cidade { color: var(--verm); font-weight: 700; font-size: .82rem; text-transform: uppercase; letter-spacing: .07em; }
+.posto .end { color: var(--mut); font-size: .95rem; flex: 1; }
+.posto a { font-weight: 650; font-size: .92rem; text-decoration: none; margin-top: 8px; }
+.posto a:hover { text-decoration: underline; }
+.vantagem .ic { width: 48px; height: 48px; border-radius: 14px; background: #E7EEF5; color: var(--azul); display: flex;
+                align-items: center; justify-content: center; margin-bottom: 12px; }
+.vantagem h3 { font-size: 1.08rem; font-weight: 750; }
+.vantagem p { color: var(--mut); font-size: .97rem; margin-top: 4px; }
+.selo { display: inline-block; margin-top: 26px; background: var(--azul); color: #fff; font-weight: 700; font-size: .9rem;
+        padding: 9px 16px; border-radius: 99px; }
+.contato { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin-top: 24px; }
+.contato > div { background: var(--card); border-radius: var(--raio); box-shadow: var(--sombra); padding: 18px 20px; }
+.contato .rot { font-size: .76rem; color: var(--mut); text-transform: uppercase; letter-spacing: .08em; font-weight: 650; }
+.contato .val { font-weight: 700; margin-top: 2px; overflow-wrap: anywhere; }
+
+/* páginas de texto (privacidade, termos, exclusão) */
+.texto { max-width: 46em; margin: 0 auto; padding: 44px 20px 64px; }
+.texto h1 { font-size: clamp(1.7rem, 4vw, 2.3rem); font-weight: 800; letter-spacing: -.02em; line-height: 1.15; text-wrap: balance; }
+.texto .vigencia { color: var(--mut); font-size: .92rem; margin-top: 8px; }
+.texto h2 { font-size: 1.22rem; font-weight: 750; margin-top: 34px; }
+.texto p, .texto ul, .texto ol { margin-top: 12px; }
+.texto ul, .texto ol { padding-left: 1.3em; }
+.texto li { margin-top: 6px; }
+.texto .quadro { background: var(--card); border-radius: var(--raio); box-shadow: var(--sombra); padding: 18px 20px; margin-top: 18px; }
+.falta { background: #FFE9A8; color: #142230; border-radius: 4px; padding: 0 4px; font-weight: 650; }
+
+/* rodapé */
+.rodape { background: var(--azul); color: #C9D5E0; font-size: .9rem; padding: 34px 0 40px; }
+.rodape .centro { display: flex; gap: 30px; flex-wrap: wrap; align-items: flex-start; }
+.rodape img { width: 104px; }
+.rodape .quem { flex: 1; min-width: 240px; }
+.rodape b { color: #fff; }
+.rodape nav { display: flex; flex-direction: column; gap: 8px; }
+.rodape a { color: #fff; text-decoration: none; font-weight: 600; }
+.rodape a:hover { text-decoration: underline; }
+
+@media (max-width: 640px) {
+  body { font-size: 16px; }
+  .topo .centro { height: 60px; gap: 12px; }
+  .topo .marca img { height: 36px; }
+  .topo nav { gap: 14px; }
+  .topo nav a { font-size: .88rem; }
+  .abertura .centro { padding-top: 44px; padding-bottom: 52px; }
+  .abertura img { width: 150px; }
+  .abertura::after { right: -150px; opacity: .55; }
+  .bloco { padding: 40px 0; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }

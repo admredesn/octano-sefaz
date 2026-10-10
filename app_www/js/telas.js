@@ -102,7 +102,7 @@ function telaCadastro() {
         <div class="campo"><label>Senha</label><input id="c-senha" type="password" autocomplete="new-password" placeholder="mín. 6"></div>
         <div class="campo"><label>Repita a senha</label><input id="c-senha2" type="password" autocomplete="new-password"></div>
       </div>
-      <label class="check"><input type="checkbox" id="c-termos"> <span>Li e aceito os termos de uso e a política de privacidade da Rede SN.</span></label>
+      <label class="check"><input type="checkbox" id="c-termos"> <span>Li e aceito os <a class="link" href="${DOC_TERMOS}" target="_blank" rel="noopener">termos de uso</a> e a <a class="link" href="${DOC_PRIVACIDADE}" target="_blank" rel="noopener">política de privacidade</a> da Rede SN.</span></label>
       <label class="check"><input type="checkbox" id="c-mkt"> <span>Quero receber ofertas e promoções dos Postos SN (dá para mudar depois no Perfil).</span></label>
       <button class="btn" id="c-btn">Criar conta</button>
       <div class="msg" id="c-msg"></div>
@@ -437,6 +437,11 @@ async function telaPerfil() {
       ${item("sair", "Sair", "sair()")}
       ${item("escudo", "Sair de todos os aparelhos", "sairTodos()")}
       ${item("lixo", "Excluir minha conta", "excluirConta()")}
+    </div></div>
+    <div class="grupo-tit">Sobre</div>
+    <div class="secao" style="padding-top:0"><div class="card lista">
+      ${item("dados", "Termos de uso", "window.open(DOC_TERMOS, '_blank', 'noopener')")}
+      ${item("escudo", "Política de privacidade", "window.open(DOC_PRIVACIDADE, '_blank', 'noopener')")}
     </div></div>
     <div class="vazio" style="text-align:center">Postos SN · versão ${VERSAO_APP}</div>
   </div>`;

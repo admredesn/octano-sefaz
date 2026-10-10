@@ -10,6 +10,10 @@
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && location.pathname.indexOf("/app") === 0) ? "" : SERVIDOR;
 const VERSAO_APP = "0.1.0";
+// Documentos públicos (site da Rede SN, servido pelo mesmo servidor em /site/). Quando o domínio
+// www.redesn.com.br estiver apontado, pode trocar por ele: as páginas são as mesmas.
+const DOC_TERMOS = SERVIDOR + "/site/termos.html";
+const DOC_PRIVACIDADE = SERVIDOR + "/site/privacidade.html";
 // ACESSO DA EQUIPE: as telas existem (equipe.js), mas as rotas do servidor ainda não. Enquanto
 // estiver false, o link "Acesso da equipe" some da entrada e a tela diz "em breve". Ligar junto
 // com a publicação das rotas /app/equipe/api/*. (var, não const: a bancada de layout liga.)

@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-10-app-cliente-3",
+                    "build": "2026-10-10-site-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -598,6 +598,52 @@ def app_web(arq="index.html"):
     resp = send_from_directory(pasta, arq)          # send_from_directory recusa ../
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ── Site da Rede SN (10/10/2026) ─────────────────────────────────────────────────
+# Páginas públicas da empresa (SN Investimentos Ltda): a Apple e o Google exigem um site no
+# domínio da empresa, e é nele que ficam a política de privacidade, os termos e a exclusão de
+# conta que o app aponta. Arquivos estáticos em site_www/, montados por
+# _ferramentas/site_rede_sn/montar.py (não editar à mão).
+#   * no domínio da empresa (redesn.com.br / www.redesn.com.br) o site responde na RAIZ;
+#   * em qualquer endereço ele também responde em /site/ (para conferir antes de o domínio
+#     apontar para cá, e para o app abrir os documentos).
+# No domínio da empresa só os caminhos do site são tomados: /app, /cashback etc. seguem normais.
+_SITE_HOSTS = {"redesn.com.br", "www.redesn.com.br"}
+_SITE_RAIZ = {"", "index.html", "privacidade.html", "termos.html", "excluir-conta.html", "site.css"}
+
+
+def _site_arquivo(arq):
+    from flask import send_from_directory
+    pasta = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site_www")
+    resp = send_from_directory(pasta, arq or "index.html")      # send_from_directory recusa ../
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+@app.before_request
+def _site_no_dominio():
+    from flask import request
+    if request.method not in ("GET", "HEAD"):
+        return None
+    if (request.host or "").split(":")[0].lower() not in _SITE_HOSTS:
+        return None
+    caminho = request.path.lstrip("/")
+    if caminho in _SITE_RAIZ or caminho.startswith("img/"):
+        return _site_arquivo(caminho)
+    return None
+
+
+@app.route("/site", methods=["GET"])
+def site_raiz():
+    from flask import redirect
+    return redirect("/site/", code=302)
+
+
+@app.route("/site/", methods=["GET"])
+@app.route("/site/<path:arq>", methods=["GET"])
+def site_previa(arq="index.html"):
+    return _site_arquivo(arq)
 
 
 @app.route("/app/push/status", methods=["GET"])
