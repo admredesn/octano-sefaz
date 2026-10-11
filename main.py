@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-11-equipe-1",
+                    "build": "2026-10-11-cartoes-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -500,6 +500,18 @@ def dfe_casar_manual(empresa_id):
     except Exception as e:
         import traceback
         return jsonify({"erro": str(e), "traceback": traceback.format_exc()[-1500:]}), 500
+
+
+@app.route("/cartoes/baixar", methods=["POST"])
+def cartoes_baixar():
+    """Botao "Baixar cartoes" da aba Cartoes do retaguarda: baixa o extrato EDI do PagBank
+    (rede) de um periodo (ate 62 dias) para oct_cartao_transacoes. Body: {de, ate} (ISO)."""
+    try:
+        from sefaz import cartoes_edi
+        d = request.get_json(silent=True) or {}
+        return jsonify(cartoes_edi.baixar_periodo(str(d.get("de") or ""), str(d.get("ate") or "")))
+    except Exception as e:
+        return jsonify({"ok": False, "motivo": str(e)[:300]}), 500
 
 
 @app.route("/cte/consultar/<empresa_id>", methods=["POST"])

@@ -213,6 +213,13 @@ def _consultar_empresa(emp):
 
 
 def _ciclo():
+    # CARTOES (11/10/2026): extrato EDI do PagBank da REDE (conta unica) -> oct_cartao_transacoes,
+    # uma vez por ciclo; controle proprio (oct_cartao_controle), nada a ver com a SEFAZ.
+    try:
+        from . import cartoes_edi
+        cartoes_edi.ciclo()
+    except Exception as e:
+        print(f"[cartoes] ciclo: {e}")
     for emp in _empresas_alvo():
         try:
             # Consulta na SEFAZ: no maximo 1x/hora por empresa (claim atomico + bloqueio 656)
