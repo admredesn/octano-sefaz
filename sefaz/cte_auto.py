@@ -128,16 +128,26 @@ def papel_do_posto(cnpj, d):
     return "outro"
 
 
-def litros_da_carga(qtds):
-    """Litros informados no CT-e (cUnid 04 = litros; 00 = m3). None se a transportadora nao informou volume."""
+_MEDIDA_LITRO = ("L", "LT", "LTS", "LITRO", "LITROS", "LITRAGEM", "L.", "LT.")
+
+
+def litros_da_carga(qtds, produto=""):
+    """Litros informados no CT-e. None se a transportadora nao informou volume em litros.
+
+    O que os CT-e reais mostraram (11/10/2026, 1a carga dos 4 postos): o codigo da unidade
+    (cUnid) NAO e' confiavel -- ha' cooperativa que manda cUnid 02 (tonelada) com a medida
+    escrita "L". Entao vale a MEDIDA escrita como litro, ou o cUnid 04. Metro cubico (cUnid 00)
+    so' vira litro quando a carga e' combustivel: encomenda (Jadlog) tambem informa m3 da caixa."""
+    combustivel = any(p in str(produto or "").upper() for p in ("COMBUST", "GASOL", "DIESEL", "ETANOL", "ALCOOL", "INFLAM"))
     tot = 0.0
     for q in qtds or []:
         v = q.get("qtd")
         if v is None:
             continue
-        if q.get("unid") == "04":
+        medida = str(q.get("medida") or "").strip().upper()
+        if medida in _MEDIDA_LITRO or medida.startswith("LITR") or q.get("unid") == "04":
             tot += float(v)
-        elif q.get("unid") == "00":
+        elif q.get("unid") == "00" and combustivel:
             tot += float(v) * 1000.0
     return round(tot, 3) if tot > 0 else None
 
@@ -168,7 +178,7 @@ def linha_do_cte(emp_id, cnpj, d, ult_nsu_consulta=None):
         "icms_grupo": d.get("icms_grupo") or None, "icms_cst": d.get("icms_cst") or None, "icms_bc": d.get("icms_bc"),
         "icms_aliq": d.get("icms_aliq"), "icms_valor": d.get("icms_valor"), "icms_red_bc": d.get("icms_red_bc"),
         "valor_carga": d.get("valor_carga"), "produto_pred": d.get("produto_pred") or None,
-        "qtd_carga": d.get("qtd_carga") or [], "litros_carga": litros_da_carga(d.get("qtd_carga")),
+        "qtd_carga": d.get("qtd_carga") or [], "litros_carga": litros_da_carga(d.get("qtd_carga"), d.get("produto_pred")),
         "chaves_nfe": d.get("chaves_nfe") or [], "chave_cte_ref": d.get("chave_cte_ref"),
         "rntrc": d.get("rntrc"), "obs": d.get("obs"), "placa": d.get("placa"), "motorista": d.get("motorista"),
         "protocolo": d.get("protocolo"), "autorizado_em": d.get("autorizado_em"),
