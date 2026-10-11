@@ -1,17 +1,17 @@
 // ============================================================
-// App Postos SN — ACESSO DA EQUIPE (etapa de LAYOUT, 10/10/2026)
+// App Postos SN — ACESSO DA EQUIPE (layout 10/10/2026; servidor 11/10/2026)
 // ------------------------------------------------------------
-// O dono e os gerentes entram com o mesmo e-mail e senha do sistema (retaguarda).
+// O dono e os gerentes entram com o mesmo usuário e senha do sistema (retaguarda).
 // Decidido pelo Ronan:
 //  * 05/10: a primeira versão da equipe são as APROVAÇÕES do caixa (desconto, crédito
 //    a prazo, aferição);
 //  * 10/10: aprova com UM toque; o pedido VENCE em 1 minuto sem resposta; o gerente vê
 //    o mesmo que o dono, mas o dono liga e desliga, por perfil, o que ele pode APROVAR
 //    e o que ele pode VER (tela Permissões do app).
-// As rotas /app/equipe/api/* AINDA NÃO EXISTEM no servidor: por enquanto as telas só
-// abrem na bancada (_ferramentas/app_bancada), com dados de exemplo. Quando existirem,
-// é o SERVIDOR que deixa de mandar o que o perfil não pode ver — esconder aqui é só
-// acabamento.
+// Rotas /app/equipe/api/* = app_equipe.py no servidor. É o SERVIDOR que deixa de mandar
+// o que o perfil não pode ver — esconder aqui é só acabamento. As APROVAÇÕES são a etapa
+// seguinte: enquanto o servidor disser que ninguém aprova nada (pode.aprovar_* = false),
+// a aba e o cartão de pedidos não aparecem.
 // Tudo que vem do servidor passa por esc() antes de virar HTML.
 // ============================================================
 
@@ -26,7 +26,7 @@ const EQ_TIPOS = {
 // o que o dono liga e desliga por perfil (a mesma lista vai para o retaguarda › Perfis)
 const EQ_PERMISSOES = [
   ["Pode aprovar", [["aprovar_desconto", "Desconto no caixa"], ["aprovar_prazo", "Venda a prazo acima do limite"], ["aprovar_afericao", "Aferição"]]],
-  ["Pode ver", [["ver_vendas", "Vendas do dia em reais"], ["ver_litros", "Litros e número de cupons"], ["ver_tanques", "Nível dos tanques"],
+  ["Pode ver", [["ver_vendas", "Vendas do dia em reais"], ["ver_litros", "Litros e número de abastecimentos"], ["ver_tanques", "Nível dos tanques"],
     ["ver_recebido", "Recebido por forma de pagamento"], ["ver_precos", "Preço na bomba"], ["ver_alertas", "Alertas de tanque baixo, sonda parada e posto sem resposta"]]],
 ];
 
@@ -138,8 +138,8 @@ function telaEquipe() {
   el().innerHTML = `<div class="entrar tela">
     <img class="marca" src="${LOGO_AZUL}" alt="Rede SN" style="width:110px">
     <h1 style="text-align:center;font-size:1.3rem;margin:8px 0 4px">Acesso da equipe</h1>
-    <div style="text-align:center;color:var(--mut);font-size:.9rem;margin-bottom:8px">Entre com o mesmo e-mail e senha do sistema.</div>
-    <div class="campo"><label for="g-email">E-mail</label><input id="g-email" type="email" inputmode="email" autocomplete="username" placeholder="nome@exemplo.com"></div>
+    <div style="text-align:center;color:var(--mut);font-size:.9rem;margin-bottom:8px">Entre com o mesmo usuário e senha do sistema.</div>
+    <div class="campo"><label for="g-email">Usuário</label><input id="g-email" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="seu usuário ou e-mail"></div>
     <div class="campo"><label for="g-senha">Senha</label><input id="g-senha" type="password" autocomplete="current-password"></div>
     <button class="btn" id="g-btn">Entrar</button>
     <div class="msg" id="g-msg"></div>
@@ -169,7 +169,7 @@ function eqTanques(tanques) {
 function eqNumeros(p) {
   const k = [];
   if (eqPode("ver_vendas")) k.push(["Vendas hoje", brl(p.vendas)]);
-  if (eqPode("ver_litros")) k.push(["Litros", num(Math.round(p.litros || 0)) + " L"], ["Cupons", num(p.cupons)]);
+  if (eqPode("ver_litros")) k.push(["Litros", num(Math.round(p.litros || 0)) + " L"], p.abastecimentos != null ? ["Abastec.", num(p.abastecimentos)] : ["Cupons", num(p.cupons)]);
   if (!k.length) return "";
   return `<div class="kpis" style="grid-template-columns:${k.length === 3 ? "1.3fr 1fr 1fr" : "repeat(" + k.length + ",1fr)"}">${k.map(x =>
     `<div class="kpi"><div class="rot">${x[0]}</div><div class="val">${x[1]}</div></div>`).join("")}</div>`;
@@ -326,7 +326,8 @@ async function telaEqPosto(id) {
         return `<div class="tanque-linha ${t.baixo ? "baixo" : ""}"><div class="cab"><span>${esc(t.produto)}</span><span class="dir">${num(Math.round(t.litros || 0))} L</span></div>
           <div class="nivel"><i style="width:${pct}%"></i></div><div class="rot">${pct}% de ${num(t.capacidade)} L${t.baixo ? " · nível baixo" : ""}</div></div>`;
       }).join("")}</div></div>` : ""}
-    ${formas.length ? `<div class="secao"><div class="secao-tit"><h2>Recebido hoje</h2></div><div class="card">${formas.map(f => `<div class="par"><span>${esc(f[0])}</span><b>${brl(f[1])}</b></div>`).join("")}</div></div>` : ""}
+    ${formas.length ? `<div class="secao"><div class="secao-tit"><h2>Recebido hoje</h2></div><div class="card">${formas.map(f => `<div class="par"><span>${esc(f[0])}</span><b>${brl(f[1])}</b></div>`).join("")}${
+        p.formas_falta ? `<div class="par"><span style="color:var(--mut)">Sem forma de pagamento ainda</span><b style="color:var(--mut);white-space:nowrap">${brl(p.formas_falta)}</b></div>` : ""}</div></div>` : ""}
     ${precos.length ? `<div class="secao"><div class="secao-tit"><h2>Preço na bomba</h2></div><div class="card">${precos.map(f => `<div class="par"><span>${esc(f[0])}</span><b>${brl(f[1])}/L</b></div>`).join("")}</div></div>` : ""}
   </div>`;
 }
@@ -355,7 +356,7 @@ async function telaEqConta() {
       ${eqAprova() ? chave("pedidos", "Pedidos do caixa", esc(meusTipos) + " esperando você", av.pedidos !== false) : ""}
       ${eqPode("ver_alertas") ? chave("tanques", "Tanque baixo e sonda parada", "Os mesmos alertas do Monitor", av.tanques !== false) : ""}
       ${chave("turno", "Abertura e fechamento de turno", "Quem abriu e quem fechou o caixa", !!av.turno)}
-    </div></div>
+    </div>${eu.push === false ? '<div class="vazio">Os avisos no celular começam quando o app estiver nas lojas (Apple e Google). Até lá fica guardado o que você quer receber.</div>' : ""}</div>
     <div class="grupo-tit">Sessão</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${ir_("perfil", "Usar o app como cliente", "ir('#/inicio')")}
@@ -403,7 +404,8 @@ async function telaEqPermissoes(perfil) {
   el().innerHTML = `<div class="tela">${topoSimples(pf.nome, true)}
     ${EQ_PERMISSOES.map(g => `<div class="grupo-tit" style="padding-top:8px">${g[0]}</div>
       <div class="secao" style="padding-top:0"><div class="card lista">${g[1].map(x => `<button class="linha" onclick="eqPermissao('${esc(pf.id)}','${x[0]}')">
-        <div class="meio"><div class="t">${x[1]}</div></div><span class="chave ${(pf.pode || {})[x[0]] !== false ? "on" : ""}" id="eq-pm-${x[0]}"></span></button>`).join("")}</div></div>`).join("")}
+        <div class="meio"><div class="t">${x[1]}</div></div><span class="chave ${(pf.pode || {})[x[0]] !== false ? "on" : ""}" id="eq-pm-${x[0]}"></span></button>`).join("")}</div>${
+        g[0] === "Pode aprovar" && r.aprovacoes_no_ar === false ? '<div class="vazio">Ainda não está valendo: as aprovações pelo celular entram na próxima etapa. O que você deixar ligado aqui já fica pronto.</div>' : ""}</div>`).join("")}
     <div class="grupo-tit">Quem tem este perfil</div>
     <div class="secao" style="padding-top:0"><div class="card lista">${(pf.pessoas || []).map(x => `<div class="linha"><span class="ic">${ICO.perfil(20)}</span>
       <div class="meio"><div class="t">${esc(x.nome)}</div><div class="s">${esc((x.postos || []).join(", "))}</div></div></div>`).join("") || '<div class="linha"><div class="meio"><div class="s">Ninguém ainda.</div></div></div>'}</div>

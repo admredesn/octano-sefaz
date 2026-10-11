@@ -9,15 +9,15 @@
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && location.pathname.indexOf("/app") === 0) ? "" : SERVIDOR;
-const VERSAO_APP = "0.1.0";
-// Documentos públicos (site da Rede SN, servido pelo mesmo servidor em /site/). Quando o domínio
-// www.redesn.com.br estiver apontado, pode trocar por ele: as páginas são as mesmas.
-const DOC_TERMOS = SERVIDOR + "/site/termos.html";
-const DOC_PRIVACIDADE = SERVIDOR + "/site/privacidade.html";
-// ACESSO DA EQUIPE: as telas existem (equipe.js), mas as rotas do servidor ainda não. Enquanto
-// estiver false, o link "Acesso da equipe" some da entrada e a tela diz "em breve". Ligar junto
-// com a publicação das rotas /app/equipe/api/*. (var, não const: a bancada de layout liga.)
-var EQUIPE_NO_AR = false;
+const VERSAO_APP = "0.2.0";
+// Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
+// também respondem em SERVIDOR + "/site/").
+const SITE = "https://www.redesn.com.br";
+const DOC_TERMOS = SITE + "/termos.html";
+const DOC_PRIVACIDADE = SITE + "/privacidade.html";
+// ACESSO DA EQUIPE (11/10/2026): rotas /app/equipe/api/* no servidor (app_equipe.py). Com false, o
+// link "Acesso da equipe" some da entrada e a tela diz "em breve". (var, não const: a bancada liga.)
+var EQUIPE_NO_AR = true;
 
 // armazenamento local tolerante (aba anônima / bloqueio de cookies não pode derrubar o app)
 const LS = {

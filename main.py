@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-11-frete-1",
+                    "build": "2026-10-11-equipe-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -520,6 +520,13 @@ try:
     app.register_blueprint(bp_cashback)
 except Exception as _e:
     print("[cashback] portal nao carregou:", _e)
+
+# ── App Postos SN: acesso da EQUIPE (dono e gerentes acompanham os postos) — /app/equipe/api/* ──
+try:
+    from app_equipe import bp_equipe
+    app.register_blueprint(bp_equipe)
+except Exception as _e:
+    print("[app-equipe] nao carregou:", _e)
 
 
 # ── Agendador da consulta automatica de NF-e (DistDFe) ──────────────────────
