@@ -220,6 +220,13 @@ def _ciclo():
                 _consultar_empresa(emp)
         except Exception as e:
             print(f"[dfe-auto] ciclo erro {emp.get('id')}: {e}")
+        # CT-e (11/10/2026): mesmo certificado, servico e controle PROPRIOS
+        # (oct_cte_controle) -> o limite/bloqueio do CT-e nao mexe com o da NF-e.
+        try:
+            from . import cte_auto
+            cte_auto.processar_empresa(emp)
+        except Exception as e:
+            print(f"[cte-auto] {emp.get('id')}: {e}")
         # Fase 2 + 3 rodam TODO ciclo, independente da consulta/bloqueio SEFAZ:
         # cruzam a variacao de estoque com as notas JA disponiveis na lista
         # (nao tocam na SEFAZ, so manifestacao quando ha match -> sem risco de 656).

@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-10-site-2",
+                    "build": "2026-10-11-cte-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -500,6 +500,18 @@ def dfe_casar_manual(empresa_id):
     except Exception as e:
         import traceback
         return jsonify({"erro": str(e), "traceback": traceback.format_exc()[-1500:]}), 500
+
+
+@app.route("/cte/consultar/<empresa_id>", methods=["POST"])
+def cte_consultar(empresa_id):
+    """Botao 'Consultar agora' da aba Fretes (CT-e) do retaguarda. Respeita o
+    intervalo e o bloqueio do robo (oct_cte_controle): chamar de novo antes da
+    hora NAO consulta a SEFAZ, so' devolve quando sera' a proxima."""
+    try:
+        from sefaz import cte_auto
+        return jsonify(cte_auto.consultar_agora(empresa_id))
+    except Exception as e:
+        return jsonify({"ok": False, "motivo": str(e)[:300]}), 500
 
 
 # ── Portal do cliente do CASHBACK (QR code no posto) ────────────────────────
