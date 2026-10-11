@@ -258,6 +258,97 @@ def _custos_da_nota(xml, cnpj_emp):
     return {"dhEmi": cab.get("dhEmi") or "", "custos": custos} if custos else None
 
 
+# ------------------------------------------------------------------
+# FRETE no custo (11/10/2026) -- CT-e em que o POSTO e' o tomador
+# ------------------------------------------------------------------
+# O custo era so' o valor da nota. Com o buscador de CT-e (sefaz/cte_auto.py)
+# apareceu o que faltava: no AC as cargas da Setta pagam R$ 0,2412 por litro de
+# frete (o posto e' o tomador do CT-e), no Florestal e no Tijuco de R$ 0,08 a
+# 0,15. Sem isso a margem do AC aparecia 20,2% na gasolina e 8,3% no S-500,
+# contra ~16,5% e ~5% de verdade. Pedido do Ronan: o frete pago pelo posto
+# entra no custo por litro.
+#
+# Regra: frete por litro da nota = soma, em cada CT-e AUTORIZADO que cita a
+# chave da nota e tem o posto como TOMADOR, de (valor do CT-e / litros de
+# combustivel de TODAS as notas que aquele CT-e carregou). CT-e complementar
+# soma; CT-e substituido nao conta. Frete por conta do fornecedor (o posto so'
+# e' destinatario) nao entra: ja' esta' no preco da nota.
+# So' vale o que esta' documentado: enquanto o CT-e da carga nao chega, o custo
+# fica o da nota, e sobe quando ele chegar (o robo roda a cada 10 min).
+# Desliga com CUSTO_FRETE=0 no Railway.
+FRETE_MAX_LITRO = float(os.environ.get("CUSTO_FRETE_MAX", "1.0"))   # acima disto e' erro de dado: nao soma
+_FRETE_CACHE = {}        # (empresa, chave da nota) -> (instante, frete, descricao)
+_FRETE_TTL = 540         # s -- menos que um ciclo: CT-e que chega depois entra no ciclo seguinte
+_LITROS_NOTA = {}        # chave -> litros de combustivel de tanque (o XML nao muda)
+
+
+def _frete_ligado():
+    return os.environ.get("CUSTO_FRETE", "1").strip().lower() not in ("0", "false", "nao", "não", "off")
+
+
+def _litros_das_notas(emp_id, chaves):
+    """{chave: litros de combustivel de tanque} das notas que estao no sistema (as que faltarem nao vem)."""
+    faltam = [c for c in chaves if c not in _LITROS_NOTA]
+    for i in range(0, len(faltam), 30):
+        lote = faltam[i:i + 30]
+        for n in _rest_get("oct_nfe_manifestadas",
+                           f"?empresa_id=eq.{emp_id}&tipo=eq.nfe_completa&chave_nfe=in.({','.join(lote)})&select=chave_nfe,xml") or []:
+            try:
+                _, itens = _parse_nfe(n.get("xml") or "")
+            except Exception:
+                continue
+            _LITROS_NOTA[n["chave_nfe"]] = round(sum(it["qCom"] for it in itens), 3)
+    return {c: _LITROS_NOTA[c] for c in chaves if c in _LITROS_NOTA}
+
+
+def frete_por_litro(emp_id, chave, agora=None):
+    """(R$ por litro, descricao) do frete que o POSTO pagou para trazer a nota `chave`; (0.0, None) se nao ha'.
+    Nunca levanta erro: sem a tabela dos CT-e, ou com qualquer falha, o custo fica o da nota."""
+    if not chave or not _frete_ligado():
+        return 0.0, None
+    import time as _t
+    agora = agora if agora is not None else _t.time()
+    hit = _FRETE_CACHE.get((emp_id, chave))
+    if hit and agora - hit[0] < _FRETE_TTL:
+        return hit[1], hit[2]
+    frete, desc = 0.0, None
+    try:
+        filtro = urllib.parse.quote("{" + chave + "}")
+        ctes = _rest_get("oct_cte_recebidos",
+                         f"?empresa_id=eq.{emp_id}&tipo=eq.cte&sou_tomador=is.true&situacao=eq.autorizado"
+                         f"&chaves_nfe=cs.{filtro}"
+                         "&select=numero,chave_cte,chave_cte_ref,tp_cte,valor_prestacao,chaves_nfe,litros_carga") or []
+        substituidos = {c.get("chave_cte_ref") for c in ctes if str(c.get("tp_cte")) == "3" and c.get("chave_cte_ref")}
+        partes = []
+        for c in ctes:
+            valor = _f(c.get("valor_prestacao"))
+            if valor <= 0 or c.get("chave_cte") in substituidos:
+                continue
+            citadas = [k for k in (c.get("chaves_nfe") or []) if k]
+            lit = _litros_das_notas(emp_id, citadas)
+            if citadas and len(lit) == len(citadas) and sum(lit.values()) > 0:
+                litros = sum(lit.values())              # todas as notas da carga estao no sistema
+            elif _f(c.get("litros_carga")) > 0:
+                litros = _f(c.get("litros_carga"))      # falta alguma nota: vale o volume que o CT-e declara
+            else:
+                continue                                 # sem saber os litros da carga nao da' para ratear
+            partes.append((valor / litros, str(c.get("numero") or "?")))
+        total = round(sum(p[0] for p in partes), 4)
+        if 0 < total <= FRETE_MAX_LITRO:
+            frete, desc = total, "CT-e " + " + ".join(p[1] for p in partes)
+        elif total > FRETE_MAX_LITRO and (emp_id, chave, "max") not in _CUSTO_AVISADO:
+            _CUSTO_AVISADO.add((emp_id, chave, "max"))
+            print(f"[custo] {emp_id}: frete de R$ {total}/L na nota {chave[25:34].lstrip('0')} acima do limite "
+                  f"({FRETE_MAX_LITRO}) - NAO somado, conferir o CT-e {' + '.join(p[1] for p in partes)}")
+    except Exception as e:          # tabela ausente, rede, dado torto: custo segue so' com a nota
+        if (emp_id, "frete-erro") not in _CUSTO_AVISADO:
+            _CUSTO_AVISADO.add((emp_id, "frete-erro"))
+            print(f"[custo] {emp_id}: frete nao consultado ({str(e)[:120]}) - custo segue so' com a nota")
+        return 0.0, None
+    _FRETE_CACHE[(emp_id, chave)] = (agora, frete, desc)
+    return frete, desc
+
+
 def atualizar_custos(emp_id, simular=False):
     """oct_produtos.preco_custo do combustivel = custo por litro (com ST) da
     ULTIMA nota de compra que chegou na manifestacao. Devolve o que mudou.
@@ -273,6 +364,9 @@ def atualizar_custos(emp_id, simular=False):
     completo, nao foi cancelada, e' venda normal para este posto. So' mexe no
     produto ligado a tanque. Custo fora de 0,5x a 2x do atual nao e' gravado
     (erro de digitacao na nota), so' avisado no log.
+
+    11/10/2026: + o FRETE por litro que o posto pagou para trazer essa nota
+    (CT-e em que ele e' o tomador) -- ver frete_por_litro().
     """
     prods = _rest_get("oct_produtos",
                       f"?empresa_id=eq.{emp_id}&tanque_id=not.is.null&select=id,nome,cod_anp,preco_custo")
@@ -305,10 +399,13 @@ def atualizar_custos(emp_id, simular=False):
             info = _CUSTO_NOTA.get(n["id"])
             for anp, custo in ((info or {}).get("custos") or {}).items():
                 if anp in alvo and anp not in achado:
-                    achado[anp] = (custo, n.get("numero"), (info.get("dhEmi") or str(n.get("emissao") or ""))[:10])
+                    achado[anp] = (custo, n.get("numero"), (info.get("dhEmi") or str(n.get("emissao") or ""))[:10],
+                                   n.get("chave_nfe"))
 
     mudou = []
-    for anp, (custo, numero, em) in sorted(achado.items()):
+    for anp, (custo_nota, numero, em, chave) in sorted(achado.items()):
+        frete, frete_de = frete_por_litro(emp_id, chave)
+        custo = round(custo_nota + frete, 4)
         for p in alvo[anp]:
             atual = _f(p.get("preco_custo"))
             if abs(atual - custo) < 0.00005:
@@ -325,10 +422,12 @@ def atualizar_custos(emp_id, simular=False):
                 if st not in (200, 204):
                     print(f"[custo] {emp_id}: falha ao gravar {p.get('nome')}: {st} {r}")
                     continue
-            print(f"[custo] {emp_id}: {p.get('nome')} {atual} -> {custo} (NF {numero} de {em})"
+            print(f"[custo] {emp_id}: {p.get('nome')} {atual} -> {custo} (NF {numero} de {em}"
+                  + (f": nota {custo_nota} + frete {frete} {frete_de}" if frete else "") + ")"
                   + (" [simulacao]" if simular else ""))
             mudou.append({"produto_id": p["id"], "nome": p.get("nome"), "cod_anp": anp, "de": atual,
-                          "para": custo, "nf": numero, "emissao": em})
+                          "para": custo, "nf": numero, "emissao": em,
+                          "nota": custo_nota, "frete": frete, "frete_de": frete_de})
     return mudou
 
 
