@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-11-cartoes-1",
+                    "build": "2026-10-12-cartoes-2",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -509,7 +509,7 @@ def cartoes_baixar():
     try:
         from sefaz import cartoes_edi
         d = request.get_json(silent=True) or {}
-        return jsonify(cartoes_edi.baixar_periodo(str(d.get("de") or ""), str(d.get("ate") or "")))
+        return jsonify(cartoes_edi.baixar_periodo(str(d.get("de") or ""), str(d.get("ate") or ""), str(d.get("empresa_id") or "") or None))
     except Exception as e:
         return jsonify({"ok": False, "motivo": str(e)[:300]}), 500
 

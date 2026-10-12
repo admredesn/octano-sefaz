@@ -9,9 +9,12 @@ taxa, tarifa, líquido, parcelas, bandeira, maquininha e data prevista de pagame
 cada venda vem do nº de série da maquininha (oct_parametros.pagbank_maquininhas de cada empresa);
 maquininha não cadastrada fica com empresa_id nulo (a tela avisa).
 
-Credenciais (Railway › Variables do octano-sefaz; nunca no código):
-  PAGBANK_EDI_CONTAS = "usuario:token" (uma ou mais contas separadas por ;)
-  ou PAGBANK_EDI_USUARIO + PAGBANK_EDI_TOKEN
+Credenciais — POR POSTO (12/10/2026): cada posto cadastra o EDI dele em Parâmetros › Recebimentos
+(oct_parametros: pagbank_edi_usuario + pagbank_edi_token). O servidor puxa de cada credencial e atribui a
+venda ao posto (série da maquininha; ou, em conta própria, o dono da conta). Quando as contas se separarem,
+cada posto passa a puxar do lugar certo sem mexer em nada aqui.
+Reserva (Railway › Variables, nunca no código): PAGBANK_EDI_CONTAS = "usuario:token;usuario:token"
+ou PAGBANK_EDI_USUARIO + PAGBANK_EDI_TOKEN — vale para credencial que não é de nenhum posto.
 Desliga com CARTOES_EDI=0. Intervalo: CARTOES_EDI_INTERVALO_MIN (15). Hoje e ontem a cada ciclo;
 os últimos 7 dias uma vez por dia (ajustes/cancelamentos chegam depois).
 
@@ -38,8 +41,71 @@ _LOCK = threading.Lock()
 
 
 # ------------------------------------------------------------------ config
+def _credenciais_dos_postos():
+    """{empresa_id: (usuario, token)} do cadastro de cada posto (oct_parametros). Só entra quem tem os dois."""
+    try:
+        linhas = _rest_get("oct_parametros", "?chave=in.(pagbank_edi_usuario,pagbank_edi_token)&select=empresa_id,chave,valor")
+    except Exception as e:
+        print("[cartoes] credenciais dos postos:", str(e)[:120])
+        return {}
+    por = {}
+    for p in linhas or []:
+        v = str(p.get("valor") or "").strip().strip('"')
+        if p.get("empresa_id") and v:
+            por.setdefault(p["empresa_id"], {})[p.get("chave")] = v
+    return {e: (d["pagbank_edi_usuario"], d["pagbank_edi_token"]) for e, d in por.items()
+            if d.get("pagbank_edi_usuario") and d.get("pagbank_edi_token")}
+
+
+def _postos_conta_propria():
+    """Postos que declararam 'esta conta PagBank é só deste posto' (oct_parametros.pagbank_edi_propria)."""
+    try:
+        linhas = _rest_get("oct_parametros", "?chave=eq.pagbank_edi_propria&select=empresa_id,valor")
+    except Exception:
+        return set()
+    return {p["empresa_id"] for p in linhas or []
+            if p.get("empresa_id") and str(p.get("valor")).strip().strip('"').lower() in ("true", "1", "sim")}
+
+
+def fontes(empresa_id=None, por_posto=None, propria=None):
+    """Credenciais a consultar: [{"usuario", "token", "donos": [empresa_id, ...], "rotulo", "propria"}].
+    propria = a credencial é de UM posto que declarou conta própria (as vendas sem série conhecida são dele)."""
+    fs = _fontes_base(empresa_id, por_posto)
+    propria = _postos_conta_propria() if propria is None else propria
+    for f in fs:
+        f["propria"] = len(f["donos"]) == 1 and f["donos"][0] in propria
+    return fs
+
+
+def _fontes_base(empresa_id=None, por_posto=None):
+    """Credenciais a consultar, sem a marca 'propria' (ver fontes()).
+    empresa_id=None -> todas (robô); com empresa_id -> só a do posto (botão da tela), ou a reserva do servidor
+    quando o posto não cadastrou a dele. Credencial repetida em vários postos vira UMA fonte com vários donos."""
+    por_posto = _credenciais_dos_postos() if por_posto is None else por_posto
+    out, idx = [], {}
+    def add(par, dono, rotulo):
+        if par in idx:
+            if dono and dono not in out[idx[par]]["donos"]:
+                out[idx[par]]["donos"].append(dono)
+            return
+        idx[par] = len(out)
+        out.append({"usuario": par[0], "token": par[1], "donos": [dono] if dono else [], "rotulo": rotulo})
+    if empresa_id:
+        if empresa_id in por_posto:
+            add(por_posto[empresa_id], empresa_id, "posto " + str(empresa_id)[:8])
+            return out
+        for par in contas():
+            add(par, None, "variável do servidor")
+        return out
+    for emp, par in sorted(por_posto.items()):
+        add(par, emp, "posto " + str(emp)[:8])
+    for par in contas():
+        add(par, None, "variável do servidor")
+    return out
+
+
 def contas():
-    """[(usuario, token)] das variáveis de ambiente. Vazio = robô parado."""
+    """[(usuario, token)] das variáveis de ambiente (reserva). Vazio = nenhuma."""
     out = []
     txt = (os.environ.get("PAGBANK_EDI_CONTAS") or "").strip()
     for peca in txt.replace("\n", ";").split(";"):
@@ -104,8 +170,17 @@ def forma_bandeira(arranjo):
     return forma, band
 
 
-def mapear(reg, mapa_maquininhas=None):
-    """Registro do EDI -> linha de oct_cartao_transacoes (PURA). None = não é venda confirmada."""
+def dono_unico(fonte, mapa_maquininhas=None):
+    """Posto a quem pertencem as vendas SEM série conhecida de uma credencial: só quando o posto DECLAROU conta própria
+    (pagbank_edi_propria) e é o único dono dela. Credencial só registrada num posto NÃO basta: com a conta única da rede,
+    isso levaria para ele as máquinas de todos os outros."""
+    donos = [d for d in ((fonte or {}).get("donos") or []) if d]
+    return donos[0] if len(donos) == 1 and (fonte or {}).get("propria") else None
+
+
+def mapear(reg, mapa_maquininhas=None, dono=None):
+    """Registro do EDI -> linha de oct_cartao_transacoes (PURA). None = não é venda confirmada.
+    dono = posto da conta quando a série não está cadastrada (ver dono_unico)."""
     bruto = _num(reg.get("valor_total_transacao")) or _num(reg.get("valor_original_transacao"))
     if bruto <= 0:
         return None
@@ -124,7 +199,7 @@ def mapear(reg, mapa_maquininhas=None):
     if liq <= 0 and bruto > 0:
         liq = round(bruto - taxa - tarifa, 2)
     serie = str(reg.get("numero_serie_leitor") or "").strip().upper()
-    emp = (mapa_maquininhas or {}).get(serie)
+    emp = (mapa_maquininhas or {}).get(serie) or dono
     try:
         parcelas = int(str(reg.get("quantidade_parcelas") or "0").strip() or 0) or 1
     except Exception:
@@ -235,7 +310,8 @@ def mapa_maquininhas(forcar=False):
             return _MAPA["dados"]
     dados = {}
     try:
-        for p in _rest_get("oct_parametros", "?chave=eq.pagbank_maquininhas&select=empresa_id,valor"):
+        # pagbank_maquininhas (núcleo: filtra o PDV e desliga o e-mail) + pagbank_maquininhas_cartoes (só esta aba)
+        for p in _rest_get("oct_parametros", "?chave=in.(pagbank_maquininhas,pagbank_maquininhas_cartoes)&select=empresa_id,valor"):
             for serie in parsear_maquininhas(p.get("valor")):
                 dados[serie] = p.get("empresa_id")
     except Exception as e:
@@ -259,17 +335,27 @@ def gravar(linhas):
     return n
 
 
-def sincronizar_dias(dias, contas_=None, mapa=None):
-    """Baixa e grava os dias informados em todas as contas. Devolve {dia: {vendas, gravadas, sem_posto}, ...}."""
-    contas_ = contas_ if contas_ is not None else contas()
+def sincronizar_dias(dias, fontes_=None, mapa=None):
+    """Baixa e grava os dias informados de cada credencial. Uma credencial com erro não derruba as outras.
+    Devolve ({dia: {vendas, gravadas, sem_posto, bruto, taxas}}, {rotulo: erro})."""
+    fontes_ = fontes_ if fontes_ is not None else fontes()
     mapa = mapa if mapa is not None else mapa_maquininhas()
-    out = {}
+    out, erros, ok_alguma = {}, {}, False
     for dia in dias:
         vistos, linhas, sem_posto = set(), [], 0
-        for usuario, token in contas_:
-            for reg in buscar_dia(usuario, token, dia):
+        for f in fontes_:
+            if f["rotulo"] in erros:
+                continue
+            try:
+                regs = buscar_dia(f["usuario"], f["token"], dia)
+                ok_alguma = True
+            except Exception as e:
+                erros[f["rotulo"]] = str(e)[:160]
+                continue
+            dono = dono_unico(f, mapa)
+            for reg in regs:
                 try:
-                    r = mapear(reg, mapa)
+                    r = mapear(reg, mapa, dono)
                 except Exception:
                     r = None
                 if not r or r["id"] in vistos:
@@ -281,7 +367,9 @@ def sincronizar_dias(dias, contas_=None, mapa=None):
         gravadas = gravar(linhas) if linhas else 0
         out[dia] = {"vendas": len(linhas), "gravadas": gravadas, "sem_posto": sem_posto,
                     "bruto": round(sum(l["valor_bruto"] for l in linhas), 2), "taxas": round(sum(l["taxa_valor"] + l["tarifa_valor"] for l in linhas), 2)}
-    return out
+    if erros and not ok_alguma:
+        raise RuntimeError("; ".join(f"{k}: {v}" for k, v in erros.items()))
+    return out, erros
 
 
 # ------------------------------------------------------------------ robô
@@ -324,7 +412,10 @@ def _claim(intervalo_min):
 def ciclo():
     """Chamado pelo agendador (dfe_auto). Nunca levanta exceção."""
     try:
-        if not ligado() or not contas():
+        if not ligado():
+            return None
+        fs = fontes()
+        if not fs:
             return None
         if not _claim(_intervalo_min()):
             return None
@@ -333,9 +424,10 @@ def ciclo():
         c = _controle() or {}
         if (c.get("dias") or "")[:10] != hoje.isoformat():         # 1ª rodada do dia: 7 dias (ajustes tardios)
             dias = [(hoje - timedelta(days=i)).isoformat() for i in range(0, 8)]
-        res = sincronizar_dias(dias)
-        _controle_gravar({"dias": hoje.isoformat() + " " + ",".join(dias), "erro": None, "bloqueado_ate": None})
-        print("[cartoes] EDI:", {d: (v["vendas"], v["sem_posto"]) for d, v in res.items()})
+        res, erros = sincronizar_dias(dias, fs)
+        _controle_gravar({"dias": hoje.isoformat() + " " + ",".join(dias),
+                          "erro": ("; ".join(f"{k}: {v}" for k, v in erros.items()))[:300] if erros else None, "bloqueado_ate": None})
+        print("[cartoes] EDI:", {d: (v["vendas"], v["sem_posto"]) for d, v in res.items()}, "| erros:", erros or "nenhum")
         return res
     except Exception as e:
         msg = str(e)[:200]
@@ -348,10 +440,12 @@ def ciclo():
         return None
 
 
-def baixar_periodo(de_iso, ate_iso):
-    """Botão ⬇ Baixar cartões da tela (até 62 dias). Devolve {ok, dias: {...}} ou {ok: False, motivo}."""
-    if not contas():
-        return {"ok": False, "motivo": "PAGBANK_EDI_CONTAS não configurado no servidor"}
+def baixar_periodo(de_iso, ate_iso, empresa_id=None):
+    """Botão ⬇ da tela (até 62 dias). Com empresa_id usa o EDI cadastrado por aquele posto (ou a reserva do servidor).
+    Devolve {ok, dias, vendas, sem_posto, erros} ou {ok: False, motivo}."""
+    fs = fontes(empresa_id)
+    if not fs:
+        return {"ok": False, "motivo": "EDI deste posto não cadastrado (Parâmetros › Recebimentos › PagBank — EDI) e sem PAGBANK_EDI_CONTAS no servidor"}
     try:
         de, ate = date.fromisoformat(de_iso), date.fromisoformat(ate_iso)
     except Exception:
@@ -360,7 +454,8 @@ def baixar_periodo(de_iso, ate_iso):
         return {"ok": False, "motivo": "período inválido (até 62 dias, sem data futura)"}
     dias = [(de + timedelta(days=i)).isoformat() for i in range((ate - de).days + 1)]
     try:
-        res = sincronizar_dias(dias, mapa=mapa_maquininhas(forcar=True))
+        res, erros = sincronizar_dias(dias, fs, mapa=mapa_maquininhas(forcar=True))
     except Exception as e:
         return {"ok": False, "motivo": str(e)[:200]}
-    return {"ok": True, "dias": res, "vendas": sum(v["vendas"] for v in res.values()), "sem_posto": sum(v["sem_posto"] for v in res.values())}
+    return {"ok": True, "dias": res, "vendas": sum(v["vendas"] for v in res.values()), "sem_posto": sum(v["sem_posto"] for v in res.values()),
+            "fontes": len(fs), "erros": erros}
