@@ -247,6 +247,14 @@ def _ciclo():
             entrada_auto.processar_empresa(emp["id"])
         except Exception as e:
             print(f"[entrada] {emp.get('id')}: {e}")
+        # REQUISICAO DE COMPRA (fase 2, 13/10/2026): vincula NF-e a' requisicao e, no combustivel,
+        # a descarga confirmada = mercadoria chegou (trava REQUISICAO_AUTO). Antes do conciliador,
+        # que passa a respeitar a requisicao.
+        try:
+            from . import requisicao_auto
+            requisicao_auto.processar_empresa(emp["id"])
+        except Exception as e:
+            print(f"[requisicao-auto] {emp.get('id')}: {e}")
         # Fase 4: baixa de contas a pagar quando nota + descarga + pagamento
         # coincidem (trava CONCILIAR_PAGAR). Roda depois da entrada porque
         # depende da descarga estar 'entrada_feita'.

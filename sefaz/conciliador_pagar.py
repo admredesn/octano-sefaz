@@ -131,9 +131,12 @@ def processar_empresa(emp_id):
     ate = hoje.isoformat()
 
     # 1 (NOTA): titulos ABERTOS que vieram de NF (n_documento tem numero).
+    # REQUISICAO DE COMPRA (13/10/2026): com REQUISICAO_AUTO ligado, traz tambem a requisicao ligada ao titulo
+    from . import requisicao_auto as _ra
+    ra_on = _ra._habilitado(emp_id)
     tit = _q("oct_contas_pagar",
              f"?empresa_id=eq.{emp_id}&status=eq.aberto"
-             "&select=id,n_documento,valor,vencimento,descricao")
+             "&select=id,n_documento,valor,vencimento,descricao" + (",requisicao_id" if ra_on else ""))
     tit = [t for t in tit if _nf_num(t.get("n_documento"))]
     if not tit:
         return
@@ -156,6 +159,22 @@ def processar_empresa(emp_id):
         return
 
     elegiveis = [t for t in tit if _nf_num(t["n_documento"]) in conf]   # 1+2 ok
+    # REQUISICAO DE COMPRA: titulo de requisicao ainda PENDENTE ou DIVERGENTE nao e' baixado sozinho (se nao der
+    # para ler a requisicao, os titulos ligados ficam de fora: na duvida, nao paga)
+    if ra_on:
+        try:
+            st_req = {}
+            for lote in _ra._lote(sorted({t["requisicao_id"] for t in elegiveis if t.get("requisicao_id")})):
+                for r in _rest_get("oct_requisicoes_compra", f"?id=in.({','.join(lote)})&select=id,status") or []:
+                    st_req[r["id"]] = r["status"]
+            seg = _ra.segurados_pelo_conciliador(elegiveis, st_req)
+        except Exception as e:
+            print(f"[conciliar-pagar] {emp_id}: requisicao ilegivel ({e}) - titulos ligados ficam de fora")
+            seg = {t["id"] for t in elegiveis if t.get("requisicao_id")}
+        for t in elegiveis:
+            if t["id"] in seg:
+                print(f"[conciliar-pagar] {emp_id}: NF {_nf_num(t['n_documento'])} segurada - requisicao de compra pendente/divergente")
+        elegiveis = [t for t in elegiveis if t["id"] not in seg]
     # matches mutuos (par tem de ser UNICO dos dois lados)
     m_t = {t["id"]: [d for d in debs if _casa(t, d)] for t in elegiveis}
     m_d = {}
@@ -184,6 +203,8 @@ def processar_empresa(emp_id):
                   {"conciliado": True, "conta_pagar_id": t["id"],
                    "dif_encargos": (dif if dif else None)})
             baixados += 1
+            if ra_on and t.get("requisicao_id"):
+                _ra.registrar_baixa(emp_id, t["id"], t["requisicao_id"], d["v"], obs)
             print(f"[conciliar-pagar] {emp_id}: NF {_nf_num(t['n_documento'])} "
                   f"R$ {val:.2f} <= debito {d['data']} R$ {d['v']:.2f} (mov {d['id']})")
     if baixados:
