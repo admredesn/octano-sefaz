@@ -46,7 +46,7 @@ bp_equipe = Blueprint("equipe", __name__)
 
 # Tipos de pedido que JÁ chegam ao app. Aferição usa o que já existe (oct_pdv_abastecimentos.status = 'afericao_pendente' e a mesma
 # decisão do retaguarda); desconto e a prazo dependem do PDV pedir pelo servidor (próxima etapa).
-TIPOS_NO_AR = {"afericao": True, "desconto": False, "prazo": False}
+TIPOS_NO_AR = {"afericao": True, "desconto": True, "prazo": False}
 APROVACOES_NO_AR = any(TIPOS_NO_AR.values())
 PERMISSOES = ("aprovar_desconto", "aprovar_prazo", "aprovar_afericao",
               "ver_vendas", "ver_litros", "ver_tanques", "ver_recebido", "ver_precos", "ver_alertas")
@@ -725,7 +725,7 @@ def _afe_postos(p):
     return {i: n for i, n in postos_de(p)}
 
 
-def _pedidos(p, resolvidas):
+def _pedidos_afericao(p, resolvidas):
     nomes = _afe_postos(p)
     if not nomes:
         return []
@@ -741,22 +741,98 @@ def _pedidos(p, resolvidas):
     return [_afe_pedido(r, nomes, turnos=turnos) for r in rows]
 
 
-def _pendentes_resumo(p):
-    """(quantos, texto) de pedidos esperando este usuário — alimenta o cartão do painel (cache curto)."""
+# ---- pedidos do CAIXA (desconto; a prazo na etapa seguinte): oct_app_aprovacoes, criados pelo núcleo do posto em até 1 minuto
+_APV_COLS = ("id,empresa_id,tipo,status,titulo,destaque,resumo,linhas,motivo,pediu_por,criado_em,vence_em,decidido_nome,decidido_em,motivo_recusa")
+_NOME_TIPO = {"afericao": "Aferição", "desconto": "Desconto", "prazo": "Venda a prazo"}
+
+
+def _agora_utc():
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _apv_postos(p, tipo):
+    """{empresa_id: nome} dos postos de quem pode aprovar ESTE tipo (desconto, prazo); vazio se não pode."""
+    if not TIPOS_NO_AR.get(tipo) or not pode_de(p).get("aprovar_" + tipo):
+        return {}
+    return {i: n for i, n in postos_de(p)}
+
+
+def _apv_pedido(r, nomes, detalhe=False):
+    eid = str(r.get("empresa_id") or "")
+    criado, vence, st = _instante(r.get("criado_em")), _instante(r.get("vence_em")), r.get("status")
+    if st == "pendente":
+        sit = "pendente" if (vence and vence > _agora_utc()) else "expirado"
+    elif st in ("aprovado", "recusado"):
+        sit = st
+    else:                                   # expirado, cancelado
+        sit = "expirado"
+    out = {"id": "apv:" + str(r.get("id")), "tipo": r.get("tipo"), "titulo": r.get("titulo") or "Pedido do caixa",
+           "posto": nomes.get(eid, "—"), "pediu": (cp._nome_bonito(r.get("pediu_por") or "") or "Caixa"),
+           "quando": _iso_utc(criado), "vence_em": _iso_utc(vence) if sit == "pendente" else None, "situacao": sit}
+    if detalhe:
+        quem = cp._nome_bonito(r.get("decidido_nome") or "") if r.get("decidido_nome") else ""
+        if sit == "aprovado":
+            res = "Aprovado" + (f" por {quem}" if quem else "") + "."
+        elif sit == "recusado":
+            res = "Recusado" + (f" por {quem}" if quem else "") + "." + (f" Motivo: {r.get('motivo_recusa')}" if r.get("motivo_recusa") else "")
+        elif st == "cancelado":
+            res = "O caixa cancelou o pedido."
+        else:
+            res = "Venceu sem resposta."
+        out.update({"destaque": r.get("destaque") or "", "resumo": r.get("resumo") or "", "linhas": r.get("linhas") or [],
+                    "motivo": r.get("motivo") or "", "resolvido": "" if sit == "pendente" else res})
+    return out
+
+
+def _pedidos_caixa(p, resolvidas):
+    """Pedidos do caixa dos tipos que o perfil aprova. Sem a tabela (SQL-APP-APROVACOES.sql) = lista vazia, sem derrubar o resto."""
+    tipos = [t for t in ("desconto", "prazo") if _apv_postos(p, t)]
+    if not tipos:
+        return []
+    nomes = {i: n for i, n in postos_de(p)}
+    if not nomes:
+        return []
+    ids, lim = ",".join(nomes), "tipo=in.(" + ",".join(tipos) + ")"
     try:
-        nomes = _afe_postos(p)
-        if not nomes:
+        if resolvidas:
+            desde = _iso_utc(_agora_utc() - timedelta(days=30))
+            rows = cp._sget(f"oct_app_aprovacoes?select={_APV_COLS}&empresa_id=in.({ids})&{lim}&criado_em=gte.{desde}&order=criado_em.desc&limit=80")
+            out = [_apv_pedido(r, nomes) for r in rows]
+            return [x for x in out if x["situacao"] != "pendente"][:40]
+        agora = _iso_utc(_agora_utc())
+        rows = cp._sget(f"oct_app_aprovacoes?select={_APV_COLS}&empresa_id=in.({ids})&{lim}&status=eq.pendente&vence_em=gt.{agora}&order=criado_em.desc&limit=50")
+        return [_apv_pedido(r, nomes) for r in rows]
+    except Exception as e:
+        print("[app-equipe] pedidos do caixa:", str(e)[:100])
+        return []
+
+
+def _pedidos(p, resolvidas):
+    lst = _pedidos_afericao(p, resolvidas) + _pedidos_caixa(p, resolvidas)
+    lst.sort(key=lambda x: x.get("quando") or "", reverse=True)
+    return lst
+
+
+def _pendentes_resumo(p):
+    """(quantos, texto) de pedidos esperando este usuário — alimenta o cartão do painel e a vigia do app (cache de poucos segundos)."""
+    try:
+        lst = _guardado("pend|" + str(p.get("id")), 4, lambda: _pedidos(p, False))
+        if not lst:
             return 0, ""
-        def busca():
-            return cp._sget(f"oct_pdv_abastecimentos?select=id,empresa_id&empresa_id=in.({','.join(nomes)})&status=eq.afericao_pendente&limit=100")
-        rows = _guardado("pend|" + ",".join(sorted(nomes)), 20, busca)
-        if not rows:
-            return 0, ""
-        postos = sorted({nomes.get(str(r.get("empresa_id")), "") for r in rows} - {""})
-        return len(rows), ("Aferição · " + ", ".join(postos)) if postos else "Aferição"
+        partes = sorted({f"{_NOME_TIPO.get(x.get('tipo'), 'Pedido')} · {x.get('posto')}" for x in lst})
+        return len(lst), ", ".join(partes[:2]) + ("…" if len(partes) > 2 else "")
     except Exception as e:
         print("[app-equipe] pendentes:", str(e)[:100])
         return 0, ""
+
+
+@bp_equipe.route("/app/equipe/api/pendentes", methods=["GET"])
+def api_pendentes():
+    p = _eu()
+    if not p:
+        return _nao_entrou()
+    n, resumo = _pendentes_resumo(p)
+    return jsonify({"ok": True, "pendentes": n, "resumo": resumo})
 
 
 @bp_equipe.route("/app/equipe/api/aprovacoes", methods=["GET"])
@@ -784,11 +860,67 @@ def _afe_carregar(p, pid):
     return rows[0], nomes, None
 
 
+def _apv_carregar(p, pid):
+    """(linha, nomes, resposta_de_erro) de um pedido do caixa: formato, permissão do tipo e posto do usuário."""
+    if not _RE_UUID.match(str(pid)[4:]):
+        return None, None, (jsonify({"erro": "Pedido não encontrado."}), 404)
+    rows = cp._sget(f"oct_app_aprovacoes?select={_APV_COLS}&id=eq.{str(pid)[4:]}&limit=1")
+    if not rows:
+        return None, None, (jsonify({"erro": "Pedido não encontrado."}), 404)
+    r = rows[0]
+    nomes = _apv_postos(p, str(r.get("tipo")))
+    if not nomes:
+        return None, None, (jsonify({"erro": "Seu perfil não aprova este tipo de pedido."}), 403)
+    if str(r.get("empresa_id")) not in nomes:
+        return None, None, (jsonify({"erro": "Pedido não encontrado."}), 404)
+    return r, nomes, None
+
+
+def _apv_detalhe(p, pid):
+    try:
+        r, nomes, erro = _apv_carregar(p, pid)
+    except Exception as e:
+        print("[app-equipe] pedido do caixa:", str(e)[:120])
+        return jsonify({"erro": "Não consegui ler o pedido agora."}), 502
+    if erro:
+        return erro
+    return jsonify(dict(_apv_pedido(r, nomes, detalhe=True), ok=True))
+
+
+def _apv_decidir(p, pid, aprovar, motivo):
+    try:
+        r, nomes, erro = _apv_carregar(p, pid)
+        if erro:
+            return erro
+        if r.get("status") != "pendente":
+            msg = "O caixa cancelou o pedido." if r.get("status") == "cancelado" else "Esse pedido já foi resolvido."
+            return jsonify({"erro": msg}), 409
+        agora = _agora_utc()
+        vence = _instante(r.get("vence_em"))
+        if not vence or vence <= agora:
+            return jsonify({"erro": "Passou 1 minuto sem resposta. O caixa precisa pedir de novo."}), 410
+        quem = cp._nome_bonito(p.get("nome") or "gerente")
+        corpo = {"status": "aprovado" if aprovar else "recusado", "decidido_por": p.get("id"), "decidido_nome": quem,
+                 "decidido_em": _iso_utc(agora), "motivo_recusa": (motivo or None) if not aprovar else None}
+        # a condição vai NO BANCO: só decide quem chegar antes do vencimento e enquanto estiver pendente
+        feito = cp._spatch(f"oct_app_aprovacoes?id=eq.{str(pid)[4:]}&status=eq.pendente&vence_em=gt.{_iso_utc(agora)}", corpo, prefer="return=representation")
+        if not feito:
+            return jsonify({"erro": "Esse pedido já foi resolvido ou venceu."}), 409
+        _esquecer("pend|")
+        print(f"[app-equipe] pedido {str(pid)[4:]} ({r.get('tipo')}) {'APROVADO' if aprovar else 'RECUSADO'} por {quem} ({p.get('id')})")
+        return jsonify({"ok": True, "situacao": "aprovado" if aprovar else "recusado"})
+    except Exception as e:
+        print("[app-equipe] decidir pedido do caixa:", str(e)[:120])
+        return jsonify({"erro": "Não consegui registrar agora. Tente de novo."}), 502
+
+
 @bp_equipe.route("/app/equipe/api/aprovacoes/<pid>", methods=["GET"])
 def api_aprovacao(pid):
     p = _eu()
     if not p:
         return _nao_entrou()
+    if str(pid).startswith("apv:"):
+        return _apv_detalhe(p, pid)
     try:
         r, nomes, erro = _afe_carregar(p, pid)
     except Exception as e:
@@ -807,6 +939,8 @@ def api_aprovacao_decidir(pid):
     d = request.get_json(silent=True) or {}
     aprovar = bool(d.get("aprovar"))
     motivo = re.sub(r"\s+", " ", str(d.get("motivo") or "")).strip()[:120]
+    if str(pid).startswith("apv:"):
+        return _apv_decidir(p, pid, aprovar, motivo)
     try:
         r, nomes, erro = _afe_carregar(p, pid)
         if erro:

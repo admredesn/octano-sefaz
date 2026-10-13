@@ -51,18 +51,44 @@ async function apiEq(caminho, corpo) {
 }
 
 function eqSair() {
+  if (_eqVigia) { clearInterval(_eqVigia); _eqVigia = null; }
+  _eqUltimo = 0;
   LS.del("psn_equipe");
   EQ.eu = null;
   if (location.hash.indexOf("#/equipe") !== 0) ir("#/equipe");
 }
 
+// ---------------------------------------------------------------- vigia dos pedidos (sem push: o app confere sozinho)
+// Enquanto o app está aberto, a cada 6 s pergunta quantos pedidos esperam; chegou pedido novo: vibra, avisa e atualiza a lista.
+let _eqVigia = null, _eqUltimo = 0;
+function eqVigia() {
+  if (_eqVigia || !tokEq() || !eqAprova()) return;
+  const tic = async () => {
+    if (document.hidden || !tokEq()) return;
+    const r = await apiEq("/app/equipe/api/pendentes");
+    if (!r || !r.ok) return;
+    const n = Number(r.pendentes || 0);
+    eqContador(n);
+    if (n > _eqUltimo) {
+      try { if (navigator.vibrate) navigator.vibrate([220, 120, 220]); } catch (e) { /* ignora */ }
+      toast(n === 1 ? "Pedido novo do caixa" : n + " pedidos esperando você");
+    }
+    const mudou = n !== _eqUltimo;
+    _eqUltimo = n;
+    if (mudou && /^#\/eq-aprovacoes\/?$/.test(location.hash)) telaEqAprovacoes();
+  };
+  _eqVigia = setInterval(tic, 6000);
+  tic();
+}
+
 async function eqEu() {
   if (!EQUIPE_NO_AR || !tokEq()) { ir("#/equipe"); return null; }
-  if (EQ.eu) return EQ.eu;
+  if (EQ.eu) { eqVigia(); return EQ.eu; }
   const r = await apiEq("/app/equipe/api/eu");
   if (!r.ok) { eqSair(); return null; }
   EQ.eu = r;
   eqBarraPermissoes();
+  eqVigia();
   return r;
 }
 // sem a lista de permissões (o dono) = pode tudo
@@ -407,7 +433,7 @@ async function telaEqPermissoes(perfil) {
     ${EQ_PERMISSOES.map(g => `<div class="grupo-tit" style="padding-top:8px">${g[0]}</div>
       <div class="secao" style="padding-top:0"><div class="card lista">${g[1].map(x => `<button class="linha" onclick="eqPermissao('${esc(pf.id)}','${x[0]}')">
         <div class="meio"><div class="t">${x[1]}</div></div><span class="chave ${(pf.pode || {})[x[0]] !== false ? "on" : ""}" id="eq-pm-${x[0]}"></span></button>`).join("")}</div>${
-        g[0] === "Pode aprovar" && Object.values(r.aprovacoes_tipos || {}).some(v => !v) ? '<div class="vazio">' + (r.aprovacoes_no_ar ? "Por enquanto só a <b>Aferição</b> chega no celular. " : "") + 'Desconto e venda a prazo entram na próxima etapa: o que você deixar ligado aqui já fica pronto.</div>' : ""}</div>`).join("")}
+        g[0] === "Pode aprovar" && Object.values(r.aprovacoes_tipos || {}).some(v => !v) ? '<div class="vazio">' + (r.aprovacoes_no_ar ? "Já chegam no celular: <b>" + Object.keys(r.aprovacoes_tipos || {}).filter(k => r.aprovacoes_tipos[k]).map(k => ({ afericao: "Aferição", desconto: "Desconto no caixa", prazo: "Venda a prazo" })[k] || k).join(" e ") + "</b>. " : "") + 'O que ainda não chega entra na próxima etapa: o que você deixar ligado aqui já fica pronto.</div>' : ""}</div>`).join("")}
     <div class="grupo-tit">Quem tem este perfil</div>
     <div class="secao" style="padding-top:0"><div class="card lista">${(pf.pessoas || []).map(x => `<div class="linha"><span class="ic">${ICO.perfil(20)}</span>
       <div class="meio"><div class="t">${esc(x.nome)}</div><div class="s">${esc((x.postos || []).join(", "))}</div></div></div>`).join("") || '<div class="linha"><div class="meio"><div class="s">Ninguém ainda.</div></div></div>'}</div>
