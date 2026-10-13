@@ -242,7 +242,7 @@ async function telaEqAprovacoes(aba) {
     </div>
     <div class="secao">${lst.length ? `<div class="card lista">${lst.map(linha).join("")}</div>`
       : `<div class="card vazio" style="padding:16px">${resolvidas ? "Nenhum pedido resolvido ainda." : "Nenhum pedido esperando. Quando o caixa precisar de você, o celular avisa."}</div>`}
-      ${resolvidas ? "" : '<div class="vazio" style="text-align:center">O caixa espera a resposta por 1 minuto. Depois disso o pedido vence e ele precisa pedir de novo.</div>'}</div>
+      ${resolvidas || !lst.some(x => x.vence_em) ? "" : '<div class="vazio" style="text-align:center">O caixa espera a resposta por 1 minuto. Depois disso o pedido vence e ele precisa pedir de novo.</div>'}</div>
   </div>`;
   if (!resolvidas && lst.length) eqRelogio();
 }
@@ -258,11 +258,12 @@ async function telaEqPedido(id) {
   const t = EQ_TIPOS[p.tipo] || { nome: p.tipo, ico: "aprovar" };
   const pendente = p.situacao === "pendente";
   const SELO = { aprovado: ["Aprovado", "verde"], recusado: ["Recusado", "cinza"], expirado: ["Venceu sem resposta", "cinza"] }[p.situacao] || [p.situacao, "cinza"];
+  const comPrazo = !!p.vence_em;         // aferição não vence em 1 minuto: fica esperando até alguém decidir
   const total = Math.max(1, Math.round((new Date(p.vence_em).getTime() - new Date(p.quando).getTime()) / 1000) || 60);
   el().innerHTML = `<div class="tela">${topoSimples(t.nome, true)}
     <div class="secao" style="padding-top:2px"><div class="card resumo">
-      ${pendente ? `<span class="tag ouro" id="pd-selo">Esperando você · <span data-vence="${esc(p.vence_em)}"></span></span>
-        <div class="tempo"><i data-vence="${esc(p.vence_em)}" data-barra="${total}"></i></div>` : `<span class="tag ${SELO[1]}">${esc(SELO[0])}</span>`}
+      ${pendente ? (comPrazo ? `<span class="tag ouro" id="pd-selo">Esperando você · <span data-vence="${esc(p.vence_em)}"></span></span>
+        <div class="tempo"><i data-vence="${esc(p.vence_em)}" data-barra="${total}"></i></div>` : `<span class="tag ouro" id="pd-selo">Esperando você</span>`) : `<span class="tag ${SELO[1]}">${esc(SELO[0])}</span>`}
       <div class="grande">${esc(p.destaque || "")}</div>
       <div style="color:var(--mut)">${esc(p.resumo || "")}</div>
     </div></div>
@@ -287,6 +288,7 @@ async function telaEqPedido(id) {
       <button class="btn verm" id="pd-rec">Recusar</button><button class="btn sec" onclick="fecharFolha()">Voltar</button>`);
     document.getElementById("pd-rec").onclick = () => decidir(false, document.getElementById("pd-motivo").value.trim());
   };
+  if (!comPrazo) return;                                                     // sem prazo (aferição): não há relógio nem vencimento
   eqRelogio(() => {                                                          // passou 1 minuto: não dá mais para responder
     fecharFolha();
     const selo = document.getElementById("pd-selo"), m = document.getElementById("pd-msg");
@@ -405,7 +407,7 @@ async function telaEqPermissoes(perfil) {
     ${EQ_PERMISSOES.map(g => `<div class="grupo-tit" style="padding-top:8px">${g[0]}</div>
       <div class="secao" style="padding-top:0"><div class="card lista">${g[1].map(x => `<button class="linha" onclick="eqPermissao('${esc(pf.id)}','${x[0]}')">
         <div class="meio"><div class="t">${x[1]}</div></div><span class="chave ${(pf.pode || {})[x[0]] !== false ? "on" : ""}" id="eq-pm-${x[0]}"></span></button>`).join("")}</div>${
-        g[0] === "Pode aprovar" && r.aprovacoes_no_ar === false ? '<div class="vazio">Ainda não está valendo: as aprovações pelo celular entram na próxima etapa. O que você deixar ligado aqui já fica pronto.</div>' : ""}</div>`).join("")}
+        g[0] === "Pode aprovar" && Object.values(r.aprovacoes_tipos || {}).some(v => !v) ? '<div class="vazio">' + (r.aprovacoes_no_ar ? "Por enquanto só a <b>Aferição</b> chega no celular. " : "") + 'Desconto e venda a prazo entram na próxima etapa: o que você deixar ligado aqui já fica pronto.</div>' : ""}</div>`).join("")}
     <div class="grupo-tit">Quem tem este perfil</div>
     <div class="secao" style="padding-top:0"><div class="card lista">${(pf.pessoas || []).map(x => `<div class="linha"><span class="ic">${ICO.perfil(20)}</span>
       <div class="meio"><div class="t">${esc(x.nome)}</div><div class="s">${esc((x.postos || []).join(", "))}</div></div></div>`).join("") || '<div class="linha"><div class="meio"><div class="s">Ninguém ainda.</div></div></div>'}</div>

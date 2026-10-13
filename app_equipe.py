@@ -11,7 +11,7 @@ Decisões do Ronan (10/10/2026):
   * aprovações (desconto, a prazo, aferição) com um toque e validade de 1 minuto — é a
     PRÓXIMA etapa (mexe no PDV e depende do aviso no celular). Enquanto
     APROVACOES_NO_AR for False, o servidor diz ao app que ninguém aprova nada e as telas
-    de aprovação não aparecem.
+    de aprovação não aparecem. ETAPA 1 (12/10): aferição já chega ao app (ver TIPOS_NO_AR).
 
 Regras deste módulo:
   * QUEM entra: cadastro ATIVO em oct_perfis e (dono OU perfil com alguma permissão do
@@ -44,7 +44,10 @@ import cashback_portal as cp
 
 bp_equipe = Blueprint("equipe", __name__)
 
-APROVACOES_NO_AR = False            # etapa seguinte: pedidos do caixa (desconto, a prazo, aferição)
+# Tipos de pedido que JÁ chegam ao app. Aferição usa o que já existe (oct_pdv_abastecimentos.status = 'afericao_pendente' e a mesma
+# decisão do retaguarda); desconto e a prazo dependem do PDV pedir pelo servidor (próxima etapa).
+TIPOS_NO_AR = {"afericao": True, "desconto": False, "prazo": False}
+APROVACOES_NO_AR = any(TIPOS_NO_AR.values())
 PERMISSOES = ("aprovar_desconto", "aprovar_prazo", "aprovar_afericao",
               "ver_vendas", "ver_litros", "ver_tanques", "ver_recebido", "ver_precos", "ver_alertas")
 APROVAR = tuple(k for k in PERMISSOES if k.startswith("aprovar_"))
@@ -257,8 +260,8 @@ def pode_de(p):
                 pode[k] = True
             if (PREFIXO + k) in (p.get("perm_menos") or []):
                 pode[k] = False
-    if not APROVACOES_NO_AR:
-        for k in APROVAR:
+    for k in APROVAR:                           # só o que já chega ao app pode ser aprovado por ele
+        if not TIPOS_NO_AR.get(k[len("aprovar_"):]):
             pode[k] = False
     return pode
 
@@ -633,7 +636,8 @@ def api_painel():
             continue
         postos.append(filtrar_posto(d, eid, nome, pode))
         alertas += _alertas(d, eid, nome, pode)
-    return jsonify({"ok": True, "postos": postos, "alertas": alertas, "pendentes": 0, "pendentes_resumo": ""})
+    pend, resumo = _pendentes_resumo(p)
+    return jsonify({"ok": True, "postos": postos, "alertas": alertas, "pendentes": pend, "pendentes_resumo": resumo})
 
 
 @bp_equipe.route("/app/equipe/api/posto/<eid>", methods=["GET"])
@@ -652,20 +656,180 @@ def api_posto(eid):
     return jsonify(dict(filtrar_posto(d, eid, meus[eid], pode, detalhe=True), ok=True))
 
 
-# ------------------------------------------------------------------ aprovações (próxima etapa)
+# ------------------------------------------------------------------ aprovações
+# ETAPA 1 — AFERIÇÃO. O PDV marca o abastecimento como aferição e ele fica 'afericao_pendente' em oct_pdv_abastecimentos até
+# alguém decidir. O retaguarda decide (afericoes.js) gravando o status; o worker do núcleo lê o status na nuvem a cada 30 s
+# e aplica no PDV. O app grava EXATAMENTE a mesma coisa — por isso nada muda no PDV nem no núcleo.
+_AFE_COLS = ("id,empresa_id,turno_id,bico,bomba,combustivel,produto_nome,litros,preco_litro,valor_total,valor,vendedor,status,tipo,"
+             "data_abast,data_mov,created_at,observacao")
+_RE_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+_RE_CRACHA = re.compile(r"^[0-9A-Fa-f]{10,}$")
+AFERICAO_LITROS_NORMAL = 21.0            # a aferição usa vaso de até 20 L: acima disso a linha "Litros" vai em alerta
+
+
+def _virg(v, dec=2):
+    return f"{_num(v):.{dec}f}".replace(".", ",")
+
+
+def _reais(v):
+    return "R$ " + f"{_num(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _hora_local_txt(d_utc):
+    return (d_utc + FUSO).strftime("%d/%m %H:%M") if d_utc else "—"
+
+
+def _afe_operadores(rows):
+    """{turno_id: (nome do operador, nº do turno)} — quem estava no caixa quando a aferição foi marcada
+    (o campo `vendedor` da aferição é o crachá/ID da bomba, não um nome)."""
+    ids = sorted({str(r.get("turno_id")) for r in rows if r.get("turno_id") and _RE_UUID.match(str(r.get("turno_id")))})
+    if not ids:
+        return {}
+    try:
+        t = cp._sget(f"oct_pdv_turnos?select=id,numero,operador&id=in.({','.join(ids)})")
+    except Exception:
+        return {}
+    return {str(x.get("id")): (cp._nome_bonito(x.get("operador") or ""), x.get("numero")) for x in t if x.get("operador")}
+
+
+def _afe_pedido(r, nomes, detalhe=False, turnos=None):
+    eid = str(r.get("empresa_id") or "")
+    op = (turnos or {}).get(str(r.get("turno_id")))
+    quando = _instante(r.get("data_abast"), local=True) or _instante(r.get("data_mov")) or _instante(r.get("created_at"))
+    comb = _combustivel(r.get("combustivel") or r.get("produto_nome"))
+    litros = _num(r.get("litros"))
+    cracha = str(r.get("vendedor") or "").strip()
+    pediu = op[0] if op else ("Caixa" if (not cracha or _RE_CRACHA.match(cracha)) else cp._nome_bonito(cracha))
+    pendente = r.get("status") == "afericao_pendente"
+    out = {"id": "afe:" + str(r.get("id")), "tipo": "afericao", "titulo": f"Aferição · bico {r.get('bico') or '—'} · {comb}",
+           "posto": nomes.get(eid, "—"), "pediu": pediu, "quando": _iso_utc(quando), "vence_em": None,
+           "situacao": "pendente" if pendente else "aprovado"}
+    if detalhe:
+        valor = _num(r.get("valor_total")) or _num(r.get("valor")) or round(litros * _num(r.get("preco_litro")), 2)
+        linhas = [["Posto", nomes.get(eid, "—")], ["Combustível", comb], ["Bico", str(r.get("bico") or "—")],
+                  ["Litros", _virg(litros, 3 if litros < 1 else 2) + " L", "alerta" if litros > AFERICAO_LITROS_NORMAL else ""],
+                  ["Valor se fosse venda", _reais(valor)], ["Horário", _hora_local_txt(quando)], ["Quem marcou", pediu]] + ([["Turno", str(int(op[1]))]] if op and op[1] is not None else [])
+        out.update({"destaque": _virg(litros, 3 if litros < 1 else 2) + " L",
+                    "resumo": f"{comb} · bico {r.get('bico') or '—'} · {_hora_local_txt(quando)}",
+                    "linhas": linhas, "motivo": "",
+                    "resolvido": "" if pendente else (r.get("observacao") or "Aferição autorizada.")})
+        if litros > AFERICAO_LITROS_NORMAL:
+            out["resumo"] += " · mais de 20 L: confira antes de aprovar"
+    return out
+
+
+def _afe_postos(p):
+    """{empresa_id: nome} dos postos de quem pode aprovar aferição; vazio se o perfil não pode."""
+    if not pode_de(p).get("aprovar_afericao"):
+        return {}
+    return {i: n for i, n in postos_de(p)}
+
+
+def _pedidos(p, resolvidas):
+    nomes = _afe_postos(p)
+    if not nomes:
+        return []
+    ids = ",".join(nomes)
+    if resolvidas:
+        desde = _iso_utc(datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30))
+        q = (f"oct_pdv_abastecimentos?select={_AFE_COLS}&empresa_id=in.({ids})&status=eq.afericao_autorizada"
+             f"&data_mov=gte.{desde}&order=data_mov.desc&limit=40")
+    else:
+        q = f"oct_pdv_abastecimentos?select={_AFE_COLS}&empresa_id=in.({ids})&status=eq.afericao_pendente&order=data_mov.desc&limit=100"
+    rows = cp._sget(q)
+    turnos = _afe_operadores(rows)
+    return [_afe_pedido(r, nomes, turnos=turnos) for r in rows]
+
+
+def _pendentes_resumo(p):
+    """(quantos, texto) de pedidos esperando este usuário — alimenta o cartão do painel (cache curto)."""
+    try:
+        nomes = _afe_postos(p)
+        if not nomes:
+            return 0, ""
+        def busca():
+            return cp._sget(f"oct_pdv_abastecimentos?select=id,empresa_id&empresa_id=in.({','.join(nomes)})&status=eq.afericao_pendente&limit=100")
+        rows = _guardado("pend|" + ",".join(sorted(nomes)), 20, busca)
+        if not rows:
+            return 0, ""
+        postos = sorted({nomes.get(str(r.get("empresa_id")), "") for r in rows} - {""})
+        return len(rows), ("Aferição · " + ", ".join(postos)) if postos else "Aferição"
+    except Exception as e:
+        print("[app-equipe] pendentes:", str(e)[:100])
+        return 0, ""
+
+
 @bp_equipe.route("/app/equipe/api/aprovacoes", methods=["GET"])
 def api_aprovacoes():
-    if not _eu():
+    p = _eu()
+    if not p:
         return _nao_entrou()
-    return jsonify([])
+    try:
+        return jsonify(_pedidos(p, request.args.get("situacao") == "resolvidas"))
+    except Exception as e:
+        print("[app-equipe] aprovacoes:", str(e)[:120])
+        return jsonify({"erro": "Não consegui ler os pedidos agora."}), 502
+
+
+def _afe_carregar(p, pid):
+    """(linha, nomes, resposta_de_erro) — confere formato, permissão e se o posto é de quem chama."""
+    if not str(pid).startswith("afe:") or not _RE_UUID.match(str(pid)[4:]):
+        return None, None, (jsonify({"erro": "Pedido não encontrado."}), 404)
+    nomes = _afe_postos(p)
+    if not nomes:
+        return None, None, (jsonify({"erro": "Seu perfil não aprova aferição."}), 403)
+    rows = cp._sget(f"oct_pdv_abastecimentos?select={_AFE_COLS}&id=eq.{str(pid)[4:]}&limit=1")
+    if not rows or str(rows[0].get("empresa_id")) not in nomes:
+        return None, None, (jsonify({"erro": "Pedido não encontrado."}), 404)
+    return rows[0], nomes, None
 
 
 @bp_equipe.route("/app/equipe/api/aprovacoes/<pid>", methods=["GET"])
-@bp_equipe.route("/app/equipe/api/aprovacoes/<pid>/decidir", methods=["POST"])
 def api_aprovacao(pid):
-    if not _eu():
+    p = _eu()
+    if not p:
         return _nao_entrou()
-    return jsonify({"erro": "Pedido não encontrado."}), 404
+    try:
+        r, nomes, erro = _afe_carregar(p, pid)
+    except Exception as e:
+        print("[app-equipe] pedido:", str(e)[:120])
+        return jsonify({"erro": "Não consegui ler o pedido agora."}), 502
+    if erro:
+        return erro
+    return jsonify(dict(_afe_pedido(r, nomes, detalhe=True, turnos=_afe_operadores([r])), ok=True))
+
+
+@bp_equipe.route("/app/equipe/api/aprovacoes/<pid>/decidir", methods=["POST"])
+def api_aprovacao_decidir(pid):
+    p = _eu()
+    if not p:
+        return _nao_entrou()
+    d = request.get_json(silent=True) or {}
+    aprovar = bool(d.get("aprovar"))
+    motivo = re.sub(r"\s+", " ", str(d.get("motivo") or "")).strip()[:120]
+    try:
+        r, nomes, erro = _afe_carregar(p, pid)
+        if erro:
+            return erro
+        if r.get("status") != "afericao_pendente":
+            return jsonify({"erro": "Esse pedido já foi resolvido por outra pessoa."}), 409
+        quem = cp._nome_bonito(p.get("nome") or "gerente")
+        quando = _hora_local_txt(datetime.now(timezone.utc).replace(tzinfo=None))
+        if aprovar:      # igual a afericoes.js › autorizar
+            corpo = {"tipo": "afericao", "status": "afericao_autorizada", "preco_litro": 0, "valor": 0,
+                     "observacao": f"Aferição autorizada - combustível retornado ao tanque (pelo app: {quem}, {quando})"}
+        else:            # igual a afericoes.js › cancelar: volta a ser abastecimento vendável
+            corpo = {"tipo": "abastecimento", "status": "pendente",
+                     "observacao": f"Aferição recusada pelo app ({quem}, {quando})" + (f": {motivo}" if motivo else "")}
+        feito = cp._spatch(f"oct_pdv_abastecimentos?id=eq.{str(pid)[4:]}&status=eq.afericao_pendente", corpo, prefer="return=representation")
+        if not feito:
+            return jsonify({"erro": "Esse pedido já foi resolvido por outra pessoa."}), 409
+        _esquecer("pend|")
+        print(f"[app-equipe] aferição {str(pid)[4:]} {'AUTORIZADA' if aprovar else 'RECUSADA'} por {quem} ({p.get('id')})")
+        return jsonify({"ok": True, "situacao": "aprovado" if aprovar else "recusado"})
+    except Exception as e:
+        print("[app-equipe] decidir:", str(e)[:120])
+        return jsonify({"erro": "Não consegui registrar agora. Tente de novo."}), 502
 
 
 # ------------------------------------------------------------------ avisos no celular (por pessoa)
@@ -715,7 +879,7 @@ def api_permissoes():
             ids = [str(e) for e in ([g.get("empresa_id")] + list(g.get("empresas") or [])) if e and str(e) in ativas]
             pessoas.append({"nome": cp._nome_bonito(g.get("nome") or "—"), "postos": sorted({ativas[i] for i in ids})})
         perfis.append({"id": pid, "nome": nome, "pode": dict(_padroes_do_perfil(pid)), "pessoas": pessoas})
-    return jsonify({"ok": True, "perfis": perfis, "aprovacoes_no_ar": APROVACOES_NO_AR})
+    return jsonify({"ok": True, "perfis": perfis, "aprovacoes_no_ar": APROVACOES_NO_AR, "aprovacoes_tipos": dict(TIPOS_NO_AR)})
 
 
 @bp_equipe.route("/app/equipe/api/permissoes", methods=["POST"])
