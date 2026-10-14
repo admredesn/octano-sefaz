@@ -334,3 +334,12 @@ img { display: block; max-width: 100%; }
   .app.larga .fat-resumo { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .app.larga .folha { max-width: 640px; }
 }
+
+/* ===== aviso de credito bloqueado e botao Pagar (14/10/2026) ===== */
+.alerta-bloq { display: flex; gap: 10px; align-items: flex-start; background: #FDE8E7; color: #8A1C14; border: 1px solid #F5C2BE;
+               border-radius: 14px; padding: 12px 14px; font-size: .88rem; line-height: 1.35; margin-bottom: 4px; }
+.alerta-bloq .ic { color: #B42318; flex: none; margin-top: 1px; }
+.pagar-btn { margin-left: 8px; padding: 6px 12px; border-radius: 99px; background: var(--azul); color: #fff; font-size: .78rem;
+             font-weight: 700; vertical-align: middle; }
+.pagar-btn:active { transform: scale(.97); }
+

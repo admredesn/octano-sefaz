@@ -18,6 +18,15 @@ function fatData(s) {                 // "2026-10-06" (só data: sem fuso) ou IS
 }
 function fatQtd(q) { return Number(q || 0).toLocaleString("pt-BR", { maximumFractionDigits: 3 }); }
 
+// aviso de credito bloqueado (texto aprovado pelo Ronan em 14/10/2026)
+function fatAvisoBloqueio(p) {
+  if (!p || !p.bloqueado) return "";
+  const t = Number(p.vencidas_valor || 0) > 0
+    ? `Seu crédito a prazo está bloqueado: você tem <b>${brl(p.vencidas_valor)}</b> em fatura vencida. Regularize para voltar a comprar a prazo.`
+    : "Seu crédito a prazo está bloqueado. Fale com o posto.";
+  return `<div class="alerta-bloq" role="alert"><span class="ic">${ICO.alerta(22)}</span><div>${t}</div></div>`;
+}
+
 function fatTag(f) {
   if (f.status === "liquidada") return `<span class="tag verde">Paga${f.liquidado_em ? " em " + esc(fatData(f.liquidado_em)) : ""}</span>`;
   if (f.vencida) return `<span class="tag verm">Vencida${f.dias_atraso ? " há " + f.dias_atraso + " dia" + (f.dias_atraso > 1 ? "s" : "") : ""}</span>`;
@@ -42,8 +51,9 @@ async function faturasPreencher() {
     const nao = r.postos.reduce((s, p) => s + Number(p.nao_faturado_valor || 0), 0);
     const alvo = r.postos.length === 1 ? "#/faturas/" + r.postos[0].empresa_id : "#/faturas";
     const card = document.getElementById("fat-card");
+    const avisos = r.postos.filter(p => p.bloqueado).map(fatAvisoBloqueio).join("");
     if (card) {
-      card.innerHTML = `<div class="secao"><button class="card fat-card ${venc ? "venc" : ""}" onclick="ir('${alvo}')">
+      card.innerHTML = (avisos ? `<div class="secao" style="padding-bottom:0">${avisos}</div>` : "") + `<div class="secao"><button class="card fat-card ${venc ? "venc" : ""}" onclick="ir('${alvo}')">
         <span class="ic">${ICO.prazo(22)}</span>
         <div class="meio"><div class="t">${qtd ? "Faturas em aberto" : "Suas faturas"}</div>
           <div class="s">${qtd ? `${qtd} fatura${qtd > 1 ? "s" : ""} · ${brl(aberta)}${venc ? ` · <b style="color:var(--verm)">${venc} vencida${venc > 1 ? "s" : ""}</b>` : ""}`
@@ -84,6 +94,7 @@ async function telaFaturas(posto) {
     return;
   }
   const info = res.postos.find(p => p.empresa_id === posto) || {};
+  S.fatPosto = info;
   const total = r.abertas.reduce((s, f) => s + f.valor, 0);
   const linha = f => `<button class="linha" onclick="ir('#/fatura/${esc(f.id)}')">
       <span class="ic">${ICO.cupom(20)}</span>
@@ -93,6 +104,7 @@ async function telaFaturas(posto) {
   const nao = r.nao_faturadas;
   el().innerHTML = `<div class="tela">${cab}
     <div class="secao" style="padding-top:2px"><div class="s" style="color:var(--mut);font-size:.84rem">${esc(info.posto || "")}${info.titular && info.titular.length ? " · " + esc(info.titular.join(", ")) : ""}</div></div>
+    ${info.bloqueado ? `<div class="secao" style="padding-bottom:0">${fatAvisoBloqueio(info)}</div>` : ""}
     <div class="secao"><div class="fat-resumo">
       <div class="card"><div class="rot">Em aberto</div><div class="val">${brl(total)}</div><div class="s">${r.abertas.length} fatura${r.abertas.length === 1 ? "" : "s"}</div></div>
       <div class="card"><div class="rot">Ainda sem fatura</div><div class="val">${brl(nao.valor)}</div><div class="s">${nao.qtd} compra${nao.qtd === 1 ? "" : "s"} a prazo</div></div>
@@ -111,7 +123,7 @@ async function telaFaturas(posto) {
 function fatLinhaCupom(c) {
   return `<div class="linha"><span class="ic">${ICO.bomba(20)}</span>
     <div class="meio"><div class="t">Cupom ${esc(c.cupom || "")}</div><div class="s">${esc(fatData(c.data))} ${esc(horaBr(c.data))}${c.placa ? " · " + esc(c.placa) : ""}</div></div>
-    <div class="dir">${brl(c.valor)}${c.tem_foto ? `<button class="foto-btn" onclick="faturaFoto('${esc(c.nota_id)}')" aria-label="Ver comprovante assinado">${ICO.camera(18)}</button>` : ""}</div></div>`;
+    <div class="dir">${brl(c.valor)}${c.tem_foto ? `<button class="foto-btn" onclick="faturaFoto('${esc(c.nota_id)}')" aria-label="Ver comprovante assinado">${ICO.camera(18)}</button>` : ""}${(S.fatPosto && S.fatPosto.pagamento_app) ? `<button class="pagar-btn" onclick="pagarNota('${esc(c.nota_id)}')">Pagar</button>` : ""}</div></div>`;
 }
 
 // ---------------------------------------------------------------- detalhe
@@ -234,3 +246,18 @@ async function faturaFoto(notaId) {
 
 TELAS.faturas = a => telaFaturas(a);
 TELAS.fatura = a => telaFatura(a);
+
+// ---------------------------------------------------------------- pagar UMA compra (Pix) — botao "Pagar"
+// O servidor so' mostra o botao quando o Pix esta habilitado no posto (resumo.pagamento_app).
+async function pagarNota(notaId) {
+  try {
+    toast("Gerando o Pix…", 1500);
+    const r = await api("/cashback/api/pagar", { nota_id: notaId });
+    if (!r.ok) { toast(r.erro || "Não consegui gerar o Pix agora."); return; }
+    folha(`<h2 style="font-size:1.15rem">Pagar com Pix</h2>
+      <p style="color:var(--mut);margin:6px 0 10px;font-size:.9rem">Valor: <b>${brl(r.valor)}</b>. Abra o app do seu banco, leia o QR Code ou use o Pix copia e cola. A baixa é automática.</p>
+      <div class="fat-pix"><div class="pix-img"><img alt="QR Code Pix" src="${esc(r.qr_url || "")}"></div></div>
+      <button class="btn-borda" style="margin-top:10px" onclick="copiarTexto(${JSON.stringify(String(r.copia_cola || ""))}, 'Código Pix copiado')">Copiar Pix copia e cola</button>
+      <button class="btn sec" style="margin-top:8px" onclick="fecharFolha()">Fechar</button>`);
+  } catch (e) { toast("Não consegui gerar o Pix agora."); }
+}

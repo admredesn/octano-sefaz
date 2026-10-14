@@ -10,6 +10,8 @@ Rotas (todas exigem o login do cliente do portal — header Authorization, como 
   GET /cashback/api/faturas/<id>/arquivo?tipo=fatura|boleto|nfe -> {ok, url} (link temporário do PDF)
   GET /cashback/api/faturas/nota/<nota_id>/foto           -> {ok, url} (link temporário da foto do cupom assinado)
   GET /cashback/api/faturas/<id>/pix.png                  -> QR do Pix copia e cola, se o boleto veio com Pix
+  POST /cashback/api/pagar  {nota_id}                     -> Pix para pagar UMA compra a prazo (botao "Pagar" do app)
+                                                             — desligado ate' o Pix do Sicoob estar habilitado (503)
 
 QUEM VÊ O QUÊ (decisão de 13/10/2026, pedido do Ronan):
   * a conta (CPF) vê as faturas do PRÓPRIO cadastro no posto;
@@ -83,6 +85,30 @@ def _contas(cli):
 
 def _in(ids):
     return "in.(" + ",".join(ids) + ")"
+
+
+def _bloqueio(ids):
+    """(bloqueado, origem, motivo) do cadastro do cliente ou da empresa que ele pode ver."""
+    lst = list(ids)
+    if not lst:
+        return False, None, None
+    try:
+        rows = cp._sget(f"oct_pessoas?id={_in(lst)}&select=id,credito_bloqueado,credito_bloqueio_origem,credito_bloqueio_motivo")
+    except Exception:
+        rows = cp._sget(f"oct_pessoas?id={_in(lst)}&select=id,credito_bloqueado")     # colunas do bloqueio ainda nao criadas
+    bl = [r for r in rows or [] if r.get("credito_bloqueado") is True]
+    if not bl:
+        return False, None, None
+    return True, bl[0].get("credito_bloqueio_origem"), bl[0].get("credito_bloqueio_motivo")
+
+
+def _pagamento_app_ligado(empresa_id):
+    """Pagar pelo app (Pix): env PIX_APP_ATIVO = empresa_id,... ou all. Vazio = desligado."""
+    import os
+    v = os.environ.get("PIX_APP_ATIVO", "").strip().lower()
+    if not v:
+        return False
+    return v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",")]
 
 
 def _cliente_ou_401():
@@ -161,10 +187,13 @@ def api_resumo():
             nome = (cp._sget(f"oct_empresas?id=eq.{emp}&select=nome&limit=1") or [{}])[0].get("nome") or ""
         except Exception:
             pass
-        if not lst and not nao and not _tem_alguma(emp, ids):
+        bloq, origem, motivo = _bloqueio(ids)
+        if not lst and not nao and not bloq and not _tem_alguma(emp, ids):
             continue
         postos.append({
             "empresa_id": emp, "posto": nome,
+            "bloqueado": bloq, "bloqueio_origem": origem, "bloqueio_motivo": motivo,
+            "pagamento_app": _pagamento_app_ligado(emp),
             "titular": sorted({v[1] for v in ids.values() if v[0] == "empresa"} or {v[1] for v in ids.values()}),
             "abertas_qtd": len(lst), "abertas_valor": round(sum(_valor(f) for f in lst), 2),
             "vencidas_qtd": len(venc), "vencidas_valor": round(sum(_valor(f) for f in venc), 2),
@@ -366,3 +395,26 @@ def api_pix_png(fatura_id):
     buf = io.BytesIO()
     qrcode.make(codigo, box_size=8, border=2).save(buf, format="PNG")
     return Response(buf.getvalue(), mimetype="image/png", headers=SEM_CACHE)
+
+
+# ------------------------------------------------------------------ pagar UMA compra pelo app (Pix)
+@bp_faturas.route("/cashback/api/pagar", methods=["POST"])
+def api_pagar():
+    """Cria a cobranca Pix de UMA nota a prazo (botao "Pagar" ao lado da foto do cupom).
+    Contrato (para quando o Pix do Sicoob estiver habilitado): {nota_id} -> {ok, txid, valor, copia_cola, qr_url};
+    a baixa da nota e' automatica quando o banco confirma. Hoje: 503 com a explicacao."""
+    cli, erro = _cliente_ou_401()
+    if erro:
+        return erro
+    corpo = request.get_json(silent=True) or {}
+    nid = cp._uuid_ok(corpo.get("nota_id"))
+    rows = cp._sget(f"oct_pdv_notas_prazo?id=eq.{nid}&select=id,empresa_id,cliente_id,valor,status,fatura_id&limit=1") if nid else []
+    n = rows[0] if rows else None
+    ids = _contas(cli).get(n.get("empresa_id")) if n else None
+    if not n or not ids or n.get("cliente_id") not in ids:
+        return jsonify({"erro": "Compra não encontrada."}), 404
+    if n.get("status") != "aberto" or n.get("fatura_id"):
+        return jsonify({"erro": "Esta compra já foi paga ou já entrou numa fatura."}), 409
+    if not _pagamento_app_ligado(n.get("empresa_id")):
+        return jsonify({"erro": "O pagamento pelo app ainda não está habilitado neste posto. Pague no caixa do posto."}), 503
+    return jsonify({"erro": "Integração de Pix ainda não configurada."}), 503

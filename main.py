@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-13-faturas-app-1",
+                    "build": "2026-10-14-bloqueio-app-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -576,6 +576,14 @@ try:
     _push_iniciar()
 except Exception as _e:
     print("[app-push] nao iniciou:", _e)
+
+# ── Bloqueio automático do crédito a prazo por fatura vencida (14/10/2026) ────────
+# Desligado até BLOQUEIO_PRAZO_FATURA (lista de empresa_id ou all) — ver sefaz/bloqueio_prazo.py.
+try:
+    from sefaz.bloqueio_prazo import iniciar as _bloqueio_prazo_iniciar
+    _bloqueio_prazo_iniciar()
+except Exception as _e:
+    print("[bloqueio-prazo] nao iniciou:", _e)
 
 # ── App Postos SN: pontos (1 por R$ 1, valem 6 meses) — crédito das vendas a cada 5 min ──
 try:
