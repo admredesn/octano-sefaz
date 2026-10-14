@@ -24,7 +24,10 @@ function barra(nome) {
   b.style.display = mostra ? "" : "none";
   document.querySelector(".app").classList.toggle("sem-barra", !mostra);
   const ativo = { premios: "resgatar", postos: "resgatar", historico: "perfil", extrato: "inicio", parceiros: "perfil",
-    favorito: "perfil", dados: "perfil", notificacoes: "inicio", oferta: "inicio", acionar: "" }[nome] || nome;
+    favorito: "perfil", dados: "perfil", notificacoes: "inicio", oferta: "inicio", acionar: "",
+    faturas: "perfil", fatura: "perfil" }[nome] || nome;
+  // faturas usam a coluna larga no PC (extrato em tabela); no celular nada muda
+  document.querySelector(".app").classList.toggle("larga", nome === "faturas" || nome === "fatura");
   b.querySelectorAll("[data-aba]").forEach(x => x.classList.toggle("on", x.dataset.aba === ativo));
   if (typeof barraEquipe === "function") barraEquipe(nome);     // a equipe tem a barra dela (equipe.js)
 }
@@ -220,6 +223,7 @@ async function telaInicio() {
       <button class="btn-borda" onclick="ir('#/extrato')">Extrato</button>
     </div>
     ${S.pontos && S.pontos.a_vencer_30d > 0 ? `<div class="secao"><div class="card" style="padding:12px 14px;background:var(--ouro-fundo);box-shadow:none;font-size:.86rem">⏳ <b>${num(S.pontos.a_vencer_30d)} ponto(s)</b> vencem nos próximos 30 dias. <a class="link" href="#/resgatar">Trocar agora</a></div></div>` : ""}
+    <div id="fat-card"></div>
     <div class="secao"><div class="secao-tit"><h2>Categorias</h2></div>
       <div class="categorias">${CATEGORIAS.map(c => `<button class="cat" onclick="S.cat='${c[0]}';ir('#/resgatar')"><span class="ic">${ICO[c[2]](22)}</span>${c[1]}</button>`).join("")}</div>
     </div>
@@ -238,6 +242,7 @@ async function telaInicio() {
         : `<div class="card vazio" style="padding:16px">Informe o seu CPF no caixa ou toque no botão da bomba antes de abastecer: a compra aparece aqui e você ganha <b>1 ponto a cada R$ 1</b>.</div>`}
     </div>
   </div>`;
+  if (typeof faturasPreencher === "function") faturasPreencher();
   const car = document.getElementById("carrossel"), pon = document.getElementById("pontinhos");
   if (car && pon) car.addEventListener("scroll", () => {
     const i = Math.round(car.scrollLeft / (car.scrollWidth / banners.length));
@@ -418,6 +423,7 @@ async function telaPerfil() {
       ${item("loja", "Postos", "ir('#/postos')")}
       ${item("estrela", "Posto favorito", "ir('#/favorito')")}
     </div></div>
+    <div id="fat-perfil"></div>
     <div class="grupo-tit">Histórico</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${item("historico", "Histórico de compras", "ir('#/historico')")}
@@ -445,6 +451,7 @@ async function telaPerfil() {
     </div></div>
     <div class="vazio" style="text-align:center">Postos SN · versão ${VERSAO_APP}</div>
   </div>`;
+  if (typeof faturasPreencher === "function") faturasPreencher();
 }
 
 async function alternarMkt() {
