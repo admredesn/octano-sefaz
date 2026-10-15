@@ -204,7 +204,12 @@ def _spost(tab, body, prefer="return=representation"):
 
 def _spatch(q, body, prefer="return=minimal"):
     url, _ = _supa()
-    r = _checa(rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=20))
+    try:
+        r = rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=(5, 15))
+    except (rq.exceptions.ConnectionError, rq.exceptions.ReadTimeout):
+        # PATCH com o mesmo corpo e' idempotente: uma segunda tentativa, em conexao nova, e' segura
+        r = rq.patch(f"{url}/rest/v1/{q}", headers=_sh({"Prefer": prefer}), json=body, timeout=20)
+    r = _checa(r)
     return r.json() if (r.text or "").strip() and "representation" in prefer else None
 
 
@@ -825,6 +830,7 @@ def api_cadastro():
     posto = _uuid_ok(d.get("posto"))
     if not _limite_ok("cadastro:" + _ip(), 10, 3600):
         return _muitas()
+    etapa, t_ini = "consultar o CPF", time.time()
     try:
         existe = _cliente_por_cpf(cpf)
         if existe and existe.get("verificado_em"):
@@ -855,19 +861,31 @@ def api_cadastro():
             "empresa_origem": posto,
         }
         reg["verificado_em"] = None
+        etapa = "gravar o cadastro"
         if existe:
             # refaz o cadastro que ninguém confirmou (dados novos, senha nova)
             _spatch(f"oct_cashback_clientes?cpf=eq.{cpf}", {**reg, "token_versao": int(existe.get("token_versao") or 0) + 1})
         else:
-            _spost("oct_cashback_clientes", reg, prefer="return=minimal")
+            try:
+                _spost("oct_cashback_clientes", reg, prefer="return=minimal")
+            except (rq.exceptions.ConnectionError, rq.exceptions.ReadTimeout):
+                # sem resposta: o INSERT pode ter entrado. Confere antes de repetir (CPF e' unico: nunca duplica)
+                if not _cliente_por_cpf(cpf):
+                    _spost("oct_cashback_clientes", reg, prefer="return=minimal")
+        etapa = "ler o cadastro gravado"
         cli = _cliente_por_cpf(cpf)
         # a conta só passa a valer com o código enviado ao contato OFICIAL (auditoria #17/#48);
         # a entrada no cadastro do posto acontece na confirmação (api_cadastro_confirmar)
+        etapa = "enviar o código"
         ok, destino, origem, erro = _enviar_codigo(cli, "verificar")
         return jsonify({"ok": True, "verificar": True, "nome": nome, "destino": destino,
                         "contato_do_posto": origem == "posto", "erro_envio": None if ok else erro})
     except Exception as e:
-        return jsonify({"erro": "falha no cadastro: " + str(e)[:200]}), 500
+        # 15/10/2026: o erro do cliente vinha sem dizer ONDE; agora diz a etapa e o tempo, e o traceback vai p/ o log do Railway
+        import traceback
+        print(f"[cadastro] falha em '{etapa}' apos {time.time() - t_ini:.1f}s: {e!r}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        return jsonify({"erro": f"falha no cadastro (ao {etapa}): " + str(e)[:200]}), 500
 
 
 def _garantir_pessoa(empresa_id, cad, cli=None):
