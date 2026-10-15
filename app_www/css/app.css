@@ -349,3 +349,5 @@ img { display: block; max-width: 100%; }
 @keyframes sk { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
 
+/* botao de copiar: confirma no proprio botao (14/10/2026) */
+.btn-borda.copiado { background: #E6F4EA; border-color: #1E8E3E; color: #1E8E3E; font-weight: 700; }

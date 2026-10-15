@@ -244,10 +244,10 @@ function fatBoleto(f, b) {
   return `<div class="secao"><div class="secao-tit"><h2>Pagar</h2></div><div class="card" style="padding:14px 16px">
     ${b.pix ? `<div class="fat-pix"><div id="fat-pix-img" class="pix-img">…</div>
       <div><div style="font-weight:700">Pix</div><div class="s" style="color:var(--mut);font-size:.84rem">Abra o app do seu banco e leia o QR Code, ou copie o código.</div>
-      <button class="btn-borda" style="margin-top:8px" onclick="copiarTexto(${JSON.stringify(String(b.pix_copia_cola || ""))}, 'Código Pix copiado')">Copiar Pix copia e cola</button></div></div><hr class="fat-hr">` : ""}
+      <button class="btn-borda" style="margin-top:8px" data-copiar="${esc(b.pix_copia_cola || "")}" data-aviso="Código Pix copiado" onclick="copiarBtn(this)">Copiar Pix copia e cola</button></div></div><hr class="fat-hr">` : ""}
     ${linhaDig ? `<div style="font-weight:700">Boleto</div>
       <div class="linha-dig">${esc(linhaDig)}</div>
-      <button class="btn-borda" onclick="copiarTexto(${JSON.stringify(linhaDig)}, 'Linha digitável copiada')">Copiar linha digitável</button>`
+      <button class="btn-borda" data-copiar="${esc(linhaDig)}" data-aviso="Linha digitável copiada" onclick="copiarBtn(this)">Copiar linha digitável</button>`
       : '<div class="s" style="color:var(--mut)">O boleto desta fatura ainda está sendo preparado. Fale com o posto se precisar agora.</div>'}
   </div></div>`;
 }
@@ -261,19 +261,46 @@ async function fatPixCarregar(id) {
   } catch (e) { /* sem QR: o botão de copiar continua valendo */ }
 }
 
-function copiarTexto(txt, aviso) {
-  const ok = () => toast(aviso || "Copiado");
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(txt).then(ok, () => copiaAntiga(txt, ok)); return; }
-  } catch (e) { /* cai no método antigo */ }
-  copiaAntiga(txt, ok);
+// O texto vai num data-atributo (esc): colocar o codigo dentro do onclick="..." quebrava as aspas e o botao nao fazia nada.
+function copiarBtn(b) {
+  const orig = b.getAttribute("data-rot") || b.textContent;
+  b.setAttribute("data-rot", orig);
+  copiarTexto(b.getAttribute("data-copiar") || "", b.getAttribute("data-aviso") || "Copiado", () => {
+    b.textContent = "✓ Copiado";
+    b.classList.add("copiado");
+    setTimeout(() => { b.textContent = orig; b.classList.remove("copiado"); }, 2200);
+  });
 }
-function copiaAntiga(txt, ok) {
+
+function copiarTexto(txt, aviso, depois) {
+  const ok = () => { toast(aviso || "Copiado", 2600); if (depois) depois(); };
+  const falha = () => toast("Não consegui copiar. Toque e segure o código para copiar.", 4000);
+  // 1) API moderna (precisa ser chamada dentro do toque do usuario)
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(txt).then(ok, () => { copiaAntiga(txt) ? ok() : falha(); });
+      return;
+    }
+  } catch (e) { /* cai no metodo antigo */ }
+  copiaAntiga(txt) ? ok() : falha();
+}
+// iPhone/Safari: o textarea precisa estar editavel e com a selecao feita por faixa
+function copiaAntiga(txt) {
   const t = document.createElement("textarea");
-  t.value = txt; t.style.position = "fixed"; t.style.opacity = "0";
-  document.body.appendChild(t); t.select();
-  try { document.execCommand("copy"); ok(); } catch (e) { toast("Não consegui copiar. Selecione e copie manualmente."); }
+  t.value = txt;
+  t.setAttribute("readonly", "");
+  t.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px";
+  document.body.appendChild(t);
+  let feito = false;
+  try {
+    const sel = document.getSelection();
+    const salva = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null;
+    t.focus(); t.select(); t.setSelectionRange(0, txt.length);
+    feito = document.execCommand("copy");
+    if (salva && sel) { sel.removeAllRanges(); sel.addRange(salva); }
+  } catch (e) { feito = false; }
   t.remove();
+  return feito;
 }
 
 // ---------------------------------------------------------------- PDF e foto (link temporário)
@@ -340,7 +367,7 @@ async function pagarAlvo(corpo, rotulo) {
         pixCorpo(`<p style="color:var(--mut);margin:6px 0 10px;font-size:.9rem">${esc(rotulo)}: <b>${brl(s.valor)}</b>. Abra o app do seu banco, leia o QR Code ou use o Pix copia e cola. A baixa é automática.</p>
           <div class="fat-pix"><div class="pix-img" id="pix-qr">…</div></div>
           <p class="s" style="color:var(--mut);margin-top:10px;font-size:.84rem" id="pix-estado">Aguardando o pagamento…</p>
-          <button class="btn-borda" style="margin-top:8px" onclick="copiarTexto(${JSON.stringify(String(s.copia_cola || ""))}, 'Código Pix copiado')">Copiar Pix copia e cola</button>
+          <button class="btn-borda" style="margin-top:8px" data-copiar="${esc(s.copia_cola || "")}" data-aviso="Código Pix copiado" onclick="copiarBtn(this)">Copiar Pix copia e cola</button>
           <button class="btn sec" style="margin-top:8px" onclick="pixFecha()">Fechar</button>`);
         pixQr(id);
         _pix.timer = setInterval(async () => {
@@ -357,15 +384,15 @@ async function pagarAlvo(corpo, rotulo) {
             pixCorpo(`<p style="color:var(--mut);margin:8px 0 14px;font-size:.92rem">${esc(x.erro || "Este Pix não está mais disponível.")}</p>
               <button class="btn sec" onclick="pixFecha()">Fechar</button>`);
           }
-        }, 4000);
+        }, 1500);
         return;
       }
       if (s.status === "paga") { pixFecha(); toast("Este Pix já foi pago."); fatRecarregar(); return; }
       if (s.status === "erro" || s.status === "expirada") { pixFecha(); toast(s.erro || "Não consegui gerar o Pix agora."); return; }
-      if (tentativas > 25) { pixFecha(); toast("O Pix está demorando para ser gerado. Tente de novo em instantes."); return; }
-      setTimeout(passo, 1500);
+      if (tentativas > 45) { pixFecha(); toast("O Pix está demorando para ser gerado. Tente de novo em instantes."); return; }
+      setTimeout(passo, 700);
     };
-    setTimeout(passo, 1200);
+    setTimeout(passo, 500);
   } catch (e) { pixFecha(); toast("Não consegui gerar o Pix agora."); }
 }
 
