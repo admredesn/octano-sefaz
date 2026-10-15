@@ -32,7 +32,10 @@ Rotas (todas JSON, Authorization: Bearer <token do login>):
   GET  /empresas/api/faturas/<id>/boleto                  estado do pedido de boleto
 Multa e juros: parâmetros do posto (Parâmetros › Cobrança): cobranca_multa_pct e cobranca_juros_mes_pct.
 """
+import base64
 import datetime as dt
+import hashlib
+import hmac
 import io
 import re
 import time
@@ -107,10 +110,23 @@ def _hora_br(iso_ts):
         return ""
 
 
+def _quem(cli):
+    """Identificador de quem esta' logado (CPF ou CNPJ) para limites de uso."""
+    return cli.get("cpf") or ("cnpj" + str(cli.get("cnpj") or ""))
+
+
+def _quem_mask(cli):
+    """Texto mascarado de quem esta' logado, para a trilha e o autor dos pedidos."""
+    if cli.get("cpf"):
+        return cp._cpf_mascara(cli["cpf"])
+    c = str(cli.get("cnpj") or "")
+    return ("CNPJ " + c[:2] + ".***.***/" + c[8:12] + "-**") if len(c) == 14 else "CNPJ"
+
+
 def _log(cli, empresa, acao, detalhe=None):
-    print(f"[empresas] cpf {cp._cpf_mascara(cli['cpf'])} {empresa[:8]} {acao}")
+    print(f"[empresas] {_quem_mask(cli)} {empresa[:8]} {acao}")
     try:
-        cp._spost("oct_portal_empresas_log", {"pessoa_id": empresa, "cpf_mascara": cp._cpf_mascara(cli["cpf"]),
+        cp._spost("oct_portal_empresas_log", {"pessoa_id": empresa, "cpf_mascara": _quem_mask(cli),
                                               "acao": acao, "detalhe": detalhe or {}}, prefer="return=minimal")
     except Exception:
         pass                                  # trilha é "melhor esforço": nunca derruba a ação
@@ -162,6 +178,8 @@ _ACESSO = {}
 
 def _empresas(cli):
     """Empresas (pessoa PJ de um posto) que este CPF administra: colaborador com 'vê as faturas' e portal ligado."""
+    if cli.get("cnpj"):
+        return _empresas_do_cnpj(cli["cnpj"]), (cli.get("nome") or "")
     cpf = cli["cpf"]
     c = _ACESSO.get(cpf)
     if c and time.time() - c[0] < 20:
@@ -203,8 +221,191 @@ def _acesso(cli, empresa_id):
 
 
 def _entrada():
+    tok = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
+    cnpj = _token_cnpj_validar(tok) if tok else None
+    if cnpj:
+        emps = _empresas_do_cnpj(cnpj)
+        return {"cpf": "", "cnpj": cnpj, "nome": (emps[0]["nome"] if emps else "")}, None
     cli, erro = cf._cliente_ou_401()
     return cli, erro
+
+
+# ------------------------------------------------------------------ ENTRAR POR CNPJ (codigo por WhatsApp)
+# 15/10/2026 (Ronan: "no web empresa so da opcao de entrar com CPF e as empresas o cadastro e CNPJ"): a empresa entra com o
+# CNPJ; o codigo de 6 digitos vai por WhatsApp para o FINANCEIRO cadastrado (colaboradores "ve as faturas"; sem nenhum, o
+# WhatsApp da propria empresa). Sem senha nova para guardar. O CPF + senha do app segue valendo.
+CNPJ_JANELA_S = 900                 # o codigo vale ate' 2 janelas (15 a 30 min)
+CNPJ_SESSAO_S = 12 * 3600
+CNPJ_FALHAS_MAX = 5                 # erros de codigo por CNPJ em 15 min antes de travar
+
+
+def _cnpj_ok(c):
+    c = cp._so_digitos(c)
+    if len(c) != 14 or len(set(c)) == 1:
+        return False
+    def dig(base, pesos):
+        r = sum(int(a) * b for a, b in zip(base, pesos)) % 11
+        return "0" if r < 2 else str(11 - r)
+    d1 = dig(c[:12], [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2])
+    d2 = dig(c[:12] + d1, [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2])
+    return c[12:] == d1 + d2
+
+
+def _cnpj_formatado(c):
+    return f"{c[:2]}.{c[2:5]}.{c[5:8]}/{c[8:12]}-{c[12:]}"
+
+
+def _codigo_cnpj(cnpj, janela):
+    h = hmac.new(cp._chave("empresas-cnpj-codigo"), f"{cnpj}|{janela}".encode(), hashlib.sha256).hexdigest()
+    return "%06d" % (int(h[:12], 16) % 1000000)
+
+
+def _token_cnpj_gerar(cnpj):
+    corpo = f"e1|{cnpj}|{int(time.time()) + CNPJ_SESSAO_S}"
+    ass = hmac.new(cp._chave("empresas-cnpj-sessao"), corpo.encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.urlsafe_b64encode(f"{corpo}|{ass}".encode()).decode()
+
+
+def _token_cnpj_validar(tok):
+    """CNPJ (14 digitos) ou None."""
+    try:
+        corpo = base64.urlsafe_b64decode(tok.encode()).decode()
+        p = corpo.split("|")
+        if len(p) != 4 or p[0] != "e1" or int(p[2]) < time.time():
+            return None
+        esperado = hmac.new(cp._chave("empresas-cnpj-sessao"), f"e1|{p[1]}|{p[2]}".encode(), hashlib.sha256).hexdigest()[:32]
+        return p[1] if hmac.compare_digest(p[3], esperado) and len(p[1]) == 14 else None
+    except Exception:
+        return None
+
+
+_ACESSO_CNPJ = {}
+
+
+def _empresas_do_cnpj(cnpj):
+    """Empresas (pessoa de um posto) com este CNPJ e o portal ligado."""
+    c = _ACESSO_CNPJ.get(cnpj)
+    if c and time.time() - c[0] < 20:
+        return c[1]
+    out = []
+    try:
+        emps = cp._sget("oct_pessoas?or=(documento.eq.%s,documento.eq.%s)&select=id,nome,documento,empresa_id,portal_empresas,ativo,"
+                        "limite_nota_prazo&limit=50" % (cnpj, _cnpj_formatado(cnpj)))
+    except Exception:
+        emps = []
+    for e in emps or []:
+        if e.get("portal_empresas") is True and e.get("ativo") is not False:
+            nome_posto = ""
+            try:
+                nome_posto = cf._nome_empresa(e["empresa_id"])
+            except Exception:
+                pass
+            out.append({"id": e["id"], "nome": e.get("nome") or "", "documento": e.get("documento") or "",
+                        "posto_id": e["empresa_id"], "posto": nome_posto, "limite": _num(e.get("limite_nota_prazo"))})
+    _ACESSO_CNPJ[cnpj] = (time.time(), out)
+    return out
+
+
+def _fone_codigo(p):
+    for k in ("whatsapp", "telefone"):
+        d = cp._so_digitos(p.get(k))
+        if d.startswith("55") and len(d) in (12, 13):
+            d = d[2:]
+        if len(d) in (10, 11):
+            return d
+    return ""
+
+
+def _falhas_recentes(ids, desde_iso):
+    try:
+        rows = cp._sget("oct_portal_empresas_log?pessoa_id=in.(%s)&acao=eq.login_cnpj_falha&criado_em=gte.%s&select=id&limit=50"
+                        % (",".join(ids), desde_iso))
+        return len(rows or [])
+    except Exception:
+        return 0
+
+
+_RESP_PEDIR = {"ok": True, "aviso": "Se este CNPJ tem acesso ao Portal Empresas, enviamos um código por WhatsApp para o "
+                                    "financeiro cadastrado. Ele vale por 15 minutos."}
+
+
+@bp_empresas.route("/empresas/api/cnpj/pedir", methods=["POST"])
+def api_cnpj_pedir():
+    d = request.get_json(silent=True) or {}
+    cnpj = cp._so_digitos(d.get("cnpj"))
+    if not _cnpj_ok(cnpj):
+        return jsonify({"erro": "CNPJ inválido. Confira os 14 números."}), 400
+    if not cp._limite_ok("cnpjped:" + cp._ip(), 15, 3600) or not cp._limite_ok("cnpjped:" + cnpj, 6, 3600):
+        return cp._muitas("Muitos pedidos de código. Espere alguns minutos e tente de novo.")
+    emps = _empresas_do_cnpj(cnpj)
+    if not emps:
+        return jsonify(_RESP_PEDIR), 200, SEM_CACHE          # resposta igual: nao revela se o CNPJ existe
+    ids = [e["id"] for e in emps]
+    fones, vistos = [], set()
+    try:
+        fin = cp._sget("oct_pessoas?frota_empresa_id=in.(%s)&app_ve_faturas=eq.true&select=whatsapp,telefone&limit=20" % ",".join(ids)) or []
+    except Exception:
+        fin = []
+    try:
+        proprias = cp._sget("oct_pessoas?id=in.(%s)&select=whatsapp,telefone&limit=20" % ",".join(ids)) or []
+    except Exception:
+        proprias = []
+    for p in (fin or proprias):
+        f = _fone_codigo(p)
+        if f and f not in vistos:
+            vistos.add(f)
+            fones.append(f)
+    codigo = _codigo_cnpj(cnpj, int(time.time()) // CNPJ_JANELA_S)
+    msg = (f"🔐 *Portal Empresas — Rede SN*\n\nSeu código de acesso é: *{codigo}*\n\n"
+           "Ele vale por 15 minutos. Não passe este código para ninguém. Se você não pediu, ignore esta mensagem.")
+    enviados = 0
+    for f in fones[:5]:
+        try:
+            cp._wpp_texto(f, msg)
+            enviados += 1
+        except Exception:
+            pass
+    print(f"[empresas] codigo CNPJ {cnpj[:8]}**** pedido: {enviados}/{len(fones)} WhatsApp enviado(s)")
+    try:
+        cp._spost("oct_portal_empresas_log", {"pessoa_id": ids[0], "cpf_mascara": "CNPJ " + cnpj[:8] + "******",
+                                              "acao": "login_cnpj_pedido", "detalhe": {"enviados": enviados, "destinos": len(fones)}},
+                  prefer="return=minimal")
+    except Exception:
+        pass
+    return jsonify(_RESP_PEDIR), 200, SEM_CACHE
+
+
+@bp_empresas.route("/empresas/api/cnpj/entrar", methods=["POST"])
+def api_cnpj_entrar():
+    d = request.get_json(silent=True) or {}
+    cnpj = cp._so_digitos(d.get("cnpj"))
+    codigo = cp._so_digitos(d.get("codigo"))
+    if not _cnpj_ok(cnpj) or len(codigo) != 6:
+        return jsonify({"erro": "Informe o CNPJ e o código de 6 números."}), 400
+    if not cp._limite_ok("cnpjent:" + cp._ip(), 30, 3600):
+        return cp._muitas()
+    emps = _empresas_do_cnpj(cnpj)
+    if not emps:
+        return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
+    ids = [e["id"] for e in emps]
+    desde = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=CNPJ_JANELA_S)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if _falhas_recentes(ids, desde) >= CNPJ_FALHAS_MAX:
+        return cp._muitas("Muitas tentativas erradas. Peça um novo código em alguns minutos.")
+    j = int(time.time()) // CNPJ_JANELA_S
+    ok = any(hmac.compare_digest(codigo, _codigo_cnpj(cnpj, x)) for x in (j, j - 1))
+    if not ok:
+        try:
+            cp._spost("oct_portal_empresas_log", {"pessoa_id": ids[0], "cpf_mascara": "CNPJ " + cnpj[:8] + "******",
+                                                  "acao": "login_cnpj_falha", "detalhe": {}}, prefer="return=minimal")
+        except Exception:
+            pass
+        return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
+    try:
+        cp._spost("oct_portal_empresas_log", {"pessoa_id": ids[0], "cpf_mascara": "CNPJ " + cnpj[:8] + "******",
+                                              "acao": "login_cnpj", "detalhe": {}}, prefer="return=minimal")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "token": _token_cnpj_gerar(cnpj), "validade_seg": CNPJ_SESSAO_S}), 200, SEM_CACHE
 
 
 # ------------------------------------------------------------------ consumo (vendas a prazo da empresa)
@@ -576,7 +777,7 @@ def _cadastrar_placa(emp, cli, placa, veiculo, motorista_id):
     pn = _norm_placa(placa)
     ja = cp._sget(f"oct_frota_veiculos?pessoa_id=eq.{emp['id']}&select=*&limit=1000")
     atual = next((v for v in ja or [] if _norm_placa(v.get("placa")) == pn), None)
-    autor = "portal " + cp._cpf_mascara(cli["cpf"])
+    autor = "portal " + _quem_mask(cli)
     if atual:
         corpo = {}
         if veiculo and veiculo != (atual.get("veiculo") or ""):
@@ -672,7 +873,7 @@ def api_placa_ativo(vid):
         return jsonify({"erro": "Placa não encontrada."}), 404
     pn = _norm_placa(v.get("placa"))
     quer = d.get("ativo") is True
-    autor = "portal " + cp._cpf_mascara(cli["cpf"])
+    autor = "portal " + _quem_mask(cli)
     agora = dt.datetime.now(dt.timezone.utc).isoformat()
     if _bloqueada_pelo_posto(emp, pn):
         return jsonify({"erro": "Esta placa está bloqueada pelo posto. Fale com o posto para liberar."}), 409
@@ -1071,7 +1272,7 @@ def api_fatura_pix(fid):
         return jsonify({"erro": "Não há valor a pagar nesta fatura."}), 409
     if not cf._pagamento_app_ligado(emp["posto_id"]):
         return jsonify({"erro": "O pagamento por Pix ainda não está habilitado neste posto. Use o boleto ou pague no posto."}), 503
-    if not cp._limite_ok("pixemp:" + cli["cpf"], 30, 3600):
+    if not cp._limite_ok("pixemp:" + _quem(cli), 30, 3600):
         return cp._muitas("Muitos pedidos de Pix seguidos. Espere um pouco.")
     ab = cp._sget(f"oct_pix_cobrancas?fatura_id=eq.{f['id']}&status=in.(pedido,criando,ativa)&order=id.desc&limit=1&select=id,status,expira_em,valor")
     if ab:
@@ -1081,7 +1282,7 @@ def api_fatura_pix(fid):
             return jsonify({"ok": True, "id": a["id"], "status": a["status"], "valor": _num(a.get("valor"), valor)}), 200, SEM_CACHE
     nova = cp._spost("oct_pix_cobrancas", {"empresa_id": emp["posto_id"], "cliente_id": emp["id"], "fatura_id": f["id"], "valor": valor,
                                            "status": "pedido", "origem": "portal_empresas",
-                                           "criado_por": "portal " + cp._cpf_mascara(cli["cpf"])})
+                                           "criado_por": "portal " + _quem_mask(cli)})
     row = (nova or [{}])[0]
     _log(cli, emp["id"], "pix", {"fatura": f.get("numero"), "valor": valor, "multa": enc["multa"], "juros": enc["juros"]})
     return jsonify({"ok": True, "id": row.get("id"), "status": "pedido", "valor": valor}), 200, SEM_CACHE
@@ -1162,7 +1363,7 @@ def api_fatura_boleto_novo(fid):
     conta = (cp._sget(f"oct_sicoob_contas?empresa_id=eq.{emp['posto_id']}&ativo=eq.true&select=cobranca_ativa,numero_cliente&limit=1") or [{}])[0]
     if not conta.get("cobranca_ativa") or not conta.get("numero_cliente"):
         return jsonify({"erro": "A emissão de boleto não está habilitada neste posto. Use o Pix ou fale com o posto."}), 503
-    if not cp._limite_ok("bolemp:" + cli["cpf"], 30, 3600):
+    if not cp._limite_ok("bolemp:" + _quem(cli), 30, 3600):
         return cp._muitas("Muitos pedidos de boleto seguidos. Espere um pouco.")
     ult = _boleto_do_pedido(f["id"])
     agora = dt.datetime.now(dt.timezone.utc)
@@ -1176,7 +1377,7 @@ def api_fatura_boleto_novo(fid):
     multa_pct, juros_pct = _params_cobranca(emp["posto_id"])
     pedido = {"empresa_id": emp["posto_id"], "fatura_id": f["id"], "cliente_id": emp["id"], "cliente_nome": f.get("cliente_nome") or emp["nome"],
               "valor": valor, "vencimento": hoje.isoformat(), "status": "pendente",
-              "criado_por": "portal " + cp._cpf_mascara(cli["cpf"]), "origem": "portal_empresas",
+              "criado_por": "portal " + _quem_mask(cli), "origem": "portal_empresas",
               "valor_emitir": valor, "vencimento_emitir": hoje.isoformat(), "multa_pct": multa_pct, "juros_mes_pct": juros_pct,
               "substitui_nosso_numero": (atual[0].get("nosso_numero") if atual else None)}
     try:
@@ -1288,8 +1489,8 @@ def _msg_acesso(nome_pessoa, nome_empresa):
     return (f"Olá{', ' + pri if pri else ''}! A *{nome_empresa}* agora tem acesso ao *Portal Empresas* da Rede SN: "
             "placas, consumo de cada abastecimento com a foto do cupom assinado, faturas, Pix e boleto.\n\n"
             f"🔗 {LINK_PORTAL}\n\n"
-            "Entre com o seu *CPF* e a *senha do app Postos SN*. "
-            f"Ainda não tem conta no app? Crie em {LINK_APP} (use o mesmo CPF).")
+            "Para entrar, informe o *CNPJ da empresa*: o código de acesso chega por WhatsApp para o financeiro. "
+            f"(Quem já usa o app Postos SN também entra com o *CPF* e a senha do app: {LINK_APP})")
 
 
 @bp_empresas.route("/empresas/admin/enviar-acesso", methods=["POST"])

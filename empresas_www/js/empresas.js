@@ -1,6 +1,6 @@
 // ============================================================
 // Portal Empresas · Postos SN (14/10/2026). JS puro, sem build.
-// Servidor: empresas_portal.py (/empresas/api/*). Login: o mesmo do app (/cashback/api/login).
+// Servidor: empresas_portal.py (/empresas/api/*). Login: CNPJ + codigo por WhatsApp (/empresas/api/cnpj/*) ou CPF + senha do app (/cashback/api/login).
 // Regra: nada vindo do servidor entra no HTML sem esc(); nenhum dado vai dentro de onclick="…"
 // (o bug do botão "Copiar" do app): os botões levam data-acao / data-id e há UM tratador de clique.
 // ============================================================
@@ -112,27 +112,65 @@ function telaEntrar(msg) {
   raiz().innerHTML = `<div class="entrar"><form class="caixa" id="f-entrar" autocomplete="on">
     <div class="marca" style="color:var(--azul)"><div class="logo" style="background:var(--azul)"><b style="color:#fff">SN</b><i></i></div>
       <div><div class="nome" style="color:var(--azul)">Postos SN</div><div class="sub">EMPRESAS</div></div></div>
-    <div><h1 style="font-size:28px">Entrar</h1><div class="mut" style="margin-top:4px">Use o mesmo CPF e a mesma senha do aplicativo.</div></div>
+    <div><h1 style="font-size:28px">Entrar</h1><div class="mut" id="e-dica" style="margin-top:4px">Informe o CNPJ da empresa. O código de acesso chega por WhatsApp.</div></div>
     ${msg ? `<div class="erro" role="alert">${esc(msg)}</div>` : ""}
-    <label class="campo">CPF<input class="entrada" id="e-cpf" inputmode="numeric" autocomplete="username" placeholder="000.000.000-00" maxlength="14"></label>
-    <label class="campo">Senha<input class="entrada" id="e-senha" type="password" autocomplete="current-password"></label>
-    <button class="btn bloco" type="submit" id="e-ok">Entrar</button>
-    <div class="mut" style="font-size:13.5px;line-height:19px">Esqueceu a senha? Use "Esqueci minha senha" na tela de entrada do aplicativo Postos SN.
-      O acesso a este portal é liberado pelo posto para o financeiro da empresa.</div>
+    <label class="campo">CNPJ da empresa <span class="mut">(ou CPF)</span><input class="entrada" id="e-doc" inputmode="numeric" autocomplete="username" placeholder="00.000.000/0000-00" maxlength="18"></label>
+    <label class="campo" id="b-senha" style="display:none">Senha do aplicativo<input class="entrada" id="e-senha" type="password" autocomplete="current-password"></label>
+    <label class="campo" id="b-codigo" style="display:none">Código de 6 números<input class="entrada" id="e-codigo" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" maxlength="6"></label>
+    <div class="mut" id="e-aviso" style="font-size:13.5px;line-height:19px;display:none"></div>
+    <button class="btn bloco" type="submit" id="e-ok">Receber código por WhatsApp</button>
+    <button class="btn bloco" type="button" id="e-reenviar" style="display:none;background:transparent;color:var(--azul);border:1px solid var(--azul)">Reenviar código</button>
+    <div class="mut" style="font-size:13.5px;line-height:19px">O acesso é liberado pelo posto para o financeiro da empresa.
+      Quem já usa o aplicativo Postos SN também pode entrar com o <b>CPF</b> e a senha do aplicativo.</div>
   </form></div>`;
-  const cpf = document.getElementById("e-cpf");
-  cpf.addEventListener("input", () => {
-    const d = cpf.value.replace(/\D/g, "").slice(0, 11);
-    cpf.value = d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+  const doc = document.getElementById("e-doc"), ok = document.getElementById("e-ok");
+  let passo = "doc";                    // doc -> (codigo) ; CPF: doc + senha
+  const modo = () => (doc.value.replace(/\D/g, "").length > 11 ? "cnpj" : (doc.value.replace(/\D/g, "").length === 11 ? "cpf" : "doc"));
+  const ajusta = () => {
+    const m = modo();
+    document.getElementById("b-senha").style.display = m === "cpf" ? "" : "none";
+    document.getElementById("e-dica").textContent = m === "cpf" ? "Use a mesma senha do aplicativo." : "Informe o CNPJ da empresa. O código de acesso chega por WhatsApp.";
+    if (passo === "doc") ok.textContent = m === "cpf" ? "Entrar" : "Receber código por WhatsApp";
+  };
+  doc.addEventListener("input", () => {
+    let d = doc.value.replace(/\D/g, "").slice(0, 14);
+    if (d.length <= 11) doc.value = d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
+    else doc.value = d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
+    if (passo === "codigo") { passo = "doc"; document.getElementById("b-codigo").style.display = "none"; document.getElementById("e-reenviar").style.display = "none"; document.getElementById("e-aviso").style.display = "none"; }
+    ajusta();
   });
+  const pedir = async () => {
+    const cnpj = doc.value.replace(/\D/g, "");
+    ok.disabled = true; ok.textContent = "Enviando…";
+    const r = await api("/empresas/api/cnpj/pedir", { cnpj });
+    ok.disabled = false;
+    if (!r.ok) { ok.textContent = "Receber código por WhatsApp"; telaEntrar(r.erro || "Não consegui pedir o código."); return false; }
+    passo = "codigo";
+    document.getElementById("b-codigo").style.display = "";
+    document.getElementById("e-reenviar").style.display = "";
+    const av = document.getElementById("e-aviso"); av.style.display = ""; av.textContent = r.aviso || "";
+    ok.textContent = "Entrar";
+    document.getElementById("e-codigo").focus();
+    return true;
+  };
+  document.getElementById("e-reenviar").addEventListener("click", pedir);
   document.getElementById("f-entrar").addEventListener("submit", async e => {
     e.preventDefault();
-    const b = document.getElementById("e-ok");
-    b.disabled = true; b.textContent = "Entrando…";
-    const r = await api("/cashback/api/login", { cpf: cpf.value.replace(/\D/g, ""), senha: document.getElementById("e-senha").value });
+    const m = modo();
+    if (m === "doc") { aviso("Informe o CNPJ da empresa (14 números) ou o CPF (11 números).", 3600); return; }
+    if (m === "cpf") {
+      ok.disabled = true; ok.textContent = "Entrando…";
+      const r = await api("/cashback/api/login", { cpf: doc.value.replace(/\D/g, ""), senha: document.getElementById("e-senha").value });
+      if (r.token) { S.token = r.token; LS.set("psn_emp_token", r.token); await iniciar(); return; }
+      telaEntrar(r.verificar ? "Confirme a sua conta primeiro: entre uma vez no aplicativo Postos SN e informe o código recebido." : (r.erro || "Não consegui entrar."));
+      return;
+    }
+    if (passo === "doc") { await pedir(); return; }
+    ok.disabled = true; ok.textContent = "Entrando…";
+    const r = await api("/empresas/api/cnpj/entrar", { cnpj: doc.value.replace(/\D/g, ""), codigo: document.getElementById("e-codigo").value.replace(/\D/g, "") });
     if (r.token) { S.token = r.token; LS.set("psn_emp_token", r.token); await iniciar(); return; }
-    b.disabled = false; b.textContent = "Entrar";
-    telaEntrar(r.verificar ? "Confirme a sua conta primeiro: entre uma vez no aplicativo Postos SN e informe o código recebido." : (r.erro || "Não consegui entrar."));
+    ok.disabled = false; ok.textContent = "Entrar";
+    aviso(r.erro || "Código incorreto ou vencido. Peça um novo.", 4200);
   });
 }
 function sair(silencioso) {
