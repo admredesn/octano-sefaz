@@ -163,15 +163,25 @@ def _checa(r):
 
 
 _SESS = None
+_SESS_USO = 0.0
+_SESS_OCIOSO_S = 20          # pool parado por mais que isso e' descartado (a conexao pode ter morrido sem aviso)
 
 
 def _sessao():
-    """Sessao HTTP com conexoes reaproveitadas (keep-alive): cada consulta ao banco deixa de pagar um TLS novo."""
-    global _SESS
+    """Sessao HTTP com conexoes reaproveitadas (keep-alive): cada consulta ao banco deixa de pagar um TLS novo.
+    15/10/2026 (cadastro do app: 'Read timed out (read timeout=20)'): conexao que fica parada algum tempo pode ser
+    derrubada no caminho (NAT/balanceador) SEM aviso; a 1a consulta depois da pausa ficava esperando os 20 s inteiros.
+    Por isso: pool ocioso ha' mais de _SESS_OCIOSO_S e' trocado por um novo (o pool aquecido de quem esta' usando
+    seguido continua valendo) e o _sget repete numa conexao nova se der timeout de leitura."""
+    global _SESS, _SESS_USO
+    agora = time.monotonic()
+    if _SESS is not None and agora - _SESS_USO > _SESS_OCIOSO_S:
+        _SESS = None                                     # o coletor de lixo fecha os sockets velhos
     if _SESS is None:
         s = rq.Session()
         s.mount("https://", rq.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16))
         _SESS = s
+    _SESS_USO = agora
     return _SESS
 
 
@@ -179,9 +189,10 @@ def _sget(q):
     url, _ = _supa()
     u = f"{url}/rest/v1/{q}"
     try:
-        r = _sessao().get(u, headers=_sh(), timeout=20)
-    except (rq.exceptions.ConnectionError, rq.exceptions.ChunkedEncodingError):
-        r = rq.get(u, headers=_sh(), timeout=20)          # conexao do pool morreu (ocioso): tenta de novo, nova
+        r = _sessao().get(u, headers=_sh(), timeout=(5, 10))
+    except (rq.exceptions.ConnectionError, rq.exceptions.ChunkedEncodingError, rq.exceptions.ReadTimeout):
+        # conexao do pool morreu (ocioso) ou ficou muda: tenta de novo numa conexao NOVA (GET e' idempotente)
+        r = rq.get(u, headers=_sh(), timeout=20)
     return _checa(r).json()
 
 
