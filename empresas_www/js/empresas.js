@@ -1,6 +1,6 @@
 // ============================================================
 // Portal Empresas · Postos SN (14/10/2026). JS puro, sem build.
-// Servidor: empresas_portal.py (/empresas/api/*). Login: CNPJ + codigo por WhatsApp (/empresas/api/cnpj/*) ou CPF + senha do app (/cashback/api/login).
+// Servidor: empresas_portal.py (/empresas/api/*). Login: CNPJ + senha da empresa (1o acesso: codigo por WhatsApp para criar a senha; /empresas/api/cnpj/*) ou CPF + senha do app (/cashback/api/login).
 // Regra: nada vindo do servidor entra no HTML sem esc(); nenhum dado vai dentro de onclick="…"
 // (o bug do botão "Copiar" do app): os botões levam data-acao / data-id e há UM tratador de clique.
 // ============================================================
@@ -112,66 +112,97 @@ function telaEntrar(msg) {
   raiz().innerHTML = `<div class="entrar"><form class="caixa" id="f-entrar" autocomplete="on">
     <div class="marca" style="color:var(--azul)"><div class="logo" style="background:var(--azul)"><b style="color:#fff">SN</b><i></i></div>
       <div><div class="nome" style="color:var(--azul)">Postos SN</div><div class="sub">EMPRESAS</div></div></div>
-    <div><h1 style="font-size:28px">Entrar</h1><div class="mut" id="e-dica" style="margin-top:4px">Informe o CNPJ da empresa. O código de acesso chega por WhatsApp.</div></div>
+    <div><h1 style="font-size:28px" id="e-titulo">Entrar</h1><div class="mut" id="e-dica" style="margin-top:4px">Informe o CNPJ da empresa e a senha.</div></div>
     ${msg ? `<div class="erro" role="alert">${esc(msg)}</div>` : ""}
-    <label class="campo">CNPJ da empresa <span class="mut">(ou CPF)</span><input class="entrada" id="e-doc" inputmode="numeric" autocomplete="username" placeholder="00.000.000/0000-00" maxlength="18"></label>
-    <label class="campo" id="b-senha" style="display:none">Senha do aplicativo<input class="entrada" id="e-senha" type="password" autocomplete="current-password"></label>
-    <label class="campo" id="b-codigo" style="display:none">Código de 6 números<input class="entrada" id="e-codigo" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" maxlength="6"></label>
+    <label class="campo">CNPJ da empresa <span class="mut">(ou CPF do app)</span><input class="entrada" id="e-doc" inputmode="numeric" autocomplete="username" placeholder="00.000.000/0000-00" maxlength="18"></label>
+    <label class="campo" id="b-senha">Senha<input class="entrada" id="e-senha" type="password" autocomplete="current-password"></label>
+    <label class="campo" id="b-codigo" style="display:none">Código recebido por WhatsApp<input class="entrada" id="e-codigo" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" maxlength="6"></label>
+    <label class="campo" id="b-nova" style="display:none">Crie a senha da empresa <span class="mut">(mínimo 6 caracteres)</span><input class="entrada" id="e-nova" type="password" autocomplete="new-password"></label>
+    <label class="campo" id="b-nova2" style="display:none">Repita a senha<input class="entrada" id="e-nova2" type="password" autocomplete="new-password"></label>
     <div class="mut" id="e-aviso" style="font-size:13.5px;line-height:19px;display:none"></div>
-    <button class="btn bloco" type="submit" id="e-ok">Receber código por WhatsApp</button>
-    <button class="btn bloco" type="button" id="e-reenviar" style="display:none;background:transparent;color:var(--azul);border:1px solid var(--azul)">Reenviar código</button>
-    <div class="mut" style="font-size:13.5px;line-height:19px">O acesso é liberado pelo posto para o financeiro da empresa.
-      Quem já usa o aplicativo Postos SN também pode entrar com o <b>CPF</b> e a senha do aplicativo.</div>
+    <button class="btn bloco" type="submit" id="e-ok">Entrar</button>
+    <button class="btn bloco" type="button" id="e-primeiro" style="background:transparent;color:var(--azul);border:1px solid var(--azul)">Primeiro acesso ou esqueci a senha</button>
+    <button class="btn bloco" type="button" id="e-voltar" style="display:none;background:transparent;color:var(--azul);border:1px solid var(--azul)">Voltar</button>
+    <div class="mut" style="font-size:13.5px;line-height:19px">O acesso é liberado pelo posto para o financeiro da empresa. No primeiro acesso, o código chega por
+      WhatsApp para o financeiro cadastrado e a empresa cria a sua senha. Quem já usa o aplicativo Postos SN também entra com o <b>CPF</b> e a senha do aplicativo.</div>
   </form></div>`;
-  const doc = document.getElementById("e-doc"), ok = document.getElementById("e-ok");
-  let passo = "doc";                    // doc -> (codigo) ; CPF: doc + senha
-  const modo = () => (doc.value.replace(/\D/g, "").length > 11 ? "cnpj" : (doc.value.replace(/\D/g, "").length === 11 ? "cpf" : "doc"));
-  const ajusta = () => {
-    const m = modo();
-    document.getElementById("b-senha").style.display = m === "cpf" ? "" : "none";
-    document.getElementById("e-dica").textContent = m === "cpf" ? "Use a mesma senha do aplicativo." : "Informe o CNPJ da empresa. O código de acesso chega por WhatsApp.";
-    if (passo === "doc") ok.textContent = m === "cpf" ? "Entrar" : "Receber código por WhatsApp";
+  const $ = id => document.getElementById(id);
+  const doc = $("e-doc"), ok = $("e-ok");
+  let passo = "login";                 // login | codigo (primeiro acesso / esqueci) | so-codigo (servidor sem senha habilitada)
+  const dig = () => doc.value.replace(/\D/g, "");
+  const ehCpf = () => dig().length === 11;
+  const mostra = (id, v) => { $(id).style.display = v ? "" : "none"; };
+  const tela = () => {
+    const cnpjMode = dig().length > 11, rec = passo === "codigo" || passo === "so-codigo";
+    mostra("b-senha", !rec);
+    mostra("b-codigo", rec);
+    mostra("b-nova", passo === "codigo"); mostra("b-nova2", passo === "codigo");
+    mostra("e-primeiro", !rec && cnpjMode); mostra("e-voltar", rec);
+    mostra("e-aviso", rec);
+    $("e-titulo").textContent = passo === "codigo" ? "Criar a senha" : (passo === "so-codigo" ? "Entrar com o código" : "Entrar");
+    $("e-dica").textContent = rec ? "Digite o código que chegou por WhatsApp" + (passo === "codigo" ? " e crie a senha da empresa." : ".")
+      : (ehCpf() ? "Use a mesma senha do aplicativo." : "Informe o CNPJ da empresa e a senha.");
+    ok.textContent = passo === "codigo" ? "Salvar senha e entrar" : "Entrar";
   };
   doc.addEventListener("input", () => {
-    let d = doc.value.replace(/\D/g, "").slice(0, 14);
+    const d = doc.value.replace(/\D/g, "").slice(0, 14);
     if (d.length <= 11) doc.value = d.replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d)/, "$1.$2").replace(/(\d{3})(\d{1,2})$/, "$1-$2");
     else doc.value = d.replace(/^(\d{2})(\d)/, "$1.$2").replace(/^(\d{2})\.(\d{3})(\d)/, "$1.$2.$3").replace(/\.(\d{3})(\d)/, ".$1/$2").replace(/(\d{4})(\d)/, "$1-$2");
-    if (passo === "codigo") { passo = "doc"; document.getElementById("b-codigo").style.display = "none"; document.getElementById("e-reenviar").style.display = "none"; document.getElementById("e-aviso").style.display = "none"; }
-    ajusta();
+    if (passo !== "login") passo = "login";
+    tela();
   });
-  const pedir = async () => {
-    const cnpj = doc.value.replace(/\D/g, "");
-    ok.disabled = true; ok.textContent = "Enviando…";
-    const r = await api("/empresas/api/cnpj/pedir", { cnpj });
-    ok.disabled = false;
-    if (!r.ok) { ok.textContent = "Receber código por WhatsApp"; telaEntrar(r.erro || "Não consegui pedir o código."); return false; }
-    passo = "codigo";
-    document.getElementById("b-codigo").style.display = "";
-    document.getElementById("e-reenviar").style.display = "";
-    const av = document.getElementById("e-aviso"); av.style.display = ""; av.textContent = r.aviso || "";
-    ok.textContent = "Entrar";
-    document.getElementById("e-codigo").focus();
-    return true;
+  const pedirCodigo = async (modo) => {
+    if (dig().length !== 14) { aviso("Informe o CNPJ da empresa (14 números).", 3600); return; }
+    ok.disabled = true; const t0 = ok.textContent; ok.textContent = "Enviando…";
+    const r = await api("/empresas/api/cnpj/pedir", { cnpj: dig() });
+    ok.disabled = false; ok.textContent = t0;
+    if (!r.ok) { telaEntrar(r.erro || "Não consegui pedir o código."); return; }
+    passo = modo;
+    tela();
+    $("e-aviso").textContent = r.aviso || "";
+    $("e-codigo").focus();
   };
-  document.getElementById("e-reenviar").addEventListener("click", pedir);
-  document.getElementById("f-entrar").addEventListener("submit", async e => {
+  $("e-primeiro").addEventListener("click", () => pedirCodigo("codigo"));
+  $("e-voltar").addEventListener("click", () => { passo = "login"; tela(); });
+  $("f-entrar").addEventListener("submit", async e => {
     e.preventDefault();
-    const m = modo();
-    if (m === "doc") { aviso("Informe o CNPJ da empresa (14 números) ou o CPF (11 números).", 3600); return; }
-    if (m === "cpf") {
-      ok.disabled = true; ok.textContent = "Entrando…";
-      const r = await api("/cashback/api/login", { cpf: doc.value.replace(/\D/g, ""), senha: document.getElementById("e-senha").value });
-      if (r.token) { S.token = r.token; LS.set("psn_emp_token", r.token); await iniciar(); return; }
+    const d = dig();
+    if (d.length !== 11 && d.length !== 14) { aviso("Informe o CNPJ da empresa (14 números) ou o CPF (11 números).", 3600); return; }
+    const entrou = async (r) => {
+      if (r.token) { S.token = r.token; LS.set("psn_emp_token", r.token); await iniciar(); return true; }
+      return false;
+    };
+    ok.disabled = true; const rotulo = ok.textContent; ok.textContent = "Entrando…";
+    if (d.length === 11) {                                   // CPF + senha do aplicativo
+      const r = await api("/cashback/api/login", { cpf: d, senha: $("e-senha").value });
+      if (await entrou(r)) return;
       telaEntrar(r.verificar ? "Confirme a sua conta primeiro: entre uma vez no aplicativo Postos SN e informe o código recebido." : (r.erro || "Não consegui entrar."));
       return;
     }
-    if (passo === "doc") { await pedir(); return; }
-    ok.disabled = true; ok.textContent = "Entrando…";
-    const r = await api("/empresas/api/cnpj/entrar", { cnpj: doc.value.replace(/\D/g, ""), codigo: document.getElementById("e-codigo").value.replace(/\D/g, "") });
-    if (r.token) { S.token = r.token; LS.set("psn_emp_token", r.token); await iniciar(); return; }
-    ok.disabled = false; ok.textContent = "Entrar";
+    if (passo === "login") {                                 // CNPJ + senha
+      if (!$("e-senha").value) { ok.disabled = false; ok.textContent = rotulo; aviso("Informe a senha da empresa.", 3200); return; }
+      const r = await api("/empresas/api/cnpj/login", { cnpj: d, senha: $("e-senha").value });
+      if (await entrou(r)) return;
+      if (r.codigo_apenas) { ok.disabled = false; ok.textContent = rotulo; await pedirCodigo("so-codigo"); return; }
+      telaEntrar(r.erro || "Não consegui entrar.");
+      return;
+    }
+    const codigo = $("e-codigo").value.replace(/\D/g, "");
+    if (codigo.length !== 6) { ok.disabled = false; ok.textContent = rotulo; aviso("Digite o código de 6 números.", 3200); return; }
+    if (passo === "so-codigo") {                             // servidor sem a tabela da senha: entra so' com o codigo
+      const r = await api("/empresas/api/cnpj/entrar", { cnpj: d, codigo });
+      if (await entrou(r)) return;
+      ok.disabled = false; ok.textContent = rotulo; aviso(r.erro || "Código incorreto ou vencido. Peça um novo.", 4200); return;
+    }
+    const n1 = $("e-nova").value, n2 = $("e-nova2").value;   // passo === "codigo": cadastra a senha
+    if (n1.length < 6) { ok.disabled = false; ok.textContent = rotulo; aviso("A senha precisa ter pelo menos 6 caracteres.", 3600); return; }
+    if (n1 !== n2) { ok.disabled = false; ok.textContent = rotulo; aviso("As senhas não conferem.", 3600); return; }
+    const r = await api("/empresas/api/cnpj/senha", { cnpj: d, codigo, senha: n1 });
+    if (await entrou(r)) return;
+    ok.disabled = false; ok.textContent = rotulo;
     aviso(r.erro || "Código incorreto ou vencido. Peça um novo.", 4200);
   });
+  tela();
 }
 function sair(silencioso) {
   S.token = ""; S.eu = null; S.empresa = null; S.cache = {};

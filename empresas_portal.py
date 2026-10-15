@@ -222,10 +222,18 @@ def _acesso(cli, empresa_id):
 
 def _entrada():
     tok = (request.headers.get("Authorization") or "").replace("Bearer ", "").strip()
-    cnpj = _token_cnpj_validar(tok) if tok else None
-    if cnpj:
-        emps = _empresas_do_cnpj(cnpj)
-        return {"cpf": "", "cnpj": cnpj, "nome": (emps[0]["nome"] if emps else "")}, None
+    val = _token_cnpj_validar(tok) if tok else None
+    if val:
+        cnpj, ver = val
+        try:
+            ac = _acesso_cnpj(cnpj)
+        except Exception:
+            ac = None
+        atual = int((ac or {}).get("versao") or 0) if isinstance(ac, dict) else 0
+        if atual == ver:
+            emps = _empresas_do_cnpj(cnpj)
+            return {"cpf": "", "cnpj": cnpj, "nome": (emps[0]["nome"] if emps else "")}, None
+        return None, (jsonify({"erro": "sessao expirada"}), 401)
     cli, erro = cf._cliente_ou_401()
     return cli, erro
 
@@ -260,23 +268,46 @@ def _codigo_cnpj(cnpj, janela):
     return "%06d" % (int(h[:12], 16) % 1000000)
 
 
-def _token_cnpj_gerar(cnpj):
-    corpo = f"e1|{cnpj}|{int(time.time()) + CNPJ_SESSAO_S}"
+def _token_cnpj_gerar(cnpj, versao=0):
+    corpo = f"e1|{cnpj}|{int(time.time()) + CNPJ_SESSAO_S}|{int(versao or 0)}"
     ass = hmac.new(cp._chave("empresas-cnpj-sessao"), corpo.encode(), hashlib.sha256).hexdigest()[:32]
     return base64.urlsafe_b64encode(f"{corpo}|{ass}".encode()).decode()
 
 
 def _token_cnpj_validar(tok):
-    """CNPJ (14 digitos) ou None."""
+    """(cnpj, versao) ou None. A versao e' a da senha: senha nova derruba as sessoes antigas."""
     try:
         corpo = base64.urlsafe_b64decode(tok.encode()).decode()
         p = corpo.split("|")
-        if len(p) != 4 or p[0] != "e1" or int(p[2]) < time.time():
+        if len(p) != 5 or p[0] != "e1" or int(p[2]) < time.time():
             return None
-        esperado = hmac.new(cp._chave("empresas-cnpj-sessao"), f"e1|{p[1]}|{p[2]}".encode(), hashlib.sha256).hexdigest()[:32]
-        return p[1] if hmac.compare_digest(p[3], esperado) and len(p[1]) == 14 else None
+        esperado = hmac.new(cp._chave("empresas-cnpj-sessao"), f"e1|{p[1]}|{p[2]}|{p[3]}".encode(), hashlib.sha256).hexdigest()[:32]
+        return (p[1], int(p[3])) if hmac.compare_digest(p[4], esperado) and len(p[1]) == 14 else None
     except Exception:
         return None
+
+
+# senha da EMPRESA (oct_portal_empresas_acesso: SQL-PORTAL-EMPRESAS-SENHA.sql). Sem a tabela, so' o codigo (versao antiga).
+SEM_TABELA = "sem-tabela"
+_ACESSO_SENHA = {}
+
+
+def _acesso_cnpj(cnpj, fresco=False):
+    """linha da senha (dict), None (CNPJ sem senha ainda) ou SEM_TABELA (SQL ainda nao rodado)."""
+    c = _ACESSO_SENHA.get(cnpj)
+    if c and not fresco and time.time() - c[0] < 20:
+        return c[1]
+    try:
+        rows = cp._sget(f"oct_portal_empresas_acesso?cnpj=eq.{cnpj}&select=cnpj,senha_hash,versao&limit=1")
+        r = rows[0] if rows else None
+    except Exception as e:
+        m = str(e)
+        if "PGRST205" in m or "42P01" in m or "banco 404" in m or "does not exist" in m or "Could not find the table" in m:
+            r = SEM_TABELA
+        else:
+            raise
+    _ACESSO_SENHA[cnpj] = (time.time(), r)
+    return r
 
 
 _ACESSO_CNPJ = {}
@@ -384,28 +415,121 @@ def api_cnpj_entrar():
         return jsonify({"erro": "Informe o CNPJ e o código de 6 números."}), 400
     if not cp._limite_ok("cnpjent:" + cp._ip(), 30, 3600):
         return cp._muitas()
+    try:
+        ac = _acesso_cnpj(cnpj, fresco=True)
+    except Exception:
+        return jsonify({"erro": "Não consegui conferir o acesso agora. Tente de novo."}), 502
+    if ac is not SEM_TABELA:
+        return jsonify({"erro": "Entre com a sua senha. Primeiro acesso ou esqueceu? Use \"Primeiro acesso ou esqueci a senha\".",
+                        "usar_senha": True}), 409
     emps = _empresas_do_cnpj(cnpj)
     if not emps:
         return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
     ids = [e["id"] for e in emps]
-    desde = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=CNPJ_JANELA_S)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if _falhas_recentes(ids, desde) >= CNPJ_FALHAS_MAX:
-        return cp._muitas("Muitas tentativas erradas. Peça um novo código em alguns minutos.")
-    j = int(time.time()) // CNPJ_JANELA_S
-    ok = any(hmac.compare_digest(codigo, _codigo_cnpj(cnpj, x)) for x in (j, j - 1))
-    if not ok:
-        try:
-            cp._spost("oct_portal_empresas_log", {"pessoa_id": ids[0], "cpf_mascara": "CNPJ " + cnpj[:8] + "******",
-                                                  "acao": "login_cnpj_falha", "detalhe": {}}, prefer="return=minimal")
-        except Exception:
-            pass
+    if _bloqueado_cnpj(ids):
+        return cp._muitas("Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.")
+    if not _codigo_ok(cnpj, codigo):
+        _falha_cnpj(ids, cnpj)
         return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
+    _trilha_cnpj(ids, cnpj, "login_cnpj")
+    return jsonify({"ok": True, "token": _token_cnpj_gerar(cnpj, 0), "validade_seg": CNPJ_SESSAO_S}), 200, SEM_CACHE
+
+
+def _bloqueado_cnpj(ids):
+    desde = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=CNPJ_JANELA_S)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _falhas_recentes(ids, desde) >= CNPJ_FALHAS_MAX
+
+
+def _codigo_ok(cnpj, codigo):
+    j = int(time.time()) // CNPJ_JANELA_S
+    return any(hmac.compare_digest(codigo, _codigo_cnpj(cnpj, x)) for x in (j, j - 1))
+
+
+def _trilha_cnpj(ids, cnpj, acao):
     try:
         cp._spost("oct_portal_empresas_log", {"pessoa_id": ids[0], "cpf_mascara": "CNPJ " + cnpj[:8] + "******",
-                                              "acao": "login_cnpj", "detalhe": {}}, prefer="return=minimal")
+                                              "acao": acao, "detalhe": {}}, prefer="return=minimal")
     except Exception:
         pass
-    return jsonify({"ok": True, "token": _token_cnpj_gerar(cnpj), "validade_seg": CNPJ_SESSAO_S}), 200, SEM_CACHE
+
+
+def _falha_cnpj(ids, cnpj):
+    _trilha_cnpj(ids, cnpj, "login_cnpj_falha")
+
+
+_SENHA_MIN = 6
+
+
+@bp_empresas.route("/empresas/api/cnpj/login", methods=["POST"])
+def api_cnpj_login():
+    d = request.get_json(silent=True) or {}
+    cnpj = cp._so_digitos(d.get("cnpj"))
+    senha = str(d.get("senha") or "")
+    if not _cnpj_ok(cnpj) or not senha:
+        return jsonify({"erro": "Informe o CNPJ e a senha."}), 400
+    if not cp._limite_ok("cnpjlog:" + cp._ip(), 40, 3600):
+        return cp._muitas()
+    try:
+        ac = _acesso_cnpj(cnpj, fresco=True)
+    except Exception:
+        return jsonify({"erro": "Não consegui conferir o acesso agora. Tente de novo."}), 502
+    if ac is SEM_TABELA:
+        return jsonify({"erro": "A senha da empresa ainda não está habilitada: entre com o código por WhatsApp.",
+                        "codigo_apenas": True}), 409
+    emps = _empresas_do_cnpj(cnpj)
+    ids = [e["id"] for e in emps]
+    erro = jsonify({"erro": "CNPJ ou senha incorretos. Primeiro acesso ou esqueceu a senha? Use "
+                            "\"Primeiro acesso ou esqueci a senha\" para receber o código por WhatsApp."})
+    if not ids:
+        return erro, 401
+    if _bloqueado_cnpj(ids):
+        return cp._muitas("Muitas tentativas erradas. Aguarde alguns minutos e tente de novo.")
+    if not ac or not ac.get("senha_hash") or not cp._confere_senha(senha, ac["senha_hash"]):
+        _falha_cnpj(ids, cnpj)
+        return erro, 401
+    _trilha_cnpj(ids, cnpj, "login_cnpj")
+    return jsonify({"ok": True, "token": _token_cnpj_gerar(cnpj, int(ac.get("versao") or 0)), "validade_seg": CNPJ_SESSAO_S}), 200, SEM_CACHE
+
+
+@bp_empresas.route("/empresas/api/cnpj/senha", methods=["POST"])
+def api_cnpj_senha():
+    """Primeiro acesso / esqueci a senha: o codigo recebido por WhatsApp autoriza CADASTRAR a senha da empresa."""
+    d = request.get_json(silent=True) or {}
+    cnpj = cp._so_digitos(d.get("cnpj"))
+    codigo = cp._so_digitos(d.get("codigo"))
+    senha = str(d.get("senha") or "")
+    if not _cnpj_ok(cnpj) or len(codigo) != 6:
+        return jsonify({"erro": "Informe o CNPJ e o código de 6 números."}), 400
+    if len(senha) < _SENHA_MIN:
+        return jsonify({"erro": f"A senha precisa ter pelo menos {_SENHA_MIN} caracteres."}), 400
+    if not cp._limite_ok("cnpjsen:" + cp._ip(), 20, 3600):
+        return cp._muitas()
+    try:
+        ac = _acesso_cnpj(cnpj, fresco=True)
+    except Exception:
+        return jsonify({"erro": "Não consegui conferir o acesso agora. Tente de novo."}), 502
+    if ac is SEM_TABELA:
+        return jsonify({"erro": "O cadastro de senha ainda não está habilitado neste servidor.", "codigo_apenas": True}), 503
+    emps = _empresas_do_cnpj(cnpj)
+    ids = [e["id"] for e in emps]
+    if not ids:
+        return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
+    if _bloqueado_cnpj(ids):
+        return cp._muitas("Muitas tentativas erradas. Peça um novo código em alguns minutos.")
+    if not _codigo_ok(cnpj, codigo):
+        _falha_cnpj(ids, cnpj)
+        return jsonify({"erro": "Código incorreto ou vencido. Peça um novo."}), 401
+    versao = int((ac or {}).get("versao") or 0) + 1
+    try:
+        cp._spost("oct_portal_empresas_acesso?on_conflict=cnpj",
+                  {"cnpj": cnpj, "senha_hash": cp._hash_senha(senha), "versao": versao,
+                   "atualizado_em": dt.datetime.now(dt.timezone.utc).isoformat()},
+                  prefer="resolution=merge-duplicates,return=minimal")
+    except Exception:
+        return jsonify({"erro": "Não consegui gravar a senha agora. Tente de novo."}), 502
+    _ACESSO_SENHA.pop(cnpj, None)
+    _trilha_cnpj(ids, cnpj, "senha_cnpj_definida")
+    return jsonify({"ok": True, "token": _token_cnpj_gerar(cnpj, versao), "validade_seg": CNPJ_SESSAO_S}), 200, SEM_CACHE
 
 
 # ------------------------------------------------------------------ consumo (vendas a prazo da empresa)
@@ -1489,7 +1613,8 @@ def _msg_acesso(nome_pessoa, nome_empresa):
     return (f"Olá{', ' + pri if pri else ''}! A *{nome_empresa}* agora tem acesso ao *Portal Empresas* da Rede SN: "
             "placas, consumo de cada abastecimento com a foto do cupom assinado, faturas, Pix e boleto.\n\n"
             f"🔗 {LINK_PORTAL}\n\n"
-            "Para entrar, informe o *CNPJ da empresa*: o código de acesso chega por WhatsApp para o financeiro. "
+            "Para entrar, informe o *CNPJ da empresa*. No primeiro acesso, toque em *Primeiro acesso* e o código chega "
+            "por WhatsApp para o financeiro; com ele a empresa cadastra a sua senha. "
             f"(Quem já usa o app Postos SN também entra com o *CPF* e a senha do app: {LINK_APP})")
 
 
