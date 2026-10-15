@@ -34,11 +34,40 @@ function fatTag(f) {
 }
 
 // ---------------------------------------------------------------- resumo (Início e Perfil)
+// Reaproveita o ultimo resumo por 30 s (o Inicio acabou de buscar; clicar em "Faturas" nao busca de novo).
 async function faturasResumo(forcar) {
-  if (S.fat && !forcar) return S.fat;
+  if (S.fat && !forcar && Date.now() - (S.fatT || 0) < 30000) return S.fat;
   const r = await api("/cashback/api/faturas/resumo");
   S.fat = r && r.ok ? r : { ok: true, ativo: false, postos: [] };
+  S.fatT = Date.now();
   return S.fat;
+}
+
+// ---- cache curto: a tela aparece na hora com o que ja' temos e e' atualizada em seguida ----
+function fatEsqueleto(cab) {
+  return `<div class="tela">${cab}<div class="secao" style="padding-top:2px">
+    <div class="fat-resumo"><div class="sk" style="height:76px"></div><div class="sk" style="height:76px"></div></div>
+    <div class="sk" style="height:18px;width:46%;margin:18px 0 10px"></div>
+    <div class="sk" style="height:64px;margin-bottom:8px"></div><div class="sk" style="height:64px"></div></div></div>`;
+}
+function fatAindaAqui(prefixo) { return (location.hash || "").indexOf(prefixo) === 0; }
+function fatLimparCache() { S.fat = null; S.fatT = 0; S.fatLista = {}; S.fatDet = {}; }
+
+// pre-busca (Inicio): a lista do posto unico e a fatura mais urgente ja' ficam na memoria
+function fatPrefetch(posto) {
+  S.fatLista = S.fatLista || {}; S.fatDet = S.fatDet || {};
+  const c = S.fatLista[posto];
+  if (c && Date.now() - c.t < 30000) return;
+  api("/cashback/api/faturas?posto=" + encodeURIComponent(posto)).then(r => {
+    if (!r || !r.ok) return;
+    S.fatLista[posto] = { t: Date.now(), r };
+    const urgente = (r.abertas || [])[0];
+    if (urgente && !S.fatDet[urgente.id]) {
+      api("/cashback/api/faturas/" + encodeURIComponent(urgente.id)).then(d => {
+        if (d && d.ok) S.fatDet[urgente.id] = { t: Date.now(), r: d };
+      }).catch(() => {});
+    }
+  }).catch(() => {});
 }
 
 async function faturasPreencher() {
@@ -50,6 +79,7 @@ async function faturasPreencher() {
     const venc = r.postos.reduce((s, p) => s + Number(p.vencidas_qtd || 0), 0);
     const nao = r.postos.reduce((s, p) => s + Number(p.nao_faturado_valor || 0), 0);
     const alvo = r.postos.length === 1 ? "#/faturas/" + r.postos[0].empresa_id : "#/faturas";
+    if (r.postos.length === 1) fatPrefetch(r.postos[0].empresa_id);
     const card = document.getElementById("fat-card");
     const avisos = r.postos.filter(p => p.bloqueado).map(fatAvisoBloqueio).join("");
     if (card) {
@@ -73,8 +103,19 @@ async function faturasPreencher() {
 
 // ---------------------------------------------------------------- lista
 async function telaFaturas(posto) {
-  const res = await faturasResumo(true);
   const cab = topoSimples("Minhas faturas", true);
+  S.fatLista = S.fatLista || {};
+  // 1) o que ja' esta na memoria aparece NA HORA (senao, o esqueleto)
+  const res0 = S.fat && S.fat.ativo ? S.fat : null;
+  let alvo = posto || (res0 && res0.postos.length === 1 ? res0.postos[0].empresa_id : "");
+  const c0 = alvo && S.fatLista[alvo];
+  if (res0 && c0) fatDesenharLista(alvo, res0, c0.r, cab);
+  else el().innerHTML = fatEsqueleto(cab);
+  // 2) busca o dado novo: lista e resumo ao mesmo tempo
+  const fresco = c0 && Date.now() - c0.t < 30000;
+  let lstP = alvo && !fresco ? api("/cashback/api/faturas?posto=" + encodeURIComponent(alvo)) : null;
+  const res = await faturasResumo(false);
+  if (!fatAindaAqui("#/faturas")) return;
   if (!res.ativo || !res.postos.length) {
     el().innerHTML = `<div class="tela">${cab}<div class="secao"><div class="card vazio" style="padding:16px">
       Nenhuma fatura encontrada para o seu cadastro. Se você compra a prazo e deveria ver as faturas aqui, fale com o posto.</div></div></div>`;
@@ -88,11 +129,22 @@ async function telaFaturas(posto) {
         <span class="seta">${ICO.seta(18)}</span></button>`).join("")}</div></div></div>`;
     return;
   }
-  const r = await api("/cashback/api/faturas?posto=" + encodeURIComponent(posto));
+  let r;
+  if (fresco && posto === alvo) r = c0.r;
+  else {
+    if (!lstP || posto !== alvo) lstP = api("/cashback/api/faturas?posto=" + encodeURIComponent(posto));
+    r = await lstP;
+  }
+  if (!fatAindaAqui("#/faturas")) return;
   if (!r.ok) {
     el().innerHTML = `<div class="tela">${cab}<div class="secao"><div class="card vazio" style="padding:16px">${esc(r.erro || "Não consegui carregar as faturas.")}</div></div></div>`;
     return;
   }
+  S.fatLista[posto] = { t: Date.now(), r };
+  fatDesenharLista(posto, res, r, cab);
+}
+
+function fatDesenharLista(posto, res, r, cab) {
   const info = res.postos.find(p => p.empresa_id === posto) || {};
   S.fatPosto = info;
   const total = r.abertas.reduce((s, f) => s + f.valor, 0);
@@ -128,12 +180,23 @@ function fatLinhaCupom(c) {
 
 // ---------------------------------------------------------------- detalhe
 async function telaFatura(id) {
-  const r = await api("/cashback/api/faturas/" + encodeURIComponent(id));
   const cab = topoSimples("Fatura", true);
+  S.fatDet = S.fatDet || {};
+  const c0 = S.fatDet[id];
+  if (c0) fatDesenharFatura(c0.r, cab);                       // o que ja' temos, na hora
+  else el().innerHTML = fatEsqueleto(cab);
+  if (c0 && Date.now() - c0.t < 20000) return;                 // buscada ha' instantes (pre-busca do Inicio)
+  const r = await api("/cashback/api/faturas/" + encodeURIComponent(id));
+  if (!fatAindaAqui("#/fatura/")) return;
   if (!r.ok) {
     el().innerHTML = `<div class="tela">${cab}<div class="secao"><div class="card vazio" style="padding:16px">${esc(r.erro || "Não consegui abrir esta fatura.")}</div></div></div>`;
     return;
   }
+  S.fatDet[id] = { t: Date.now(), r };
+  fatDesenharFatura(r, cab);
+}
+
+function fatDesenharFatura(r, cab) {
   const f = r.fatura, b = r.boleto;
   // agrupa o extrato por cupom
   const grupos = [];
@@ -320,5 +383,6 @@ function pagarFatura(faturaId) { return pagarAlvo({ fatura_id: faturaId }, "a fa
 
 // depois de pagar: recarrega a tela em que o cliente esta (lista ou fatura)
 function fatRecarregar() {
+  fatLimparCache();
   try { if (typeof rota === "function") rota(); else location.reload(); } catch (e) { location.reload(); }
 }

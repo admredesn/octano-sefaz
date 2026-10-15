@@ -29,6 +29,7 @@ Links de PDF/foto: assinados pelo Supabase, validade de 5 minutos (os buckets s�
 import datetime as dt
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests as rq
 from flask import Blueprint, Response, jsonify, request
@@ -36,6 +37,14 @@ from flask import Blueprint, Response, jsonify, request
 import cashback_portal as cp
 
 bp_faturas = Blueprint("cliente_faturas", __name__)
+
+# consultas independentes ao banco rodam juntas (cada uma custa ~0,1-0,2 s de ida e volta; em fila somavam 1 s ou mais)
+_POOL = ThreadPoolExecutor(max_workers=12)
+
+
+def _par(*fns):
+    futs = [_POOL.submit(f) for f in fns]
+    return [f.result() for f in futs]
 
 BUCKET_DOCS = "octano-documentos"     # fatura-<n>.pdf, boleto-<nosso>.pdf, nfe
 BUCKET_NOTAS = "notas_prazo"          # foto do cupom assinado (PDV)
@@ -72,6 +81,7 @@ def _contas(cli):
         # coluna app_ve_faturas ainda não criada: só o próprio cadastro
         rows = cp._sget(f"oct_pessoas?documento=eq.{cpf}&select={sel}&limit=50")
     out = {}
+    vinc = []
     for p in rows or []:
         emp = p.get("empresa_id")
         if not _posto_ligado(emp):
@@ -79,9 +89,13 @@ def _contas(cli):
         ids = out.setdefault(emp, {})
         ids[p["id"]] = ("proprio", p.get("nome") or "")
         if p.get("frota_empresa_id") and p.get("app_ve_faturas") is True:
-            e = cp._sget(f"oct_pessoas?id=eq.{p['frota_empresa_id']}&select=id,nome&limit=1")
-            if e:
-                ids[e[0]["id"]] = ("empresa", e[0].get("nome") or "")
+            vinc.append((emp, p["frota_empresa_id"]))
+    if vinc:                                   # UMA consulta para todas as empresas vinculadas
+        es = cp._sget(f"oct_pessoas?id={_in(sorted({v for _, v in vinc}))}&select=id,nome&limit=100")
+        nomes = {e["id"]: e.get("nome") or "" for e in es or []}
+        for emp, fid in vinc:
+            if fid in nomes:
+                out[emp][fid] = ("empresa", nomes[fid])
     return out
 
 
@@ -197,20 +211,17 @@ def api_resumo():
     postos = []
     hoje = _hoje()
     for emp, ids in contas.items():
-        lst = cp._sget(
-            f"oct_faturas?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}&status=eq.aberta"
-            f"&select=id,valor,valor_liquido,vencimento&limit=500")
-        nao = cp._sget(
-            f"oct_pdv_notas_prazo?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}"
-            f"&status=eq.aberto&fatura_id=is.null&select=valor&limit=1000")
+        lst, nao, nome, (bloq, origem, motivo) = _par(
+            lambda: cp._sget(
+                f"oct_faturas?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}&status=eq.aberta"
+                f"&select=id,valor,valor_liquido,vencimento&limit=500"),
+            lambda: cp._sget(
+                f"oct_pdv_notas_prazo?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}"
+                f"&status=eq.aberto&fatura_id=is.null&select=valor&limit=1000"),
+            lambda: _nome_empresa(emp),
+            lambda: _bloqueio(ids))
         venc = [f for f in lst if str(f.get("vencimento") or "9999")[:10] < hoje]
         prox = sorted(str(f.get("vencimento"))[:10] for f in lst if f.get("vencimento"))
-        nome = ""
-        try:
-            nome = (cp._sget(f"oct_empresas?id=eq.{emp}&select=nome&limit=1") or [{}])[0].get("nome") or ""
-        except Exception:
-            pass
-        bloq, origem, motivo = _bloqueio(ids)
         if not lst and not nao and not bloq and not _tem_alguma(emp, ids):
             continue
         postos.append({
@@ -224,6 +235,23 @@ def api_resumo():
             "nao_faturado_qtd": len(nao), "nao_faturado_valor": round(sum(float(n.get("valor") or 0) for n in nao), 2),
         })
     return jsonify({"ok": True, "ativo": bool(postos), "postos": postos}), 200, SEM_CACHE
+
+
+_NOMES = {}
+
+
+def _nome_empresa(emp):
+    c = _NOMES.get(emp)
+    if c and time.time() - c[0] < 600:
+        return c[1]
+    nome = ""
+    try:
+        nome = (cp._sget(f"oct_empresas?id=eq.{emp}&select=nome&limit=1") or [{}])[0].get("nome") or ""
+    except Exception:
+        pass
+    if nome:
+        _NOMES[emp] = (time.time(), nome)
+    return nome
 
 
 def _tem_alguma(emp, ids):
@@ -243,9 +271,14 @@ def api_lista():
         return jsonify({"erro": "Nenhuma fatura encontrada neste posto."}), 404
     campos = ("id,numero,emissao,vencimento,valor,valor_liquido,acrescimo,desconto,status,liquidado_em,"
               "parcela_num,parcela_total,cliente_id,cliente_nome")
-    todas = cp._sget(
-        f"oct_faturas?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}&status=in.(aberta,liquidada)"
-        f"&select={campos}&order=emissao.desc&limit=400")
+    todas, nao = _par(
+        lambda: cp._sget(
+            f"oct_faturas?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}&status=in.(aberta,liquidada)"
+            f"&select={campos}&order=emissao.desc&limit=400"),
+        lambda: cp._sget(
+            f"oct_pdv_notas_prazo?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}"
+            f"&status=eq.aberto&fatura_id=is.null&select=id,numero_nfe,valor,registrado_em,foto_path"
+            f"&order=registrado_em.desc&limit=200"))
     hoje = _hoje()
     corte = (dt.date.today() - dt.timedelta(days=JANELA_PAGAS_DIAS)).isoformat()
 
@@ -265,10 +298,6 @@ def api_lista():
     abertas.sort(key=lambda x: x["vencimento"] or "9999")
     pagas = [item(f) for f in todas if f.get("status") == "liquidada"
              and str(f.get("liquidado_em") or f.get("emissao") or "")[:10] >= corte]
-    nao = cp._sget(
-        f"oct_pdv_notas_prazo?empresa_id=eq.{emp}&cliente_id={_in(list(ids))}"
-        f"&status=eq.aberto&fatura_id=is.null&select=id,numero_nfe,valor,registrado_em,foto_path"
-        f"&order=registrado_em.desc&limit=200")
     return jsonify({
         "ok": True,
         "abertas": abertas, "pagas": pagas,
@@ -292,9 +321,14 @@ def api_detalhe(fatura_id):
     emp = f["empresa_id"]
     # parcela: os títulos ficam na fatura ORIGINAL (o extrato da parcela é o da original)
     origem_id = f.get("parcela_de") or f["id"]
-    titulos = cp._sget(
-        f"oct_pdv_notas_prazo?fatura_id=eq.{origem_id}&select=id,numero_nfe,valor,registrado_em,foto_path"
-        f"&order=registrado_em&limit=500")
+    titulos, bol = _par(
+        lambda: cp._sget(
+            f"oct_pdv_notas_prazo?fatura_id=eq.{origem_id}&select=id,numero_nfe,valor,registrado_em,foto_path"
+            f"&order=registrado_em&limit=500"),
+        lambda: cp._sget(
+            f"oct_boletos?fatura_id=eq.{f['id']}&status=in.(registrado,liquidado)"
+            f"&select=id,status,valor,vencimento,linha_digitavel,codigo_barras,nosso_numero,pix_copia_cola,pago_em"
+            f"&order=id.desc&limit=1"))
     nums = [str(t["numero_nfe"]) for t in titulos if t.get("numero_nfe") and str(t["numero_nfe"]).isdigit()]
     vendas = {}
     if nums:
@@ -321,9 +355,6 @@ def api_detalhe(fatura_id):
                            "qtd": qtd, "unit": round(unit, 3), "total": round(total, 2),
                            "placa": (v or {}).get("placa"), "odometro": (v or {}).get("odometro"),
                            "veiculo": (v or {}).get("veiculo"), "litros": it.get("tipo") == "abastecimento"})
-    bol = cp._sget(f"oct_boletos?fatura_id=eq.{f['id']}&status=in.(registrado,liquidado)"
-                   f"&select=id,status,valor,vencimento,linha_digitavel,codigo_barras,nosso_numero,pix_copia_cola,pago_em"
-                   f"&order=id.desc&limit=1")
     b = bol[0] if bol else None
     venc = str(f.get("vencimento") or "")[:10]
     _log(cli, f"fatura {f.get('numero')} ({emp[:8]})")

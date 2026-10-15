@@ -129,10 +129,27 @@ def _checa(r):
     return r
 
 
+_SESS = None
+
+
+def _sessao():
+    """Sessao HTTP com conexoes reaproveitadas (keep-alive): cada consulta ao banco deixa de pagar um TLS novo."""
+    global _SESS
+    if _SESS is None:
+        s = rq.Session()
+        s.mount("https://", rq.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=16))
+        _SESS = s
+    return _SESS
+
+
 def _sget(q):
     url, _ = _supa()
-    r = _checa(rq.get(f"{url}/rest/v1/{q}", headers=_sh(), timeout=20))
-    return r.json()
+    u = f"{url}/rest/v1/{q}"
+    try:
+        r = _sessao().get(u, headers=_sh(), timeout=20)
+    except (rq.exceptions.ConnectionError, rq.exceptions.ChunkedEncodingError):
+        r = rq.get(u, headers=_sh(), timeout=20)          # conexao do pool morreu (ocioso): tenta de novo, nova
+    return _checa(r).json()
 
 
 def _spost(tab, body, prefer="return=representation"):

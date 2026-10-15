@@ -343,3 +343,9 @@ img { display: block; max-width: 100%; }
              font-weight: 700; vertical-align: middle; }
 .pagar-btn:active { transform: scale(.97); }
 
+/* ===== esqueleto de carregamento (14/10/2026) ===== */
+.sk { border-radius: 14px; background: linear-gradient(90deg, rgba(127,127,127,.14) 25%, rgba(127,127,127,.26) 50%, rgba(127,127,127,.14) 75%);
+      background-size: 200% 100%; animation: sk 1.2s ease-in-out infinite; }
+@keyframes sk { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .sk { animation: none; } }
+
