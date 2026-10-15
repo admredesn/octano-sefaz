@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-14-pix-rapido-1",
+                    "build": "2026-10-15-portal-empresas-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -540,6 +540,14 @@ try:
     app.register_blueprint(bp_faturas)
 except Exception as _e:
     print("[cliente-faturas] nao carregou:", _e)
+
+# ── Portal Empresas (web): placas, consumo com foto do cupom, faturas, Pix e boleto novo (14/10/2026) ──
+# Só funciona para empresa com oct_pessoas.portal_empresas ligado e financeiro com "vê as faturas" — ver empresas_portal.py.
+try:
+    from empresas_portal import bp_empresas
+    app.register_blueprint(bp_empresas)
+except Exception as _e:
+    print("[empresas-portal] nao carregou:", _e)
 
 # ── App Postos SN: acesso da EQUIPE (dono e gerentes acompanham os postos) — /app/equipe/api/* ──
 try:

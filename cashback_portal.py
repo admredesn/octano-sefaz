@@ -100,6 +100,39 @@ def _prazo_liberado(empresa_id, cpf):
         return False, "não deu pra verificar o crédito: " + str(e)[:80], None
 
 
+def _placa_da_frota(empresa_pessoa_id, posto_id, motorista_pessoa_id, placa):
+    """Regra do Portal Empresas: a EMPRESA com o portal ligado só abastece a prazo com placa cadastrada e ativa na lista
+    dela (e que não é de outro motorista, nem está bloqueada pelo posto). Empresa SEM o portal ligado: não muda nada.
+    Retorna (ok, motivo). Falha de leitura NÃO bloqueia (não derruba a venda por instabilidade)."""
+    try:
+        e = _sget(f"oct_pessoas?id=eq.{empresa_pessoa_id}&select=portal_empresas&limit=1")
+    except Exception:
+        return True, None                       # coluna ainda não existe / banco instável: segue a regra antiga
+    if not (e and e[0].get("portal_empresas")):
+        return True, None
+    placa = re.sub(r"[^A-Za-z0-9]", "", str(placa or "")).upper()
+    if not placa:
+        return False, "Informe a placa do veículo — esta empresa só abastece a prazo com placa cadastrada."
+    try:
+        veics = _sget(f"oct_frota_veiculos?pessoa_id=eq.{empresa_pessoa_id}&ativo=eq.true"
+                      f"&select=placa,motorista_pessoa_id&limit=2000")
+    except Exception:
+        return True, None
+    achou = [v for v in veics if re.sub(r"[^A-Za-z0-9]", "", str(v.get("placa") or "")).upper() == placa]
+    if not achou:
+        return False, f"A placa {placa} não está cadastrada nesta empresa — peça ao financeiro da empresa para cadastrá-la."
+    m = achou[0].get("motorista_pessoa_id")
+    if m and m != motorista_pessoa_id:
+        return False, f"A placa {placa} está vinculada a outro motorista."
+    try:
+        bl = _sget(f"oct_placas_bloqueadas?empresa_id=eq.{posto_id}&placa=eq.{placa}&ativo=eq.true&select=id&limit=1")
+        if bl:
+            return False, f"A placa {placa} está bloqueada — fale com o posto."
+    except Exception:
+        pass
+    return True, None
+
+
 # ------------------------------------------------------------------
 # Supabase REST (service key do servidor)
 # ------------------------------------------------------------------
@@ -1119,6 +1152,11 @@ def api_acionar():
             if not any(i.get("tipo") == "produto" for i in itens):
                 return jsonify({"erro": "Adicione produtos ao carrinho — ou informe o bico se for abastecer."}), 400
         placa = re.sub(r"[^A-Za-z0-9]", "", str(d.get("placa") or "")).upper()[:8]
+        # PORTAL EMPRESAS (14/10/2026): empresa com o portal ligado só abastece a prazo com PLACA DA LISTA dela
+        if forma == "05" and bico and conta_prazo and conta_prazo.get("empresa"):
+            ok_pl, motivo_pl = _placa_da_frota(conta_prazo["pessoa_id"], empresa, pessoa_id, placa)
+            if not ok_pl:
+                return jsonify({"erro": motivo_pl, "placa_nao_cadastrada": True}), 403
         if placa:
             reg["placa"] = placa
         try:
