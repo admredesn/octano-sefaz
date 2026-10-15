@@ -154,6 +154,7 @@ async function telaFatura(id) {
       <div class="s" style="margin-top:8px">Emissão ${esc(fatData(f.emissao))} · Vencimento ${esc(fatData(f.vencimento))}${f.da_empresa ? " · " + esc(f.titular) : ""}</div>
       ${f.acrescimo || f.desconto ? `<div class="s">Valor das compras ${brl(f.valor_bruto)}${f.acrescimo ? " + acréscimo " + brl(f.acrescimo) : ""}${f.desconto ? " − desconto " + brl(f.desconto) : ""}</div>` : ""}
     </div></div>
+    ${r.pagamento_app && f.status === "aberta" ? `<div class="secao"><button class="btn" onclick="pagarFatura('${esc(f.id)}')">Pagar a fatura com Pix</button></div>` : ""}
     ${b && f.status === "aberta" ? fatBoleto(f, b) : ""}
     <div class="secao"><div class="secao-tit"><h2>Documentos</h2></div><div class="card lista">
       <button class="linha" onclick="faturaPdf('${esc(f.id)}','fatura')"><span class="ic">${ICO.dados(20)}</span><div class="meio"><div class="t">Fatura detalhada (PDF)</div></div><span class="seta">${ICO.seta(18)}</span></button>
@@ -247,17 +248,77 @@ async function faturaFoto(notaId) {
 TELAS.faturas = a => telaFaturas(a);
 TELAS.fatura = a => telaFatura(a);
 
-// ---------------------------------------------------------------- pagar UMA compra (Pix) — botao "Pagar"
-// O servidor so' mostra o botao quando o Pix esta habilitado no posto (resumo.pagamento_app).
-async function pagarNota(notaId) {
+// ---------------------------------------------------------------- pagar pelo app (Pix)
+// O servidor so' mostra o botao quando o Pix esta habilitado no posto (pagamento_app). O pedido vira cobranca no
+// Sicoob em poucos segundos; esta folha acompanha ate o banco confirmar e a baixa ser automatica.
+let _pix = { id: null, timer: null };
+
+function pixFecha() { if (_pix.timer) { clearInterval(_pix.timer); _pix.timer = null; } _pix.id = null; fecharFolha(); }
+
+function pixCorpo(html) {
+  folha(`<h2 style="font-size:1.15rem">Pagar com Pix</h2>${html}`);
+}
+
+async function pagarAlvo(corpo, rotulo) {
   try {
-    toast("Gerando o Pix…", 1500);
-    const r = await api("/cashback/api/pagar", { nota_id: notaId });
-    if (!r.ok) { toast(r.erro || "Não consegui gerar o Pix agora."); return; }
-    folha(`<h2 style="font-size:1.15rem">Pagar com Pix</h2>
-      <p style="color:var(--mut);margin:6px 0 10px;font-size:.9rem">Valor: <b>${brl(r.valor)}</b>. Abra o app do seu banco, leia o QR Code ou use o Pix copia e cola. A baixa é automática.</p>
-      <div class="fat-pix"><div class="pix-img"><img alt="QR Code Pix" src="${esc(r.qr_url || "")}"></div></div>
-      <button class="btn-borda" style="margin-top:10px" onclick="copiarTexto(${JSON.stringify(String(r.copia_cola || ""))}, 'Código Pix copiado')">Copiar Pix copia e cola</button>
-      <button class="btn sec" style="margin-top:8px" onclick="fecharFolha()">Fechar</button>`);
-  } catch (e) { toast("Não consegui gerar o Pix agora."); }
+    pixFecha();
+    pixCorpo(`<p style="color:var(--mut);margin:8px 0 14px;font-size:.92rem">Gerando o Pix de ${esc(rotulo)}…</p>`);
+    const r = await api("/cashback/api/pagar", corpo);
+    if (!r.ok) { pixFecha(); toast(r.erro || "Não consegui gerar o Pix agora."); return; }
+    _pix.id = r.id;
+    const id = r.id;
+    let tentativas = 0;
+    const passo = async () => {
+      if (_pix.id !== id) return;
+      tentativas++;
+      const s = await api("/cashback/api/pagar/" + encodeURIComponent(id));
+      if (_pix.id !== id) return;
+      if (s.status === "ativa") {
+        pixCorpo(`<p style="color:var(--mut);margin:6px 0 10px;font-size:.9rem">${esc(rotulo)}: <b>${brl(s.valor)}</b>. Abra o app do seu banco, leia o QR Code ou use o Pix copia e cola. A baixa é automática.</p>
+          <div class="fat-pix"><div class="pix-img" id="pix-qr">…</div></div>
+          <p class="s" style="color:var(--mut);margin-top:10px;font-size:.84rem" id="pix-estado">Aguardando o pagamento…</p>
+          <button class="btn-borda" style="margin-top:8px" onclick="copiarTexto(${JSON.stringify(String(s.copia_cola || ""))}, 'Código Pix copiado')">Copiar Pix copia e cola</button>
+          <button class="btn sec" style="margin-top:8px" onclick="pixFecha()">Fechar</button>`);
+        pixQr(id);
+        _pix.timer = setInterval(async () => {
+          if (_pix.id !== id) return;
+          const x = await api("/cashback/api/pagar/" + encodeURIComponent(id));
+          if (x.status === "paga") {
+            clearInterval(_pix.timer); _pix.timer = null;
+            pixCorpo(`<div style="text-align:center;padding:10px 0 4px"><div style="font-size:2.4rem">✓</div>
+              <p style="font-weight:800;font-size:1.1rem;margin:6px 0">Pagamento recebido</p>
+              <p style="color:var(--mut);font-size:.9rem">${brl(x.valor)} pagos. A baixa já foi feita.</p></div>
+              <button class="btn" style="margin-top:12px" onclick="pixFecha(); fatRecarregar()">Concluir</button>`);
+          } else if (x.status === "expirada" || x.status === "erro") {
+            clearInterval(_pix.timer); _pix.timer = null;
+            pixCorpo(`<p style="color:var(--mut);margin:8px 0 14px;font-size:.92rem">${esc(x.erro || "Este Pix não está mais disponível.")}</p>
+              <button class="btn sec" onclick="pixFecha()">Fechar</button>`);
+          }
+        }, 4000);
+        return;
+      }
+      if (s.status === "paga") { pixFecha(); toast("Este Pix já foi pago."); fatRecarregar(); return; }
+      if (s.status === "erro" || s.status === "expirada") { pixFecha(); toast(s.erro || "Não consegui gerar o Pix agora."); return; }
+      if (tentativas > 25) { pixFecha(); toast("O Pix está demorando para ser gerado. Tente de novo em instantes."); return; }
+      setTimeout(passo, 1500);
+    };
+    setTimeout(passo, 1200);
+  } catch (e) { pixFecha(); toast("Não consegui gerar o Pix agora."); }
+}
+
+async function pixQr(id) {
+  try {
+    const r = await fetch(API + "/cashback/api/pagar/" + encodeURIComponent(id) + "/qr.png", { headers: { Authorization: "Bearer " + tok() } });
+    const alvo = document.getElementById("pix-qr");
+    if (!r.ok || !alvo) return;
+    alvo.innerHTML = `<img alt="QR Code Pix" src="${URL.createObjectURL(await r.blob())}">`;
+  } catch (e) { /* sem QR: o botao de copiar continua valendo */ }
+}
+
+function pagarNota(notaId) { return pagarAlvo({ nota_id: notaId }, "esta compra"); }
+function pagarFatura(faturaId) { return pagarAlvo({ fatura_id: faturaId }, "a fatura"); }
+
+// depois de pagar: recarrega a tela em que o cliente esta (lista ou fatura)
+function fatRecarregar() {
+  try { if (typeof rota === "function") rota(); else location.reload(); } catch (e) { location.reload(); }
 }

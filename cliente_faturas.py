@@ -10,8 +10,10 @@ Rotas (todas exigem o login do cliente do portal — header Authorization, como 
   GET /cashback/api/faturas/<id>/arquivo?tipo=fatura|boleto|nfe -> {ok, url} (link temporário do PDF)
   GET /cashback/api/faturas/nota/<nota_id>/foto           -> {ok, url} (link temporário da foto do cupom assinado)
   GET /cashback/api/faturas/<id>/pix.png                  -> QR do Pix copia e cola, se o boleto veio com Pix
-  POST /cashback/api/pagar  {nota_id}                     -> Pix para pagar UMA compra a prazo (botao "Pagar" do app)
-                                                             — desligado ate' o Pix do Sicoob estar habilitado (503)
+  POST /cashback/api/pagar  {nota_id | fatura_id}         -> pede o Pix de UMA compra a prazo (botao "Pagar") ou da fatura;
+                                                             o gateway octano-sicoob cria a cobranca e da' a baixa quando paga
+  GET  /cashback/api/pagar/<id>                           -> estado do pedido (pedido/ativa/paga/expirada/erro) + copia e cola
+  GET  /cashback/api/pagar/<id>/qr.png                    -> QR do Pix copia e cola
 
 QUEM VÊ O QUÊ (decisão de 13/10/2026, pedido do Ronan):
   * a conta (CPF) vê as faturas do PRÓPRIO cadastro no posto;
@@ -102,13 +104,34 @@ def _bloqueio(ids):
     return True, bl[0].get("credito_bloqueio_origem"), bl[0].get("credito_bloqueio_motivo")
 
 
+_PIX_CACHE = {}
+
+
+def _conta_pix_ok(empresa_id):
+    """O posto tem Pix habilitado: oct_sicoob_contas.pix_ativo e chave_pix (cache de 60 s por processo)."""
+    agora = time.time()
+    c = _PIX_CACHE.get(empresa_id)
+    if c and agora - c[0] < 60:
+        return c[1]
+    try:
+        rows = cp._sget(f"oct_sicoob_contas?empresa_id=eq.{empresa_id}&ativo=eq.true&select=pix_ativo,chave_pix&limit=1")
+        ok = bool(rows and rows[0].get("pix_ativo") is True and str(rows[0].get("chave_pix") or "").strip())
+    except Exception:
+        ok = False                       # colunas ainda nao criadas
+    _PIX_CACHE[empresa_id] = (agora, ok)
+    return ok
+
+
 def _pagamento_app_ligado(empresa_id):
-    """Pagar pelo app (Pix): env PIX_APP_ATIVO = empresa_id,... ou all. Vazio = desligado."""
+    """Pagar pelo app (Pix): env PIX_APP_ATIVO = empresa_id,... ou all (vazio = desligado) E o posto com
+    pix_ativo + chave_pix em oct_sicoob_contas."""
     import os
     v = os.environ.get("PIX_APP_ATIVO", "").strip().lower()
     if not v:
         return False
-    return v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",")]
+    if not (v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",")]):
+        return False
+    return _conta_pix_ok(empresa_id)
 
 
 def _cliente_ou_401():
@@ -323,6 +346,7 @@ def api_detalhe(fatura_id):
         } if b else None),
         # fatura: sempre pedível (o gateway gera sob pedido); boleto/NF-e só quando já estão arquivados
         "docs": {"fatura": True, "boleto": bool(f.get("boleto_pdf_path")), "nfe": bool(f.get("nfe_pdf_path"))},
+        "pagamento_app": f.get("status") == "aberta" and _pagamento_app_ligado(emp),
         "linhas": linhas, "cupons": cupons,
     }), 200, SEM_CACHE
 
@@ -397,24 +421,111 @@ def api_pix_png(fatura_id):
     return Response(buf.getvalue(), mimetype="image/png", headers=SEM_CACHE)
 
 
-# ------------------------------------------------------------------ pagar UMA compra pelo app (Pix)
+# ------------------------------------------------------------------ pagar pelo app (Pix)
+def _saldo_fatura(f):
+    rec = cp._sget(f"oct_recebimentos_titulo?fatura_id=eq.{f['id']}&select=valor")
+    return round(_valor(f) - sum(float(r.get("valor") or 0) for r in rec or []), 2)
+
+
+def _cobranca_do_cliente(cid, cli):
+    """(linha de oct_pix_cobrancas, ids) — so' se for do cliente logado (ou da empresa que ele pode ver)."""
+    try:
+        n = int(cid)
+    except (TypeError, ValueError):
+        return None, None
+    rows = cp._sget(f"oct_pix_cobrancas?id=eq.{n}&select=*&limit=1")
+    if not rows:
+        return None, None
+    c = rows[0]
+    ids = _contas(cli).get(c.get("empresa_id")) or {}
+    if c.get("cliente_id") not in ids:
+        return None, None
+    return c, ids
+
+
 @bp_faturas.route("/cashback/api/pagar", methods=["POST"])
 def api_pagar():
-    """Cria a cobranca Pix de UMA nota a prazo (botao "Pagar" ao lado da foto do cupom).
-    Contrato (para quando o Pix do Sicoob estiver habilitado): {nota_id} -> {ok, txid, valor, copia_cola, qr_url};
-    a baixa da nota e' automatica quando o banco confirma. Hoje: 503 com a explicacao."""
+    """Pede o Pix de UMA compra a prazo (botao "Pagar" ao lado da foto do cupom) ou de uma FATURA.
+    Grava o pedido em oct_pix_cobrancas; o gateway octano-sicoob cria a cobranca no Sicoob em poucos segundos e
+    da' a baixa sozinho quando o banco confirma. O app acompanha por GET /cashback/api/pagar/<id>."""
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
     corpo = request.get_json(silent=True) or {}
     nid = cp._uuid_ok(corpo.get("nota_id"))
-    rows = cp._sget(f"oct_pdv_notas_prazo?id=eq.{nid}&select=id,empresa_id,cliente_id,valor,status,fatura_id&limit=1") if nid else []
-    n = rows[0] if rows else None
-    ids = _contas(cli).get(n.get("empresa_id")) if n else None
-    if not n or not ids or n.get("cliente_id") not in ids:
-        return jsonify({"erro": "Compra não encontrada."}), 404
-    if n.get("status") != "aberto" or n.get("fatura_id"):
-        return jsonify({"erro": "Esta compra já foi paga ou já entrou numa fatura."}), 409
-    if not _pagamento_app_ligado(n.get("empresa_id")):
+    fid = cp._uuid_ok(corpo.get("fatura_id"))
+    if bool(nid) == bool(fid):
+        return jsonify({"erro": "Informe a compra ou a fatura a pagar."}), 400
+    if nid:
+        rows = cp._sget(f"oct_pdv_notas_prazo?id=eq.{nid}&select=id,empresa_id,cliente_id,valor,status,fatura_id&limit=1")
+        n = rows[0] if rows else None
+        ids = _contas(cli).get(n.get("empresa_id")) if n else None
+        if not n or not ids or n.get("cliente_id") not in ids:
+            return jsonify({"erro": "Compra não encontrada."}), 404
+        if n.get("status") != "aberto" or n.get("fatura_id"):
+            return jsonify({"erro": "Esta compra já foi paga ou já entrou numa fatura."}), 409
+        emp, cliente, valor = n["empresa_id"], n["cliente_id"], round(float(n.get("valor") or 0), 2)
+        alvo = {"nota_prazo_id": nid}
+        filtro = f"nota_prazo_id=eq.{nid}"
+    else:
+        f, _ids = _fatura_do_cliente(fid, cli)
+        if not f:
+            return jsonify({"erro": "Fatura não encontrada."}), 404
+        if f.get("status") != "aberta":
+            return jsonify({"erro": "Esta fatura não está em aberto."}), 409
+        emp, cliente, valor = f["empresa_id"], f["cliente_id"], _saldo_fatura(f)
+        alvo = {"fatura_id": fid}
+        filtro = f"fatura_id=eq.{fid}"
+    if not _pagamento_app_ligado(emp):
         return jsonify({"erro": "O pagamento pelo app ainda não está habilitado neste posto. Pague no caixa do posto."}), 503
-    return jsonify({"erro": "Integração de Pix ainda não configurada."}), 503
+    if valor <= 0:
+        return jsonify({"erro": "Não há valor a pagar neste título."}), 409
+    if not cp._limite_ok("pix:" + cli["cpf"], 20, 3600):
+        return cp._muitas("Muitos pedidos de Pix seguidos. Espere um pouco.")
+    # ja' existe um pedido em andamento para o mesmo alvo? devolve o mesmo (nao cria outra cobranca)
+    ab = cp._sget(f"oct_pix_cobrancas?{filtro}&status=in.(pedido,criando,ativa)&order=id.desc&limit=1&select=id,status,expira_em,valor")
+    if ab:
+        a = ab[0]
+        vivo = a.get("status") in ("pedido", "criando") or (a.get("expira_em") and str(a["expira_em"]) > dt.datetime.now(dt.timezone.utc).isoformat())
+        if vivo:
+            return jsonify({"ok": True, "id": a["id"], "status": a["status"], "valor": float(a.get("valor") or valor)}), 200, SEM_CACHE
+    nova = cp._spost("oct_pix_cobrancas", dict(alvo, empresa_id=emp, cliente_id=cliente, valor=valor, status="pedido",
+                                              origem="app", criado_por="app " + cp._cpf_mascara(cli["cpf"])))
+    row = (nova or [{}])[0]
+    _log(cli, f"pedido de Pix {row.get('id')} R$ {valor:.2f} ({emp[:8]})")
+    return jsonify({"ok": True, "id": row.get("id"), "status": "pedido", "valor": valor}), 200, SEM_CACHE
+
+
+@bp_faturas.route("/cashback/api/pagar/<cid>", methods=["GET"])
+def api_pagar_status(cid):
+    cli, erro = _cliente_ou_401()
+    if erro:
+        return erro
+    c, _ids = _cobranca_do_cliente(cid, cli)
+    if not c:
+        return jsonify({"erro": "Pedido não encontrado."}), 404
+    st = c.get("status")
+    out = {"ok": True, "id": c["id"], "status": st, "valor": float(c.get("valor") or 0)}
+    if st == "ativa":
+        out.update(copia_cola=c.get("copia_cola"), qr_url=f"/cashback/api/pagar/{c['id']}/qr.png", expira_em=c.get("expira_em"))
+    elif st == "paga":
+        out.update(pago_em=c.get("pago_em"), baixa=c.get("baixa"))
+    elif st == "erro":
+        out["erro"] = "Não consegui gerar o Pix agora. Tente de novo em instantes ou pague no caixa do posto."
+    elif st == "expirada":
+        out["erro"] = "Este Pix expirou. Gere um novo."
+    return jsonify(out), 200, SEM_CACHE
+
+
+@bp_faturas.route("/cashback/api/pagar/<cid>/qr.png", methods=["GET"])
+def api_pagar_qr(cid):
+    cli, erro = _cliente_ou_401()
+    if erro:
+        return erro
+    c, _ids = _cobranca_do_cliente(cid, cli)
+    if not c or c.get("status") != "ativa" or not c.get("copia_cola"):
+        return jsonify({"erro": "QR não disponível."}), 404
+    import qrcode
+    buf = io.BytesIO()
+    qrcode.make(c["copia_cola"], box_size=8, border=2).save(buf, format="PNG")
+    return Response(buf.getvalue(), mimetype="image/png", headers=SEM_CACHE)
