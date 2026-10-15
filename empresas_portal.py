@@ -1264,6 +1264,109 @@ def api_visao():
 
 
 # ------------------------------------------------------------------ a página (arquivos estáticos em empresas_www/)
+# ------------------------------------------------------------------ ENVIAR O ACESSO (retaguarda)
+# 15/10/2026 (pedido do Ronan): na ficha da empresa, botao "Enviar acesso ao Web Empresas" - manda o link do portal por
+# WhatsApp (gateway da rede) para o FINANCEIRO da empresa (colaboradores marcados "ve as faturas") e, se informado,
+# para mais um numero. Quem chama e' o retaguarda, com o access_token do operador (mesmo padrao de /operador/senha).
+LINK_PORTAL = "https://www.redesn.com.br/empresas/"
+LINK_APP = "https://www.redesn.com.br/app/"
+
+
+def _fone_wpp(p):
+    """Melhor numero de WhatsApp da pessoa (so' digitos, DDD+numero) ou ''."""
+    for k in ("whatsapp", "telefone"):
+        d = cp._so_digitos(p.get(k))
+        if d.startswith("55") and len(d) in (12, 13):
+            d = d[2:]
+        if len(d) in (10, 11):
+            return d
+    return ""
+
+
+def _msg_acesso(nome_pessoa, nome_empresa):
+    pri = (nome_pessoa or "").strip().split(" ")[0].title()
+    return (f"Olá{', ' + pri if pri else ''}! A *{nome_empresa}* agora tem acesso ao *Portal Empresas* da Rede SN: "
+            "placas, consumo de cada abastecimento com a foto do cupom assinado, faturas, Pix e boleto.\n\n"
+            f"🔗 {LINK_PORTAL}\n\n"
+            "Entre com o seu *CPF* e a *senha do app Postos SN*. "
+            f"Ainda não tem conta no app? Crie em {LINK_APP} (use o mesmo CPF).")
+
+
+@bp_empresas.route("/empresas/admin/enviar-acesso", methods=["POST"])
+def admin_enviar_acesso():
+    import operadores_admin as oa
+    try:
+        url, key = oa._cfg()
+        if not url or not key:
+            return jsonify({"erro": "servidor sem SUPABASE_URL / SUPABASE_SERVICE_KEY"}), 500
+        d = request.get_json(silent=True) or {}
+        token = str(d.get("token") or "").strip()
+        pessoa_id = cp._uuid_ok(d.get("pessoa_id"))
+        extra = cp._so_digitos(d.get("extra_whatsapp"))
+        if not token or not pessoa_id:
+            return jsonify({"erro": "token e pessoa_id sao obrigatorios"}), 400
+        uid = oa._quem_e(url, key, token)
+        if not uid:
+            return jsonify({"erro": "sessao invalida ou expirada"}), 401
+        eu = oa._perfil(url, key, uid)
+        if not eu or eu.get("ativo") is False:
+            return jsonify({"erro": "usuario sem acesso ao retaguarda"}), 403
+        if not cp._limite_ok("acessoemp:" + uid, 20, 3600):
+            return cp._muitas("Muitos envios seguidos. Espere alguns minutos.")
+        emp = (cp._sget(f"oct_pessoas?id=eq.{pessoa_id}&select=id,nome,empresa_id,portal_empresas&limit=1") or [None])[0]
+        if not emp:
+            return jsonify({"erro": "empresa nao encontrada"}), 404
+        dono = (eu.get("papel") or "") == "master"
+        meus = {str(eu.get("empresa_id"))} | {str(e) for e in (eu.get("empresas") or [])}
+        if not (dono or str(emp.get("empresa_id")) in meus):
+            return jsonify({"erro": "empresa de outro posto"}), 403
+        if not emp.get("portal_empresas"):
+            return jsonify({"erro": "Ligue o Portal Empresas desta empresa antes de enviar o acesso."}), 409
+        fin = cp._sget(f"oct_pessoas?frota_empresa_id=eq.{pessoa_id}&app_ve_faturas=eq.true"
+                       f"&select=id,nome,whatsapp,telefone&order=nome&limit=20") or []
+        alvos, vistos = [], set()
+        for p in fin:
+            f = _fone_wpp(p)
+            alvos.append({"nome": p.get("nome") or "", "fone": f})
+            if f:
+                vistos.add(f)
+        if extra:
+            ex = extra[2:] if extra.startswith("55") and len(extra) in (12, 13) else extra
+            if len(ex) not in (10, 11):
+                return jsonify({"erro": "o WhatsApp informado nao tem DDD + numero validos"}), 400
+            if ex not in vistos:
+                alvos.append({"nome": "", "fone": ex})
+        if not alvos:
+            return jsonify({"erro": "Nenhum financeiro com acesso. Marque \"vê as faturas\" em um colaborador "
+                                    "(aba Venda a prazo) ou informe um WhatsApp."}), 409
+        resultados = []
+        for a in alvos:
+            if not a["fone"]:
+                resultados.append({"nome": a["nome"], "ok": False, "erro": "sem WhatsApp no cadastro"})
+                continue
+            try:
+                cp._wpp_texto(a["fone"], _msg_acesso(a["nome"], emp.get("nome") or "sua empresa"))
+                resultados.append({"nome": a["nome"], "destino": cp._mascara_fone(a["fone"]), "ok": True})
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                if "404" in msg:
+                    msg = "numero nao esta no WhatsApp"
+                resultados.append({"nome": a["nome"], "destino": cp._mascara_fone(a["fone"]), "ok": False, "erro": msg[:120]})
+        try:
+            cp._spost("oct_portal_empresas_log", {"pessoa_id": pessoa_id, "cpf_mascara": "retaguarda:" + str(uid)[:8],
+                                                  "acao": "acesso_enviado",
+                                                  "detalhe": {"enviados": sum(1 for r in resultados if r["ok"]),
+                                                              "falhas": sum(1 for r in resultados if not r["ok"])}},
+                      prefer="return=minimal")
+        except Exception:
+            pass
+        print(f"[empresas] acesso enviado {pessoa_id[:8]} por {str(uid)[:8]}: " +
+              ", ".join(("ok" if r["ok"] else "falhou") for r in resultados))
+        return jsonify({"ok": any(r["ok"] for r in resultados), "link": LINK_PORTAL, "resultados": resultados}), 200, SEM_CACHE
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"erro": str(e)[:200]}), 500
+
+
 @bp_empresas.route("/empresas", methods=["GET"])
 def empresas_raiz():
     from flask import redirect
