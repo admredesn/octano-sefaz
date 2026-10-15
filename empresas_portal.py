@@ -37,8 +37,11 @@ import datetime as dt
 import hashlib
 import hmac
 import io
+import json
+import os
 import re
 import time
+import urllib.request
 import zipfile
 from xml.sax.saxutils import escape as _xesc
 
@@ -1589,6 +1592,122 @@ def api_visao():
 
 
 # ------------------------------------------------------------------ a página (arquivos estáticos em empresas_www/)
+# ------------------------------------------------------------------ CONFIGURACOES: quem recebe a foto da nota a prazo
+# 15/10/2026 (pedido do Ronan): o gestor da empresa indica, no portal, os WhatsApps e e-mails (mais de um) que recebem a foto do
+# comprovante assinado. Usa os campos que o PDV e o nucleo ja' respeitam (oct_pessoas.cupom_whatsapps / cupom_emails, "Enviar o cupom
+# a prazo para"): preenchidos SUBSTITUEM o contato do cadastro; vazios = volta ao cadastro.
+CFG_MAX = 10
+
+
+def _fones_de(itens):
+    """Lista de numeros nacionais (DDD+numero) validos, sem repetir. itens: lista de textos ou um texto com ; , /"""
+    brutos = itens if isinstance(itens, (list, tuple)) else re.split(r"[;,/\n]+", str(itens or ""))
+    out, vistos = [], set()
+    for t in brutos:
+        d = re.sub(r"\D", "", str(t or "")).lstrip("0")
+        if d.startswith("55") and len(d) in (12, 13):
+            d = d[2:]
+        if len(d) in (10, 11) and d not in vistos:
+            vistos.add(d)
+            out.append(d)
+    return out
+
+
+def _fone_bonito(d):
+    return f"({d[:2]}) {d[2:7]}-{d[7:]}" if len(d) == 11 else (f"({d[:2]}) {d[2:6]}-{d[6:]}" if len(d) == 10 else d)
+
+
+def _emails_de(itens):
+    brutos = itens if isinstance(itens, (list, tuple)) else re.split(r"[;,\s]+", str(itens or ""))
+    out, vistos = [], set()
+    for e in brutos:
+        e = str(e or "").strip()
+        if re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", e) and e.lower() not in vistos:
+            vistos.add(e.lower())
+            out.append(e)
+    return out
+
+
+def _wpp_existe(fone):
+    """True/False se o numero existe no WhatsApp (consulta o gateway da rede, nao envia nada); None = nao deu para saber."""
+    base = (os.environ.get("WPP_URL") or "").rstrip("/")
+    tok = os.environ.get("WPP_TOKEN") or ""
+    if not base or not tok:
+        return None
+    try:
+        req = urllib.request.Request(base + "/check?phone=55" + fone, headers={"X-Wpp-Token": tok})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        return d.get("existe") if isinstance(d, dict) and d.get("existe") in (True, False) else None
+    except Exception:
+        return None
+
+
+@bp_empresas.route("/empresas/api/config", methods=["GET"])
+def api_config_ler():
+    cli, erro = _entrada()
+    if erro:
+        return erro
+    emp, erro = _acesso(cli, request.args.get("empresa"))
+    if erro:
+        return erro
+    try:
+        p = (cp._sget(f"oct_pessoas?id=eq.{emp['id']}&select=cupom_whatsapps,cupom_emails,whatsapp,telefone,email&limit=1") or [{}])[0]
+    except Exception:
+        return jsonify({"erro": "Não consegui carregar as configurações agora. Tente de novo."}), 502
+    zaps = [_fone_bonito(d) for d in _fones_de(p.get("cupom_whatsapps"))]
+    mails = _emails_de(p.get("cupom_emails"))
+    cad_zap = _fones_de(p.get("whatsapp")) or _fones_de(p.get("telefone"))
+    cad_mail = _emails_de(p.get("email"))
+    padrao = {"whatsapp": ("(" + cad_zap[0][:2] + ") •••••-" + cad_zap[0][-4:]) if cad_zap else "",
+              "email": cp._mascara_email(cad_mail[0]) if cad_mail else ""}
+    return jsonify({"ok": True, "empresa": emp["nome"], "posto": emp["posto"], "whatsapps": zaps, "emails": mails,
+                    "personalizado": bool(zaps or mails), "padrao": padrao, "limite": CFG_MAX,
+                    "outros_postos": len(_empresas(cli)[0]) > 1}), 200, SEM_CACHE
+
+
+@bp_empresas.route("/empresas/api/config", methods=["POST"])
+def api_config_gravar():
+    cli, erro = _entrada()
+    if erro:
+        return erro
+    d = request.get_json(silent=True) or {}
+    emp, erro = _acesso(cli, d.get("empresa"))
+    if erro:
+        return erro
+    if not cp._limite_ok("cfg:" + _quem(cli), 40, 3600):
+        return cp._muitas()
+    zaps_in = [str(x or "").strip() for x in (d.get("whatsapps") or []) if str(x or "").strip()]
+    mails_in = [str(x or "").strip() for x in (d.get("emails") or []) if str(x or "").strip()]
+    if len(zaps_in) > CFG_MAX or len(mails_in) > CFG_MAX:
+        return jsonify({"erro": f"No máximo {CFG_MAX} WhatsApps e {CFG_MAX} e-mails."}), 400
+    zaps = _fones_de(zaps_in)
+    mails = _emails_de(mails_in)
+    ruins = [t for t in zaps_in if not _fones_de([t])]
+    ruins_mail = [t for t in mails_in if not _emails_de([t])]
+    if ruins or ruins_mail:
+        itens = ruins + ruins_mail
+        return jsonify({"erro": "Confira: " + ", ".join(itens[:5]) + (" e outros" if len(itens) > 5 else "") +
+                                (" — o WhatsApp precisa de DDD + número; o e-mail, de um endereço válido." if ruins else " não é um e-mail válido."),
+                        "invalidos": itens}), 400
+    inexistentes = [_fone_bonito(f) for f in zaps if _wpp_existe(f) is False]
+    if inexistentes:
+        return jsonify({"erro": "Estes números não existem no WhatsApp: " + ", ".join(inexistentes) + ". Corrija para o comprovante chegar.",
+                        "invalidos": inexistentes}), 400
+    alvos = [emp["id"]]
+    if d.get("todos"):
+        alvos = [e["id"] for e in _empresas(cli)[0]] or alvos
+    corpo = {"cupom_whatsapps": "; ".join(_fone_bonito(f) for f in zaps) or None, "cupom_emails": "; ".join(mails) or None}
+    try:
+        for pid in alvos:
+            cp._spatch(f"oct_pessoas?id=eq.{pid}", corpo)
+    except Exception:
+        return jsonify({"erro": "Não consegui salvar agora. Tente de novo em instantes."}), 502
+    _ACESSO.clear(); _ACESSO_CNPJ.clear()
+    _log(cli, emp["id"], "config_contatos", {"whatsapps": len(zaps), "emails": len(mails), "empresas": len(alvos)})
+    return jsonify({"ok": True, "whatsapps": [_fone_bonito(f) for f in zaps], "emails": mails, "empresas": len(alvos)}), 200, SEM_CACHE
+
+
 # ------------------------------------------------------------------ ENVIAR O ACESSO (retaguarda)
 # 15/10/2026 (pedido do Ronan): na ficha da empresa, botao "Enviar acesso ao Web Empresas" - manda o link do portal por
 # WhatsApp (gateway da rede) para o FINANCEIRO da empresa (colaboradores marcados "ve as faturas") e, se informado,

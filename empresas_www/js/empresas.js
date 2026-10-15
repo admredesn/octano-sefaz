@@ -223,7 +223,7 @@ async function iniciar() {
 }
 
 // ---------------------------------------------------------------- moldura e rotas
-const ABAS = [["visao", "Visão geral"], ["placas", "Placas"], ["consumo", "Consumo"], ["faturas", "Faturas e boletos"]];
+const ABAS = [["visao", "Visão geral"], ["placas", "Placas"], ["consumo", "Consumo"], ["faturas", "Faturas e boletos"], ["config", "Configurações"]];
 function moldura(titulo, sub, acoesHtml, corpoHtml) {
   const emps = S.eu.empresas;
   const trocar = emps.length > 1
@@ -247,7 +247,7 @@ function esqueleto() {
 function rotear() {
   const h = (location.hash || "").replace(/^#\/?/, "") || "visao";
   S.rota = ABAS.some(a => a[0] === h) ? h : "visao";
-  const f = { visao: telaVisao, placas: telaPlacas, consumo: telaConsumo, faturas: telaFaturas }[S.rota];
+  const f = { visao: telaVisao, placas: telaPlacas, consumo: telaConsumo, faturas: telaFaturas, config: telaConfig }[S.rota];
   f();
   window.scrollTo(0, 0);
 }
@@ -744,6 +744,58 @@ async function abrirArquivo(fid, tipo) {
 }
 
 // ---------------------------------------------------------------- tratador único de cliques
+// ---------------------------------------------------------------- CONFIGURAÇÕES (quem recebe a foto da nota a prazo)
+async function telaConfig() {
+  raiz().innerHTML = moldura("Configurações", `Contatos que recebem o comprovante assinado das compras a prazo da ${S.empresa.nome}.`, "", esqueleto());
+  const r = await api("/empresas/api/config?" + eq());
+  if (S.rota !== "config") return;
+  if (!r.ok) { raiz().innerHTML = moldura("Configurações", "", "", `<div class="aviso">${esc(r.erro || "Não consegui carregar as configurações.")}</div>`); return; }
+  S.cfg = { zaps: r.whatsapps.slice(), mails: r.emails.slice(), padrao: r.padrao || {}, limite: r.limite || 10, outros: !!r.outros_postos, personalizado: !!r.personalizado, erro: "" };
+  desenhaConfig();
+}
+function linhasCfg(tipo, lista) {
+  const ph = tipo === "zap" ? "(31) 99999-8888" : "financeiro@empresa.com.br";
+  const rot = tipo === "zap" ? "WhatsApp" : "E-mail";
+  if (!lista.length) return `<div class="mut" style="margin-bottom:10px">Nenhum ${tipo === "zap" ? "WhatsApp" : "e-mail"} informado.</div>`;
+  return lista.map((v, i) => `<div class="cfg-linha"><input class="entrada" data-cfg="${tipo}" data-i="${i}" value="${esc(v)}" placeholder="${ph}"
+      inputmode="${tipo === "zap" ? "tel" : "email"}" autocomplete="off" aria-label="${rot} ${i + 1}">
+    <button class="btn ghost peq" data-acao="cfg-rem" data-t="${tipo}" data-i="${i}" aria-label="Remover ${rot} ${i + 1}">Remover</button></div>`).join("");
+}
+function desenhaConfig() {
+  const c = S.cfg;
+  const padrao = [c.padrao.whatsapp ? "WhatsApp " + c.padrao.whatsapp : "", c.padrao.email ? "e-mail " + c.padrao.email : ""].filter(Boolean).join(" · ") || "nenhum contato cadastrado";
+  raiz().innerHTML = moldura("Configurações", `Contatos que recebem o comprovante assinado das compras a prazo da ${S.empresa.nome}.`, "", `
+    <section class="cartao pad">
+      <h2 style="margin:0 0 6px">Quem recebe a foto da nota a prazo</h2>
+      <p class="mut" style="margin:0 0 14px;line-height:22px">A cada abastecimento a prazo, o posto envia na hora a foto do cupom assinado. Informe quantos WhatsApps e e-mails quiser;
+        todos recebem. Se deixar tudo vazio, o posto usa o contato do cadastro da empresa.</p>
+      <div class="aviso"><span aria-hidden="true">ⓘ</span><span>Contato do cadastro no posto: <b>${esc(padrao)}</b>${c.personalizado ? "" : " — é o que está valendo agora."}</span></div>
+      <div class="cfg-bloco"><h3>WhatsApp</h3>${linhasCfg("zap", c.zaps)}
+        <button class="btn ghost" data-acao="cfg-add" data-t="zap" ${c.zaps.length >= c.limite ? "disabled" : ""}>+ Adicionar WhatsApp</button>
+        <div class="mut" style="margin-top:8px;font-size:13px">Com DDD. Conferimos se o número existe no WhatsApp antes de salvar.</div></div>
+      <div class="cfg-bloco"><h3>E-mail</h3>${linhasCfg("mail", c.mails)}
+        <button class="btn ghost" data-acao="cfg-add" data-t="mail" ${c.mails.length >= c.limite ? "disabled" : ""}>+ Adicionar e-mail</button>
+        <div class="mut" style="margin-top:8px;font-size:13px">O comprovante vai em um único e-mail, com todos os endereços no campo "Para".</div></div>
+      ${c.outros ? `<label class="cfg-todos"><input type="checkbox" id="cfg-todos"> Aplicar também aos outros postos desta empresa</label>` : ""}
+      <div class="erro" id="cfg-erro" role="alert" ${c.erro ? "" : "hidden"}>${esc(c.erro)}</div>
+      <div style="margin-top:16px"><button class="btn" id="cfg-ok" data-acao="cfg-salvar">Salvar configurações</button></div>
+    </section>`);
+}
+async function salvarConfig(btn) {
+  const c = S.cfg, v = (a) => a.map(x => String(x || "").trim()).filter(Boolean);
+  const todos = document.getElementById("cfg-todos");
+  btn.disabled = true; btn.textContent = "Salvando…";
+  const r = await api("/empresas/api/config", { empresa: emp(), whatsapps: v(c.zaps), emails: v(c.mails), todos: !!(todos && todos.checked) });
+  if (!r.ok) {
+    c.erro = r.erro || "Não consegui salvar.";
+    desenhaConfig();
+    return;
+  }
+  c.zaps = r.whatsapps.slice(); c.mails = r.emails.slice(); c.erro = ""; c.personalizado = !!(c.zaps.length || c.mails.length);
+  aviso(c.personalizado ? "Contatos salvos. As próximas fotos vão para eles." : "Contatos limpos. Voltamos a usar o contato do cadastro.", 4200);
+  desenhaConfig();
+}
+
 const ACOES = {
   sair: () => sair(false),
   fecha: () => fechaJanela(),
@@ -758,6 +810,10 @@ const ACOES = {
   },
   "vis-met": (el) => { S.visMet = el.dataset.v; desenhaVisao(); },
   "vis-per": (el) => { S.visPer = el.dataset.v; desenhaVisao(); },
+  "cfg-add": (el) => { const c = S.cfg; if (!c) return; (el.dataset.t === "zap" ? c.zaps : c.mails).push(""); c.erro = ""; desenhaConfig();
+    const ins = document.querySelectorAll ? document.querySelectorAll('[data-cfg="' + el.dataset.t + '"]') : []; if (ins.length && ins[ins.length - 1].focus) ins[ins.length - 1].focus(); },
+  "cfg-rem": (el) => { const c = S.cfg; if (!c) return; (el.dataset.t === "zap" ? c.zaps : c.mails).splice(Number(el.dataset.i), 1); c.erro = ""; desenhaConfig(); },
+  "cfg-salvar": (el) => salvarConfig(el),
   "nova-placa": () => modalPlaca(null),
   "nova-placa-rota": (el, e) => { e.preventDefault(); location.hash = "#/placas"; setTimeout(() => modalPlaca(null), 300); },
   "placa-editar": (el) => modalPlaca(el.dataset.id),
@@ -818,5 +874,9 @@ document.addEventListener("change", e => {
   }
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape") fechaJanela(); });
+document.addEventListener("input", e => {
+  const t = e.target;
+  if (t && t.dataset && t.dataset.cfg && S.cfg) { (t.dataset.cfg === "zap" ? S.cfg.zaps : S.cfg.mails)[Number(t.dataset.i)] = t.value; }
+});
 
 iniciar();

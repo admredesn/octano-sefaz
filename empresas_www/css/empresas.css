@@ -172,3 +172,10 @@ table.t tr.sel td { background: #F3F7FB; }
 }
 .cart { background: #fff; border: 1px solid var(--borda); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 9px; }
 .cart .l { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+
+/* ===== configuracoes ===== */
+.cfg-bloco { margin-top: 22px; }
+.cfg-bloco h3 { margin: 0 0 10px; font: 700 18px var(--titulo); }
+.cfg-linha { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; max-width: 560px; }
+.cfg-linha .entrada { flex: 1; min-width: 0; }
+.cfg-todos { display: flex; align-items: center; gap: 8px; margin-top: 20px; font-weight: 500; }
