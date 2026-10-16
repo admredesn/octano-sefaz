@@ -33,7 +33,10 @@ function barra(nome) {
 }
 
 async function rota() {
-  const h = (location.hash || "").replace(/^#\/?/, "") || (tok() ? "inicio" : "entrar");
+  // sem tela pedida: cliente logado -> Início; só a EQUIPE logada -> Painel da equipe (é lá que o celular se registra
+  // para os pedidos do caixa); ninguém -> Entrar
+  const soEquipe = !tok() && EQUIPE_NO_AR && typeof tokEq === "function" && !!tokEq();
+  const h = (location.hash || "").replace(/^#\/?/, "") || (tok() ? "inicio" : soEquipe ? "eq-painel" : "entrar");
   const [nome, arg] = h.split("/");
   if (!tok() && !PUBLICAS.includes(nome)) { ir("#/entrar"); return; }
   if (tok() && (nome === "entrar" || nome === "cadastro")) { ir("#/inicio"); return; }
@@ -444,6 +447,10 @@ async function telaPerfil() {
       ${item("escudo", "Sair de todos os aparelhos", "sairTodos()")}
       ${item("lixo", "Excluir minha conta", "excluirConta()")}
     </div></div>
+    ${EQUIPE_NO_AR ? `<div class="grupo-tit">Equipe do posto</div>
+    <div class="secao" style="padding-top:0"><div class="card lista">
+      ${item("painel", "Acesso da equipe", "ir('#/equipe')")}
+    </div></div>` : ""}
     <div class="grupo-tit">Sobre</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${item("dados", "Termos de uso", "window.open(DOC_TERMOS, '_blank', 'noopener')")}
