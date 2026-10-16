@@ -1105,15 +1105,30 @@ def api_acionar():
         bico = None
     if not empresa:
         return jsonify({"erro": "posto não identificado — abra o portal lendo o QR code do posto"}), 400
-    if forma not in [f[0] for f in FORMAS]:
+    # DESCONTO DO APP NA BOMBA (16/10/2026): "desconto agora" troca o preço do bico; a forma vem da
+    # tabela DESCONTO APP do posto (forma_id), não da lista fixa do cashback
+    modo = "desconto" if str(d.get("modo") or "") == "desconto" else "acumular"
+    desc_info, forma_sel = None, None
+    if modo == "desconto":
+        if not bico:
+            return jsonify({"erro": "Informe o número do bico para o desconto."}), 400
+        desc_info = _desconto_do_bico(empresa, bico)
+        if not desc_info.get("ativo"):
+            return jsonify({"erro": "Desconto indisponível: " + str(desc_info.get("motivo") or "")}), 409
+        forma_sel = next((f for f in desc_info["formas"] if f["id"] == _uuid_ok(d.get("forma_id"))), None)
+        if not forma_sel:
+            return jsonify({"erro": "Escolha uma forma de pagamento em que o desconto vale."}), 400
+        forma = str(forma_sel.get("cod") or "99")
+    elif forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
     # CHAVE GERAL do cashback. 05/10/2026 (app Postos SN): o acionamento também IDENTIFICA
     # o cliente na venda, e é isso que dá os PONTOS (1 por R$ 1). Posto com cashback
     # desligado agora aceita o acionamento — só não gera cashback (o PDV já não gera:
     # a trava dele é oct_parametros 'cashback' / oct_empresas.cashback_ativo no gateway).
-    com_cashback = forma != "05" and _cashback_ligado(empresa)
+    # Desconto na bomba = o benefício já é o preço: sem cashback nesse abastecimento.
+    com_cashback = modo != "desconto" and forma != "05" and _cashback_ligado(empresa)
     aviso = None
-    if forma != "05" and not com_cashback:
+    if modo != "desconto" and forma != "05" and not com_cashback:
         aviso = "Este posto não está com cashback agora — mas você ganha os pontos da compra."
     # A PRAZO: só com liberação do POSTO (revalida no servidor); se o cliente é
     # colaborador de EMPRESA, a conta (e o cupom) é da empresa
@@ -1135,8 +1150,8 @@ def api_acionar():
             selfie = _foto_bytes(d.get("selfie"))
         except ValueError as e:
             return jsonify({"erro": str(e), "precisa_selfie": True}), 400
-    # janela 2h (regra do CASHBACK — não vale pro A PRAZO, que pode repetir no dia)
-    if forma != "05":
+    # janela 2h (regra do CASHBACK — não vale pro A PRAZO, que pode repetir no dia, nem pro desconto)
+    if forma != "05" and modo != "desconto":
         corte2h = (datetime.now(timezone.utc) - timedelta(seconds=JANELA_2H_SEG)).isoformat()
         try:
             rec = _sget("oct_cashback?chave_pix=eq." + rq.utils.quote(cli.get("chave_pix") or "", safe="")
@@ -1194,6 +1209,15 @@ def api_acionar():
             km = None
         if km:
             reg["km"] = km
+        if desc_info:
+            reg.update({
+                "modo": "desconto", "forma_id": forma_sel["id"], "produto_id": desc_info["produto_id"],
+                "desconto_litro": desc_info["desconto_litro"], "preco_normal": desc_info["preco_normal"],
+                "preco_desconto": desc_info["preco_desconto"],
+                "desconto_formas": [f["id"] for f in desc_info["formas"]],
+                "bomba_status": "pedido", "bomba_em": datetime.now(timezone.utc).isoformat(),
+            })
+            reg["combustivel"] = reg.get("combustivel") or desc_info["combustivel"]
         if selfie:
             # a selfie sobe ANTES do acionamento existir: o PDV nunca vê um a prazo sem a foto
             agora_s = datetime.now(timezone.utc)
@@ -1210,15 +1234,18 @@ def api_acionar():
         try:
             novo = _spost("oct_cashback_acionamentos", reg)
         except RuntimeError as e:
-            if "Could not find the" not in str(e) or selfie:
-                raise                                    # com selfie as colunas novas são obrigatórias
+            if desc_info and "Could not find the" in str(e):
+                return jsonify({"erro": "Desconto do app indisponível neste momento (falta atualizar o banco)."}), 503
+            if "Could not find the" not in str(e) or selfie or desc_info:
+                raise                                    # com selfie/desconto as colunas novas são obrigatórias
             for c in ("bico", "itens", "placa", "km"):   # tabela sem alguma coluna nova
                 reg.pop(c, None)
             novo = _spost("oct_cashback_acionamentos", reg)
         if selfie:
             _faces_limpar()
         return jsonify({"ok": True, "acionamento": (novo[0] if novo else None),
-                        "validade_min": ACIONAMENTO_VALIDADE_MIN, "cashback": com_cashback, "aviso": aviso})
+                        "validade_min": ACIONAMENTO_VALIDADE_MIN, "cashback": com_cashback, "aviso": aviso,
+                        "desconto": desc_info if desc_info else None})
     except Exception as e:
         return jsonify({"erro": "falha ao acionar: " + str(e)[:200]}), 500
 
@@ -1320,6 +1347,75 @@ def _sanear_itens(brutos):
     return itens
 
 
+# ------------------------------------------------------------------
+# DESCONTO DO APP NA BOMBA (16/10/2026, pedido do Ronan). Tabela FIXA "DESCONTO APP" do posto
+# (oct_app_desconto + oct_app_desconto_itens: R$/litro por combustível e as formas em que vale).
+# O cliente escolhe "Desconto agora": o acionamento leva o pedido (modo='desconto',
+# bomba_status='pedido') e o NÚCLEO do posto (nucleo/desconto_app.py) baixa o preço SÓ daquele
+# bico, devolve no fim e grava o andamento em bomba_status. Sem a tabela ligada o app nem oferece.
+# ------------------------------------------------------------------
+DESCONTO_APP_MAX = 1.00          # R$/L (o banco também trava)
+DESCONTO_SEM_RESPOSTA_S = 45     # pedido sem o núcleo pegar: o app oferece abastecer sem desconto
+
+
+def _desconto_do_bico(empresa, bico):
+    """{'ativo': True, produto_id, combustivel, preco_normal, desconto_litro, preco_desconto, formas:[{id,nome,cod}]}
+    ou {'ativo': False, 'motivo': ...}. Preço normal = o do CADASTRO (o núcleo confere com a bomba)."""
+    try:
+        cab = _sget(f"oct_app_desconto?empresa_id=eq.{empresa}&select=ativo,formas&limit=1")
+    except Exception:
+        return {"ativo": False, "motivo": "desconto do app indisponível"}
+    if not cab or not cab[0].get("ativo"):
+        return {"ativo": False, "motivo": "este posto não está com desconto do app agora"}
+    try:
+        bc = _sget(f"oct_bicos?empresa_id=eq.{empresa}&numero=eq.{int(bico)}&ativo=eq.true&select=tanque_id&limit=1")
+        tanque = bc[0].get("tanque_id") if bc else None
+        if not tanque:
+            return {"ativo": False, "motivo": "bico não encontrado neste posto"}
+        prods = [p for p in _sget(f"oct_produtos?empresa_id=eq.{empresa}&tanque_id=eq.{tanque}&ativo=eq.true"
+                                  f"&select=id,nome,preco_venda_a") if float(p.get("preco_venda_a") or 0) > 0]
+        if not prods:
+            return {"ativo": False, "motivo": "combustível sem preço no cadastro"}
+        if len({round(float(p["preco_venda_a"]), 3) for p in prods}) > 1:
+            return {"ativo": False, "motivo": "o combustível deste bico tem dois preços no cadastro"}
+        itens = _sget(f"oct_app_desconto_itens?empresa_id=eq.{empresa}&produto_id=in.({','.join(p['id'] for p in prods)})"
+                      f"&desconto_litro=gt.0&select=produto_id,desconto_litro")
+        if not itens:
+            return {"ativo": False, "motivo": "sem desconto do app para este combustível"}
+        it = itens[0]
+        prod = next(p for p in prods if p["id"] == it["produto_id"])
+        desc = round(float(it["desconto_litro"]), 3)
+        normal = round(float(prod["preco_venda_a"]), 3)
+        if not (0 < desc <= DESCONTO_APP_MAX) or normal - desc < 0.5:
+            return {"ativo": False, "motivo": "desconto do app fora da faixa"}
+        formas = []
+        ids_f = [f for f in (cab[0].get("formas") or []) if _uuid_ok(f)]
+        if ids_f:
+            fs = _sget(f"oct_formas_pagamento?id=in.({','.join(ids_f)})&empresa_id=eq.{empresa}&ativo=eq.true"
+                       f"&select=id,nome,cod_sefaz,a_prazo,ordem&order=ordem")
+            # a prazo pelo app tem fluxo próprio (selfie/limite): fica fora do desconto na bomba
+            formas = [{"id": f["id"], "nome": f["nome"], "cod": f.get("cod_sefaz")} for f in fs if not f.get("a_prazo")]
+        if not formas:
+            return {"ativo": False, "motivo": "nenhuma forma de pagamento liberada para o desconto"}
+        return {"ativo": True, "produto_id": prod["id"], "combustivel": prod["nome"], "preco_normal": normal,
+                "desconto_litro": desc, "preco_desconto": round(normal - desc, 3), "formas": formas}
+    except Exception:
+        return {"ativo": False, "motivo": "desconto do app indisponível"}
+
+
+@bp_cashback.route("/cashback/api/desconto", methods=["GET"])
+def api_desconto():
+    """O app pergunta se este bico tem desconto do app agora (público: é o preço anunciado)."""
+    posto = _uuid_ok(request.args.get("posto"))
+    try:
+        bico = int(request.args.get("bico") or 0)
+    except ValueError:
+        bico = 0
+    if not posto or not bico:
+        return jsonify({"ok": False, "ativo": False}), 400
+    return jsonify(dict(_desconto_do_bico(posto, bico), ok=True))
+
+
 @bp_cashback.route("/cashback/api/bico", methods=["GET"])
 def api_bico():
     """Ficha do bico p/ o portal: combustível (e preço, se houver um recente).
@@ -1382,8 +1478,27 @@ def api_acionamento_live():
     ac = acs[0]
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
             ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens", "placa", "km",
-             "auth_codigo", "selfie_em")}}
+             "auth_codigo", "selfie_em", "empresa_id", "modo", "bomba_status", "preco_normal", "preco_desconto",
+             "desconto_litro")}}
     bico = ac.get("bico")
+
+    # DESCONTO DO APP NA BOMBA: enquanto o núcleo troca o preço, o app NÃO manda abastecer
+    if ac.get("modo") == "desconto" and ac.get("status") == "aguardando":
+        bs = ac.get("bomba_status")
+        info = ac.get("bomba_info") if isinstance(ac.get("bomba_info"), dict) else {}
+        if bs in ("pedido", "aplicando"):
+            try:
+                idade_p = (datetime.now(timezone.utc)
+                           - datetime.fromisoformat(str(ac.get("criado_em")).replace("Z", "+00:00"))).total_seconds()
+            except Exception:
+                idade_p = 0
+            resp["fase"] = ("desconto_sem_resposta" if bs == "pedido" and idade_p > DESCONTO_SEM_RESPOSTA_S
+                            else "desconto_aplicando")
+            return jsonify(resp)
+        if bs in ("falhou", "expirado", "cancelado"):
+            resp["fase"] = "desconto_" + bs
+            resp["erro"] = info.get("erro")
+            return jsonify(resp)
 
     # cashback gerado depois do acionamento? (fase final)
     try:

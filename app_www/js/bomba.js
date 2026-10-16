@@ -102,21 +102,56 @@ async function telaAcionar() {
         <div class="campo"><label>Combustível</label><select id="a-comb"><option value="">—</option>${COMBS.map(c => `<option>${c}</option>`).join("")}</select></div>
       </div>
       <div id="a-info" class="vazio" style="padding:6px 2px 0"></div>
-      <div class="campo"><label>Como vai pagar</label><select id="a-forma"><option value="17">PIX</option><option value="01">Dinheiro</option></select></div>
+      <div id="a-modo"></div>
+      <div class="campo" id="a-forma-campo"><label>Como vai pagar</label><select id="a-forma"><option value="17">PIX</option><option value="01">Dinheiro</option></select></div>
+      <div class="campo" id="a-forma-desc-campo" style="display:none"><label>Como vai pagar</label><select id="a-forma-desc"></select></div>
       <div id="a-prazo-msg" class="vazio" style="padding:6px 2px 0"></div>
       <button class="btn" id="a-btn">Avisar o caixa</button>
       <div class="msg" id="a-msg"></div>
-      <div class="vazio" style="text-align:center">O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.</div>
+      <div class="vazio" id="a-rodape" style="text-align:center">O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.</div>
     </div></div>`;
   const $ = id => document.getElementById(id);
+  // DESCONTO DO APP NA BOMBA (16/10/2026): bico com desconto na tabela DESCONTO APP do posto ganha a escolha
+  // "Desconto agora" (o preço do bico baixa só para este cliente) × "Acumular" (cashback e pontos)
+  let _desc = null;
+  const modoAtual = () => {
+    const x = document.querySelector('input[name="a-modo"]:checked');
+    return _desc && x ? x.value : "acumular";
+  };
+  const modo = () => {
+    const desc = modoAtual() === "desconto";
+    $("a-forma-campo").style.display = desc ? "none" : "";
+    $("a-forma-desc-campo").style.display = desc ? "" : "none";
+    $("a-btn").textContent = desc ? "Aplicar o desconto na bomba" : "Avisar o caixa";
+    $("a-rodape").innerHTML = desc
+      ? "O preço baixa <b>só neste bico e só para você</b> e volta ao normal quando terminar. Com o desconto, este abastecimento não gera cashback."
+      : "O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.";
+  };
+  const descontoBico = async () => {
+    const b = soDigitos($("a-bico").value), posto = $("a-posto").value;
+    _desc = null; $("a-modo").innerHTML = ""; modo();
+    if (!b || !posto) return;
+    const r = await api(`/cashback/api/desconto?posto=${encodeURIComponent(posto)}&bico=${b}`);
+    if (!(r.ok && r.ativo) || soDigitos($("a-bico").value) !== b) return;
+    _desc = r;
+    $("a-modo").innerHTML = `<div class="campo"><label>O que você prefere?</label>
+      <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="desconto" checked>
+        <span><b>Desconto agora</b> · ${brl(r.desconto_litro)} por litro: o bico fica em <b>${brl(r.preco_desconto)}</b> em vez de ${brl(r.preco_normal)}</span></label>
+      <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="acumular">
+        <span><b>Acumular</b> · cashback e pontos para resgatar depois</span></label></div>`;
+    $("a-forma-desc").innerHTML = r.formas.map(f => `<option value="${esc(f.id)}">${esc(f.nome)}</option>`).join("");
+    document.querySelectorAll('input[name="a-modo"]').forEach(x => { x.onchange = modo; });
+    modo();
+  };
   const infoBico = async () => {
     const b = soDigitos($("a-bico").value), posto = $("a-posto").value;
-    if (!b || !posto) { $("a-info").textContent = ""; return; }
+    if (!b || !posto) { $("a-info").textContent = ""; descontoBico(); return; }
     const r = await api(`/cashback/api/bico?posto=${encodeURIComponent(posto)}&bico=${b}`);
     if (r.ok && r.combustivel) {
       $("a-comb").value = r.combustivel;
       $("a-info").innerHTML = `⛽ <b>${esc(r.combustivel)}</b>${r.preco_litro ? " · " + brl(r.preco_litro) + "/L" : ""}`;
     } else $("a-info").textContent = "";
+    descontoBico();
   };
   const prazo = async () => {
     const posto = $("a-posto").value, sel = $("a-forma");
@@ -136,6 +171,15 @@ async function telaAcionar() {
     m.className = "msg erro";
     if (!posto) { m.textContent = "Escolha o posto."; return; }
     if (!soDigitos($("a-bico").value)) { m.textContent = "Informe o número do bico."; return; }
+    if (modoAtual() === "desconto") {
+      m.className = "msg"; m.textContent = "Pedindo o desconto à bomba…";
+      const rd = await api("/cashback/api/acionar", { posto, bico: $("a-bico").value, combustivel: $("a-comb").value,
+                                                      modo: "desconto", forma_id: $("a-forma-desc").value });
+      if (!rd.ok) { m.className = "msg erro"; m.textContent = rd.erro || "Não consegui pedir o desconto."; return; }
+      S.bico = "";
+      acompanhar();
+      return;
+    }
     let selfie = null;
     if (forma === "05") {
       if (!(S.me && S.me.tem_facial)) {
@@ -164,6 +208,7 @@ function acompanhar() {
     <div class="secao"><div class="card vivo">
       <div id="v-fase" style="color:var(--mut);font-weight:600">Avisando o caixa…</div>
       <div class="num" id="v-num">—</div><div id="v-det" style="color:var(--mut)"></div>
+      <div id="v-acoes"></div>
       <button class="btn sec" id="v-cancelar">Cancelar</button>
       <button class="btn" onclick="ir('#/inicio')">Voltar ao início</button>
     </div></div></div>`;
@@ -179,17 +224,52 @@ function acompanhar() {
     const canc = document.getElementById("v-cancelar");      // depois de abastecer não há mais o que cancelar
     if (canc) canc.style.display = ["concluido", "cashback", "usado"].includes(r.fase) ? "none" : "";
     if (!r.ok || r.fase === "sem_acionamento") { fase.textContent = "Nenhum abastecimento acionado."; pararVivo(); return; }
-    if (r.fase === "aguardando_inicio") { fase.textContent = "⏳ Pode abastecer no bico " + (ac.bico || "?"); n.textContent = "—"; d.textContent = "O caixa já sabe que é você."; }
+    // DESCONTO DO APP NA BOMBA: enquanto a bomba troca o preço, ainda não pode abastecer
+    const desc = ac.modo === "desconto";
+    const acoes = document.getElementById("v-acoes");
+    const deNovo = rotulo => {
+      if (!acoes || document.getElementById("v-denovo")) return;
+      acoes.innerHTML = `<button class="btn" id="v-denovo">${esc(rotulo)}</button>`;
+      document.getElementById("v-denovo").onclick = () => {
+        pararVivo();
+        if (ac.empresa_id) { S.posto = ac.empresa_id; LS.set("psn_posto", S.posto); }
+        S.bico = String(ac.bico || "");
+        ir("#/acionar");
+      };
+    };
+    if (acoes && !String(r.fase || "").startsWith("desconto_")) acoes.innerHTML = "";
+    if (r.fase === "desconto_aplicando") {
+      fase.textContent = "⏳ Aplicando o desconto no bico " + (ac.bico || "?"); n.textContent = brl(ac.preco_desconto) + "/L";
+      d.textContent = "Aguarde uns segundos — ainda não tire o bico.";
+    } else if (r.fase === "desconto_sem_resposta") {
+      fase.textContent = "⚠️ O posto não respondeu"; n.textContent = "—";
+      d.textContent = "Não consegui trocar o preço da bomba agora. Você pode escolher de novo e abastecer acumulando cashback e pontos.";
+      deNovo("Escolher de novo");
+    } else if (["desconto_falhou", "desconto_expirado", "desconto_cancelado"].includes(r.fase)) {
+      fase.textContent = r.fase === "desconto_expirado" ? "⌛ O desconto expirou" : r.fase === "desconto_cancelado" ? "Desconto cancelado" : "⚠️ Não deu para aplicar o desconto";
+      n.textContent = "—";
+      d.textContent = r.fase === "desconto_expirado"
+        ? "Você não começou a abastecer em 3 minutos e o preço do bico voltou ao normal."
+        : (r.erro ? "Motivo: " + r.erro + ". " : "") + "O preço do bico continua o normal.";
+      if (r.fase !== "desconto_cancelado") deNovo(r.fase === "desconto_expirado" ? "Pedir de novo" : "Escolher de novo");
+      pararVivo();
+    } else if (r.fase === "aguardando_inicio" && desc) {
+      fase.textContent = "✅ Desconto na bomba! Pode abastecer no bico " + (ac.bico || "?");
+      n.textContent = brl(ac.preco_desconto) + "/L";
+      d.textContent = "Preço normal " + brl(ac.preco_normal) + "/L. Se não começar em 3 minutos, o preço volta ao normal.";
+    } else if (r.fase === "aguardando_inicio") { fase.textContent = "⏳ Pode abastecer no bico " + (ac.bico || "?"); n.textContent = "—"; d.textContent = "O caixa já sabe que é você."; }
     else if (r.fase === "abastecendo") {
       const lv = r.live || {};
-      fase.textContent = "⛽ Abastecendo no bico " + (ac.bico || "?");
+      fase.textContent = "⛽ Abastecendo no bico " + (ac.bico || "?") + (desc ? " com desconto" : "");
       n.textContent = lv.volume != null ? Number(lv.volume).toLocaleString("pt-BR", { minimumFractionDigits: 2 }) + " L" : brl(lv.valor);
       d.textContent = (lv.valor != null ? brl(lv.valor) + " · " : "") + (lv.combustivel || "");
     } else if (r.fase === "concluido") {
       const a = r.abastecimento || {};
+      const litros = Number(a.litros || 0);
       fase.textContent = "✅ Abastecimento concluído";
       n.textContent = brl(a.valor || a.valor_total);
-      d.textContent = Number(a.litros || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " L · pague no caixa. Você ganha " + num(Math.floor(a.valor || a.valor_total || 0)) + " pontos.";
+      d.textContent = litros.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " L · pague no caixa. "
+        + (desc ? "Você economizou " + brl(litros * Number(ac.desconto_litro || 0)) + "." : "Você ganha " + num(Math.floor(a.valor || a.valor_total || 0)) + " pontos.");
     } else if (r.fase === "cashback") {
       const c = r.cashback || {};
       fase.textContent = c.status === "pago" ? "🎉 Cashback pago no seu Pix" : "🕐 Cashback a caminho";
