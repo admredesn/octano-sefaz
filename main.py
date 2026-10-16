@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-16-desconto-app-1",
+                    "build": "2026-10-16-equipe-push-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -555,6 +555,14 @@ try:
     app.register_blueprint(bp_equipe)
 except Exception as _e:
     print("[app-equipe] nao carregou:", _e)
+
+# ── App Postos SN: aviso no celular da equipe (pedido do caixa com o app fechado) — 16/10/2026 ──
+# Vigia a cada 3 s; parada sem FIREBASE_SA ou sem SQL-APP-EQUIPE-PUSH.sql. EQUIPE_PUSH=0 desliga.
+try:
+    from app_equipe import iniciar_avisos as _equipe_avisos_iniciar
+    _equipe_avisos_iniciar()
+except Exception as _e:
+    print("[equipe-aviso] nao iniciou:", _e)
 
 
 # ── Agendador da consulta automatica de NF-e (DistDFe) ──────────────────────

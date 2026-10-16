@@ -55,7 +55,7 @@ function topoSimples(titulo, voltar) {
 async function carregarMe(forcar) {
   if (S.me && !forcar) return S.me;
   const r = await api("/cashback/api/me");
-  if (r.ok) S.me = r;
+  if (r.ok) { S.me = r; pushRegistrar(r); }     // dentro do app das lojas: registra o celular p/ notificações
   return S.me;
 }
 async function carregarPostos() {
@@ -465,7 +465,7 @@ async function alternarMkt() {
 
 function sair() {
   folha(`<h2 style="font-size:1.15rem">Sair da conta?</h2>
-    <button class="btn" onclick="LS.del('psn_token');S.me=S.pontos=null;fecharFolha();ir('#/entrar')">Sair</button>
+    <button class="btn" onclick="pushSair();LS.del('psn_token');S.me=S.pontos=null;fecharFolha();ir('#/entrar')">Sair</button>
     <button class="btn sec" onclick="fecharFolha()">Cancelar</button>`);
 }
 function sairTodos() {
@@ -474,7 +474,7 @@ function sairTodos() {
     <button class="btn verm" id="st-ok">Sair de todos</button><button class="btn sec" onclick="fecharFolha()">Cancelar</button>`);
   document.getElementById("st-ok").onclick = async () => {
     const r = await api("/cashback/api/conta/sair-todos", {});
-    if (r.ok) { LS.del("psn_token"); S.me = null; fecharFolha(); ir("#/entrar"); } else toast(r.erro || "Falhou.");
+    if (r.ok) { pushSair(); LS.del("psn_token"); S.me = null; fecharFolha(); ir("#/entrar"); } else toast(r.erro || "Falhou.");
   };
 }
 function excluirConta() {
@@ -485,7 +485,7 @@ function excluirConta() {
     <div class="msg" id="ex-msg"></div>`);
   document.getElementById("ex-ok").onclick = async () => {
     const r = await api("/cashback/api/conta/excluir", { senha: document.getElementById("ex-senha").value });
-    if (r.ok) { LS.del("psn_token"); S.me = null; fecharFolha(); toast("Sua conta foi excluída."); ir("#/entrar"); return; }
+    if (r.ok) { pushSair(); LS.del("psn_token"); S.me = null; fecharFolha(); toast("Sua conta foi excluída."); ir("#/entrar"); return; }
     const m = document.getElementById("ex-msg"); m.className = "msg erro"; m.textContent = r.erro || "Não consegui excluir.";
   };
 }

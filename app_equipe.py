@@ -1035,3 +1035,200 @@ def api_permissoes_gravar():
         return jsonify({"erro": "Não consegui salvar: " + str(e)[:80]}), 502
     _esquecer("padrao|" + perfil)
     return jsonify({"ok": True})
+
+
+# ================================================================== AVISO NO CELULAR DA EQUIPE (16/10/2026)
+# O gerente/dono recebe o pedido do caixa na tela do celular, com o app fechado (Firebase, app_push.enviar_um).
+# Tabelas em repo/sql/SQL-APP-EQUIPE-PUSH.sql: oct_app_equipe_dispositivos (celulares de quem entrou no "Acesso da
+# equipe") e oct_app_push_avisados (marca "pedido já avisado" — o servidor roda em 2 processos e só quem grava a marca
+# primeiro manda). Quem recebe: cadastro ativo, com a permissão de aprovar AQUELE tipo, que enxerga AQUELE posto e
+# com o aviso "pedidos" ligado na Conta (padrão: ligado). Sem as tabelas ou sem FIREBASE_SA a vigia fica parada.
+AVISO_CICLO_SEG = 3                 # o pedido de desconto vence em 60 s: o aviso tem de sair logo
+AVISO_AFERICAO_JANELA_H = 12        # aferição pendente de abastecimento mais velho que isso não gera aviso
+_aviso_on = False
+_aviso_vistos = {}                  # chave -> instante (não tenta gravar a marca de novo a cada volta)
+
+
+def _log_aviso(msg):
+    print(f"[equipe-aviso] {msg}", flush=True)
+
+
+@bp_equipe.route("/app/equipe/api/dispositivo", methods=["POST"])
+def api_dispositivo():
+    """O app registra o celular de quem entrou no Acesso da equipe (chamado ao entrar e ao abrir o app)."""
+    p = _eu()
+    if not p:
+        return _nao_entrou()
+    d = request.get_json(silent=True) or {}
+    token = str(d.get("token") or "").strip()
+    plat = str(d.get("plataforma") or "").strip().lower()
+    if len(token) < 20 or len(token) > 4096 or plat not in ("android", "ios"):
+        return jsonify({"erro": "aparelho inválido"}), 400
+    try:
+        cp._spost("oct_app_equipe_dispositivos?on_conflict=token",
+                  {"token": token, "usuario_id": p["id"], "plataforma": plat, "app_versao": str(d.get("app_versao") or "")[:30] or None,
+                   "ativo": True, "falhas": 0, "visto_em": _iso_utc(_agora_utc())},
+                  prefer="resolution=merge-duplicates,return=minimal")
+    except Exception as e:
+        falta = "oct_app_equipe_dispositivos" in str(e) or "404" in str(e)
+        return jsonify({"erro": "Falta criar a tabela dos celulares da equipe (SQL-APP-EQUIPE-PUSH.sql)." if falta
+                        else "Não consegui registrar o aparelho: " + str(e)[:80]}), 503
+    _esquecer("eqdisp")
+    return jsonify({"ok": True})
+
+
+@bp_equipe.route("/app/equipe/api/dispositivo/sair", methods=["POST"])
+def api_dispositivo_sair():
+    """Ao sair do Acesso da equipe o celular para de receber os pedidos."""
+    d = request.get_json(silent=True) or {}
+    token = str(d.get("token") or "").strip()
+    if len(token) >= 20:
+        try:
+            url, _ = cp._supa()
+            rq.delete(f"{url}/rest/v1/oct_app_equipe_dispositivos?token=eq.{rq.utils.quote(token, safe='')}", headers=cp._sh(), timeout=20)
+        except Exception:
+            pass
+        _esquecer("eqdisp")
+    return jsonify({"ok": True})
+
+
+def _aparelhos_equipe():
+    """[(token, plataforma, perfil)] dos celulares ativos da equipe — 30 s em cache."""
+    def busca():
+        out = []
+        for r in cp._sget("oct_app_equipe_dispositivos?ativo=eq.true&select=token,plataforma,usuario_id&limit=500"):
+            try:
+                p = _perfil(str(r.get("usuario_id")))
+            except Exception:
+                p = None
+            if p and _entra(p):
+                out.append((r["token"], r.get("plataforma"), p))
+        return out
+    return _guardado("eqdisp", 30, busca)
+
+
+def destinatarios(eid, tipo, aparelhos=None):
+    """Tokens que devem receber o pedido `tipo` do posto `eid`."""
+    out = []
+    for token, _plat, p in (aparelhos if aparelhos is not None else _aparelhos_equipe()):
+        if not pode_de(p).get("aprovar_" + tipo):
+            continue
+        if eid not in {i for i, _ in postos_de(p)}:
+            continue
+        if (_prefs(p["id"]).get("avisos") or {}).get("pedidos", True) is False:
+            continue
+        out.append(token)
+    return out
+
+
+def texto_aviso(ped):
+    """(título, texto) da notificação de um pedido montado por _apv_pedido/_afe_pedido(detalhe=True)."""
+    posto = ped.get("posto") or "posto"
+    if ped["tipo"] == "afericao":
+        corpo = " · ".join(x for x in (ped.get("resumo") or ped.get("titulo") or "", ped.get("destaque") or "") if x)
+        return f"Aferição para aprovar · {posto}", corpo + ". Toque para aprovar."
+    partes = [ped.get("destaque") or "", ped.get("resumo") or "", ("pedido por " + ped["pediu"]) if ped.get("pediu") else ""]
+    return f"{ped.get('titulo') or 'Pedido do caixa'} · {posto}", " · ".join(x for x in partes if x) + ". Responda em até 1 minuto."
+
+
+def _marcar_avisado(chave):
+    """True só para o processo que gravou a marca primeiro (o outro recebe lista vazia)."""
+    return bool(cp._spost("oct_app_push_avisados?on_conflict=chave", {"chave": chave},
+                          prefer="resolution=ignore-duplicates,return=representation"))
+
+
+def _pedidos_novos():
+    """[(chave, empresa_id, tipo, pedido detalhado)] pendentes agora que ainda não passaram por este processo."""
+    agora = _agora_utc()
+    ativas = _empresas_ativas()
+    novos = []
+    tipos = [t for t in ("desconto", "prazo") if TIPOS_NO_AR.get(t)]
+    if tipos:
+        rows = cp._sget(f"oct_app_aprovacoes?select={_APV_COLS}&status=eq.pendente&tipo=in.({','.join(tipos)})"
+                        f"&vence_em=gt.{_iso_utc(agora)}&order=criado_em.desc&limit=50")
+        for r in rows:
+            ch = "apv:" + str(r.get("id"))
+            if ch not in _aviso_vistos:
+                novos.append((ch, str(r.get("empresa_id")), r.get("tipo"), _apv_pedido(r, ativas, detalhe=True)))
+    if TIPOS_NO_AR.get("afericao"):
+        desde = _iso_utc(agora - timedelta(hours=AVISO_AFERICAO_JANELA_H))
+        rows = cp._sget(f"oct_pdv_abastecimentos?select={_AFE_COLS}&status=eq.afericao_pendente&created_at=gte.{desde}"
+                        f"&order=created_at.desc&limit=50")
+        rows = [r for r in rows if ("afe:" + str(r.get("id"))) not in _aviso_vistos]
+        turnos = _afe_operadores(rows) if rows else {}
+        for r in rows:
+            novos.append(("afe:" + str(r.get("id")), str(r.get("empresa_id")), "afericao", _afe_pedido(r, ativas, detalhe=True, turnos=turnos)))
+    return novos
+
+
+def rodada_avisos(enviar=None):
+    """Uma volta da vigia. `enviar(token, titulo, texto, dados)` -> (ok, erro, morto); padrão = Firebase (canal "aprovacoes")."""
+    if enviar is None:
+        import app_push
+        enviar = lambda tok, tit, txt, dados: app_push.enviar_um(tok, tit, txt, None, dados, "aprovacoes")
+    feitos, agora = 0, time.time()
+    for ch in [k for k, t in _aviso_vistos.items() if agora - t > 86400]:
+        _aviso_vistos.pop(ch, None)
+    for ch, eid, tipo, ped in _pedidos_novos():
+        _aviso_vistos[ch] = agora
+        if ped.get("situacao") != "pendente":
+            continue
+        tokens = destinatarios(eid, tipo)
+        if not tokens or not _marcar_avisado(ch):
+            continue
+        titulo, texto = texto_aviso(ped)
+        dados = {"tipo": "pedido", "rota": "#/eq-pedido/" + ped["id"]}
+        ok_n = 0
+        for tok in tokens:
+            ok, erro, morto = enviar(tok, titulo, texto, dados)
+            ok_n += 1 if ok else 0
+            if morto:
+                try:
+                    cp._spatch(f"oct_app_equipe_dispositivos?token=eq.{rq.utils.quote(tok, safe='')}", {"ativo": False})
+                    _esquecer("eqdisp")
+                except Exception:
+                    pass
+            elif not ok:
+                _log_aviso(f"{ch}: falhou num aparelho: {erro}")
+        try:
+            cp._spatch(f"oct_app_push_avisados?chave=eq.{rq.utils.quote(ch, safe='')}", {"enviados": ok_n})
+        except Exception:
+            pass
+        _log_aviso(f"{ch} ({tipo}) avisado em {ok_n}/{len(tokens)} celular(es)")
+        feitos += 1
+    return feitos
+
+
+def iniciar_avisos():
+    """Liga a vigia (uma thread por processo do gunicorn). EQUIPE_PUSH=0 desliga."""
+    global _aviso_on
+    if _aviso_on or os.environ.get("EQUIPE_PUSH", "1").strip().lower() in ("0", "false", "nao", "off"):
+        return
+    _aviso_on = True
+    import threading
+
+    def loop():
+        import app_push
+        time.sleep(20)
+        avisou_parado = False
+        while True:
+            try:
+                if not app_push.configurado():
+                    if not avisou_parado:
+                        _log_aviso("parado: falta FIREBASE_SA")
+                        avisou_parado = True
+                    time.sleep(60)
+                    continue
+                rodada_avisos()
+            except Exception as e:
+                msg = str(e)
+                if "oct_app_push_avisados" in msg or "oct_app_equipe_dispositivos" in msg:
+                    _log_aviso("parado: falta rodar SQL-APP-EQUIPE-PUSH.sql")
+                    time.sleep(300)
+                    continue
+                _log_aviso(f"erro na volta: {msg[:160]}")
+                time.sleep(15)
+            time.sleep(AVISO_CICLO_SEG)
+
+    threading.Thread(target=loop, daemon=True).start()
+    _log_aviso(f"vigia dos pedidos ligada (a cada {AVISO_CICLO_SEG} s)")

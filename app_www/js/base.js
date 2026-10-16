@@ -8,8 +8,8 @@
 //    é o endereço completo.
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
-const API = (location.protocol.indexOf("http") === 0 && location.pathname.indexOf("/app") === 0) ? "" : SERVIDOR;
-const VERSAO_APP = "0.2.0";
+const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
+const VERSAO_APP = "1.0.1";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
@@ -156,3 +156,133 @@ const ICO = (() => {
   Object.keys(P).forEach(k => { out[k] = t => s(P[k], t); });
   return out;
 })();
+
+// ------------------------------------------------------------
+// Dentro do app das lojas (Capacitor, 16/10/2026). Projeto nativo em app-postos-sn/nativo
+// (preparar.py copia esta pasta para lá). Na versão web NATIVO = false e nada disto roda.
+// ------------------------------------------------------------
+const NATIVO = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+
+// chama um plugin do Capacitor sem bundler (a ponte nativa injeta Capacitor.nativePromise e a lista
+// PluginHeaders); plugin ausente ou erro = null, nunca derruba a tela
+function nativo(plugin, metodo, opcoes) {
+  try {
+    const C = window.Capacitor;
+    if (!NATIVO || !(C.PluginHeaders || []).some(p => p.name === plugin)) return Promise.resolve(null);
+    return C.nativePromise(plugin, metodo, opcoes || {}).catch(() => null);
+  } catch (e) { return Promise.resolve(null); }
+}
+
+// cor do relógio/bateria no topo: claros sobre o topo azul e a câmera, escuros nas telas de fundo claro
+// (a página vai até atrás da barra de status — viewport-fit=cover)
+let _barraEscura = null, _barraAgendada = false;
+function barraStatus() {
+  _barraAgendada = false;
+  const topo = document.querySelector("#tela .topo-azul");
+  const escura = !!document.getElementById("camera") || !!(topo && topo.getBoundingClientRect().bottom > 30);
+  if (escura === _barraEscura) return;
+  _barraEscura = escura;
+  nativo("SystemBars", "setStyle", { style: escura ? "DARK" : "LIGHT", bar: "StatusBar" });
+}
+function agendarBarraStatus() {             // junta as mudanças de uma rajada (setTimeout: rAF pode não disparar)
+  if (_barraAgendada) return;
+  _barraAgendada = true;
+  setTimeout(barraStatus, 120);
+}
+if (NATIVO) {
+  window.addEventListener("scroll", agendarBarraStatus, { passive: true });
+  new MutationObserver(agendarBarraStatus).observe(document.body, { childList: true, subtree: true });
+  agendarBarraStatus();
+}
+
+// eventos de um plugin (a ponte entrega cada evento em fn(dados))
+function nativoOuvir(plugin, evento, fn) {
+  try {
+    const C = window.Capacitor;
+    if (!NATIVO || !(C.PluginHeaders || []).some(p => p.name === plugin)) return;
+    C.nativeCallback(plugin, "addListener", { eventName: evento }, d => { try { fn(d || {}); } catch (e) { /* ignora */ } });
+  } catch (e) { /* sem ponte */ }
+}
+
+// ---------- notificações no celular (Firebase Cloud Messaging, 16/10/2026) ----------
+// Plugin @capacitor-firebase/messaging. O token do aparelho vai para /cashback/api/dispositivo junto com os
+// dois consentimentos (avisos da conta x ofertas — o de ofertas segue o Perfil). Quem envia é o app_push.py.
+// Manda de novo no máximo 1 vez por dia, ou quando o token ou o aceite de ofertas mudar.
+// pede a permissão (só na 1ª vez o iPhone/Android pergunta) e devolve o token do Firebase, ou null
+async function pushToken() {
+  if (!NATIVO) return null;
+  try {
+    let p = await nativo("FirebaseMessaging", "checkPermissions");
+    if (p && p.receive === "prompt") p = await nativo("FirebaseMessaging", "requestPermissions");
+    if (!p || p.receive !== "granted") return null;
+    const r = await nativo("FirebaseMessaging", "getToken");
+    return (r && r.token) || null;
+  } catch (e) { return null; }
+}
+
+async function pushRegistrar(me) {
+  if (!NATIVO || !tok() || !me) return;
+  try {
+    const token = await pushToken();
+    if (!token) return;
+    const marca = [token, me.aceita_marketing ? 1 : 0, new Date().toISOString().slice(0, 10)].join("|");
+    if (LS.get("psn_push") === marca) return;
+    const x = await api("/cashback/api/dispositivo", {
+      token, plataforma: window.Capacitor.getPlatform(), app_versao: VERSAO_APP,
+      aceita_avisos: true, aceita_marketing: !!me.aceita_marketing, posto_favorito: me.posto_favorito || S.posto || null,
+    });
+    if (x.ok) { LS.set("psn_push", marca); LS.set("psn_push_tok", token); }
+  } catch (e) { /* sem notificação: o app segue normal */ }
+}
+
+// ao sair da conta o celular para de receber (o servidor apaga o aparelho)
+function pushSair() {
+  const t = LS.get("psn_push_tok");
+  LS.del("psn_push"); LS.del("psn_push_tok");
+  if (t) api("/cashback/api/dispositivo/sair", { token: t });
+}
+
+// ACESSO DA EQUIPE: o mesmo celular registrado na lista da equipe (/app/equipe/api/dispositivo) recebe os pedidos
+// do caixa (desconto, aferição) com o app fechado. `enviar(caminho, corpo)` = apiEq do equipe.js (sessão da equipe).
+async function pushRegistrarEquipe(enviar) {
+  if (!NATIVO) return;
+  try {
+    const token = await pushToken();
+    if (!token) return;
+    const marca = [token, new Date().toISOString().slice(0, 10)].join("|");
+    if (LS.get("psn_push_eq") === marca) return;
+    const x = await enviar("/app/equipe/api/dispositivo", { token, plataforma: window.Capacitor.getPlatform(), app_versao: VERSAO_APP });
+    if (x.ok) { LS.set("psn_push_eq", marca); LS.set("psn_push_eq_tok", token); }
+  } catch (e) { /* sem aviso: a vigia do app aberto continua */ }
+}
+
+function pushSairEquipe(enviar) {
+  const t = LS.get("psn_push_eq_tok");
+  LS.del("psn_push_eq"); LS.del("psn_push_eq_tok");
+  if (t) enviar("/app/equipe/api/dispositivo/sair", { token: t });
+}
+
+if (NATIVO) {
+  // canais do Android (o servidor manda em "avisos", "campanhas" ou "aprovacoes"); no iPhone não existe e a chamada só falha quieta
+  if (window.Capacitor.getPlatform() === "android") {
+    nativo("FirebaseMessaging", "createChannel", { id: "avisos", name: "Avisos da sua conta", importance: 4 });
+    nativo("FirebaseMessaging", "createChannel", { id: "campanhas", name: "Ofertas e promoções", importance: 3 });
+    nativo("FirebaseMessaging", "createChannel", { id: "aprovacoes", name: "Pedidos do caixa (equipe)", importance: 5, vibration: true });
+  }
+  // tocou na notificação: abre a oferta (a própria tela da oferta conta a abertura) ou a tela indicada
+  nativoOuvir("FirebaseMessaging", "notificationActionPerformed", ev => {
+    const d = (ev.notification && ev.notification.data) || {};
+    if (d.campanha_id) {
+      location.hash = "#/oferta/" + encodeURIComponent(d.campanha_id);
+    } else if (d.rota && /^#\/[\w\-\/:]*$/.test(d.rota)) {        // ":" = id do pedido da equipe (apv:… / afe:…)
+      location.hash = d.rota;
+    }
+  });
+  // com o app aberto: o iPhone mostra o aviso sozinho (presentationOptions); no Android vira um aviso na tela
+  if (window.Capacitor.getPlatform() === "android") {
+    nativoOuvir("FirebaseMessaging", "notificationReceived", ev => {
+      const n = ev.notification || {};
+      if (n.title || n.body) toast([n.title, n.body].filter(Boolean).join(" — "), 5000);
+    });
+  }
+}

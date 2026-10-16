@@ -53,6 +53,7 @@ async function apiEq(caminho, corpo) {
 function eqSair() {
   if (_eqVigia) { clearInterval(_eqVigia); _eqVigia = null; }
   _eqUltimo = 0;
+  if (tokEq()) pushSairEquipe(apiEq);      // o celular para de receber os pedidos (antes de apagar a sessão)
   LS.del("psn_equipe");
   EQ.eu = null;
   if (location.hash.indexOf("#/equipe") !== 0) ir("#/equipe");
@@ -89,6 +90,7 @@ async function eqEu() {
   EQ.eu = r;
   eqBarraPermissoes();
   eqVigia();
+  if (r.push && eqAprova()) pushRegistrarEquipe(apiEq);    // app das lojas: pedido chega com o app fechado
   return r;
 }
 // sem a lista de permissões (o dono) = pode tudo
@@ -384,7 +386,8 @@ async function telaEqConta() {
       ${eqAprova() ? chave("pedidos", "Pedidos do caixa", esc(meusTipos) + " esperando você", av.pedidos !== false) : ""}
       ${eqPode("ver_alertas") ? chave("tanques", "Tanque baixo e sonda parada", "Os mesmos alertas do Monitor", av.tanques !== false) : ""}
       ${chave("turno", "Abertura e fechamento de turno", "Quem abriu e quem fechou o caixa", !!av.turno)}
-    </div>${eu.push === false ? '<div class="vazio">Os avisos no celular começam quando o app estiver nas lojas (Apple e Google). Até lá fica guardado o que você quer receber.</div>' : ""}</div>
+    </div>${eu.push === false ? '<div class="vazio">Os avisos no celular começam quando o app estiver nas lojas (Apple e Google). Até lá fica guardado o que você quer receber.</div>'
+      : !NATIVO ? '<div class="vazio">O aviso na tela do celular chega pelo app Postos SN instalado da loja (App Store ou Google Play). Aqui no navegador, os pedidos aparecem com esta página aberta.</div>' : ""}</div>
     <div class="grupo-tit">Sessão</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${ir_("perfil", "Usar o app como cliente", "ir('#/inicio')")}
