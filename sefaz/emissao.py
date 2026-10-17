@@ -22,7 +22,7 @@ from lxml import etree
 import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
-from . import ibpt
+from . import ibpt, mono_leiaute
 from . import anp
 
 NS = "http://www.portalfiscal.inf.br/nfe"
@@ -155,16 +155,10 @@ def _imposto_item(it, crt="3"):
         # 15/09/2026: igual à NFC-e autorizada (nfce.py) — só os totais do item.
         # O gMonoRet zerado + gMono no total passavam no XSD local (antigo) e a
         # SEFAZ-MG respondeu 225 (falha de schema) na 1ª devolução do Tijuco.
-        # MONOFASIA RETIDA ANTERIORMENTE no leiaute NOVO (NT 2025.002 v1.50+, 17/10/2026): rejeicao 1229 (regra UB90-20,
-        # MOC de 09/10/2026) -- ate' 2028 o IBS (e em 2026 tambem a CBS) vai no grupo AD VALOREM; cClassTrib 620006 tem
-        # ind_gMonoRet=1 -> gIBSMonoAdValorem/gMonoRet e gCBSMonoAdValorem/gMonoRet. O calculo do valor retido (UB93a-10)
-        # e' "implementacao futura" -> 0,00. O gMonoRet ANTIGO (qBCMonoRet/adRem...) da' 225 (schema). O XSD local
-        # (marco/2026) ainda e' o antigo: a validacao local acusa, mas nao bloqueia. So' quando o chamador pede
-        # (it["gmono_ret"]: NF-e consolidada) -- NFC-e e devolucao seguem como antes.
-        gret = ""
-        if it.get("gmono_ret"):
-            gret = ("<gIBSMonoAdValorem><gMonoRet><vIBSMonoRet>0.00</vIBSMonoRet></gMonoRet></gIBSMonoAdValorem>"
-                    "<gCBSMonoAdValorem><gMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet></gCBSMonoAdValorem>")
+        # MONOFASIA RETIDA ANTERIORMENTE no leiaute NOVO (NT 2025.002 v1.50+, 17/10/2026; rejeicao 1229 / UB90-20):
+        # grupos de mono_leiaute.grupos_ret(ano). Vai quando montar_infnfe marca _mono_ano no item: NF-e consolidada
+        # (it["gmono_ret"]) ou chave MONO_LEIAUTE. O gMonoRet ANTIGO (qBCMonoRet/adRemIBSRet) dava 225.
+        gret = mono_leiaute.grupos_ret(it["_mono_ano"], cclass) if it.get("_mono_ano") else ""
         ibscbs = (
             f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
             f"<gIBSCBSMono>{gret}<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
@@ -280,6 +274,12 @@ def montar_infnfe(nota, ambiente):
     cnf_fmt = str(cnf).zfill(8)
     cdv = chave[-1]
 
+    # monofasia no leiaute novo (17/10/2026): NF-e consolidada (gmono_ret) ou chave MONO_LEIAUTE
+    _novo = mono_leiaute.usar_novo(ambiente)
+    nota = dict(nota, itens=[dict(it) for it in nota["itens"]])   # copia: nao marca a nota de quem chamou
+    for it in nota["itens"]:
+        if str(it.get("cst_icms")) == "61" and (it.get("gmono_ret") or _novo):
+            it["_mono_ano"] = dh.year
     # itens + totais
     crt_emit = str(emit.get("crt", "3"))
     dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))
@@ -556,6 +556,16 @@ def _soap_autorizacao(xml_nfe_assinada, id_lote):
 
 
 def emitir_nfe(nota, cert_base64, cert_senha, ambiente="homologacao"):
+    """MONO_LEIAUTE (17/10/2026): auto -> se a SEFAZ cobrar o grupo novo (1229...), refaz UMA vez no novo;
+    novo -> se a SEFAZ recusar o novo por schema (225), refaz UMA vez no antigo (a venda nao trava)."""
+    _novo1 = mono_leiaute.usar_novo(ambiente)
+    r = _emitir_nfe_uma(nota, cert_base64, cert_senha, ambiente)
+    if isinstance(r, dict) and not r.get("ok") and mono_leiaute.aprender(ambiente, r.get("cstat_nfe") or r.get("cstat_lote"), _novo1):
+        r = _emitir_nfe_uma(nota, cert_base64, cert_senha, ambiente)
+    return r
+
+
+def _emitir_nfe_uma(nota, cert_base64, cert_senha, ambiente="homologacao"):
     cert_file, key_file = extrair_cert_pem(cert_base64, cert_senha)
     try:
         # 1) monta + 2) assina

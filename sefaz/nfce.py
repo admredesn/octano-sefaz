@@ -19,6 +19,7 @@ import requests
 
 from .cert import extrair_cert_pem, limpar_arquivos
 from . import ibpt
+from . import mono_leiaute
 from .emissao import (
     NS, UF_CODIGO, montar_chave, assinar_nfe,
 )
@@ -110,8 +111,10 @@ def _imposto_item_nfce(it):
         # PIS/COFINS nao-tributado (combustivel) + IBSCBS monofasico (CST 620)
         pis = "<PIS><PISNT><CST>04</CST></PISNT></PIS>"
         cof = "<COFINS><COFINSNT><CST>04</CST></COFINSNT></COFINS>"
+        # leiaute NOVO da monofasia (NT 2025.002 v1.50+, 17/10/2026): so' com a chave MONO_LEIAUTE (mono_leiaute.py)
+        _mono = mono_leiaute.grupos_ret(it["_mono_ano"]) if it.get("_mono_ano") else ""
         ibscbs = ("<IBSCBS><CST>620</CST><cClassTrib>620006</cClassTrib>"
-                  "<gIBSCBSMono><vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
+                  "<gIBSCBSMono>" + _mono + "<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
                   "<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>")
     elif cst == "00" or cst == "000":
         # CST 00 - tributacao integral do ICMS (produto da loja tributado, ex. aditivos).
@@ -334,6 +337,10 @@ def montar_infnfce(nota, empresa, ambiente):
     # itens (montagem propria da NFC-e, espelhando os cupons autorizados)
     # Em homologacao, a SEFAZ exige que o 1o item tenha esta descricao fixa (cStat 373).
     itens_emit = [dict(it) for it in nota["itens"]]
+    if mono_leiaute.usar_novo(ambiente):      # chave MONO_LEIAUTE (17/10/2026): monofasia no leiaute novo
+        for it in itens_emit:
+            if str(it.get("cst_icms")) == "61":
+                it["_mono_ano"] = dh.year
     if tp_amb == "2" and itens_emit:
         itens_emit[0]["xProd"] = "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
     dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(itens_emit))
@@ -497,6 +504,16 @@ def montar_infnfce(nota, empresa, ambiente):
 
 
 def emitir_nfce(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="homologacao"):
+    """MONO_LEIAUTE (17/10/2026): auto -> se a SEFAZ cobrar o grupo novo (1229...), refaz UMA vez no novo;
+    novo -> se a SEFAZ recusar o novo por schema (225), refaz UMA vez no antigo (a venda nao trava)."""
+    _novo1 = mono_leiaute.usar_novo(ambiente)
+    r = _emitir_nfce_uma(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente)
+    if isinstance(r, dict) and not r.get("ok") and mono_leiaute.aprender(ambiente, r.get("cstat_nfe") or r.get("cstat_lote"), _novo1):
+        r = _emitir_nfce_uma(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente)
+    return r
+
+
+def _emitir_nfce_uma(nota, empresa, cert_base64, cert_senha, csc, csc_id, ambiente="homologacao"):
     """Autoriza uma NFC-e modelo 65 na SEFAZ-MG.
     nota: { numero, serie, itens:[...], cpf_consumidor?, forma_pagamento?, cnf? }
     empresa: dados do emitente (cnpj, ie, nome, c_mun, uf, etc.)
