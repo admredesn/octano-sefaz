@@ -155,13 +155,16 @@ def _imposto_item(it, crt="3"):
         # 15/09/2026: igual à NFC-e autorizada (nfce.py) — só os totais do item.
         # O gMonoRet zerado + gMono no total passavam no XSD local (antigo) e a
         # SEFAZ-MG respondeu 225 (falha de schema) na 1ª devolução do Tijuco.
-        # gMonoRet (17/10/2026, rejeicao 1229 "Nao informada Tributacao Monofasica ... do IBS" na NF-e de faturamento):
-        # a NF-e 55 cobra o grupo da monofasia RETIDA ANTERIORMENTE (cClassTrib 620006). So' quando o chamador pede
-        # (it["gmono_ret"]) -- a devolucao autorizada em 15/09 segue sem ele. Aliquota ad rem 0 (2026, como o total).
+        # MONOFASIA RETIDA ANTERIORMENTE no leiaute NOVO (NT 2025.002 v1.50+, 17/10/2026): rejeicao 1229 (regra UB90-20,
+        # MOC de 09/10/2026) -- ate' 2028 o IBS (e em 2026 tambem a CBS) vai no grupo AD VALOREM; cClassTrib 620006 tem
+        # ind_gMonoRet=1 -> gIBSMonoAdValorem/gMonoRet e gCBSMonoAdValorem/gMonoRet. O calculo do valor retido (UB93a-10)
+        # e' "implementacao futura" -> 0,00. O gMonoRet ANTIGO (qBCMonoRet/adRem...) da' 225 (schema). O XSD local
+        # (marco/2026) ainda e' o antigo: a validacao local acusa, mas nao bloqueia. So' quando o chamador pede
+        # (it["gmono_ret"]: NF-e consolidada) -- NFC-e e devolucao seguem como antes.
         gret = ""
         if it.get("gmono_ret"):
-            gret = (f"<gMonoRet><qBCMonoRet>{float(it['qCom']):.4f}</qBCMonoRet><adRemIBSRet>0.0000</adRemIBSRet>"
-                    f"<vIBSMonoRet>0.00</vIBSMonoRet><adRemCBSRet>0.0000</adRemCBSRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet>")
+            gret = ("<gIBSMonoAdValorem><gMonoRet><vIBSMonoRet>0.00</vIBSMonoRet></gMonoRet></gIBSMonoAdValorem>"
+                    "<gCBSMonoAdValorem><gMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet></gCBSMonoAdValorem>")
         ibscbs = (
             f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
             f"<gIBSCBSMono>{gret}<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
