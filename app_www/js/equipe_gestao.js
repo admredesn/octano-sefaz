@@ -84,8 +84,8 @@ function eqvEscolherDatas(alvo) {          // alvo = "cmp": o 2º período do co
   };
 }
 
-function eqvCarregando(titulo, voltar) {
-  el().innerHTML = `<div class="tela">${topoSimples(titulo, voltar)}<div class="secao" style="padding-top:2px">
+function eqvCarregando(titulo, voltar, recarregar, semPeriodo) {      // com os filtros na tela: o chip escolhido acende na hora
+  el().innerHTML = `<div class="tela">${topoSimples(titulo, voltar)}${recarregar ? eqvFiltros(recarregar, semPeriodo) : ""}<div class="secao" style="padding-top:${recarregar ? 12 : 2}px">
     <div class="sk" style="height:34px;width:60%;margin-bottom:12px"></div><div class="sk" style="height:110px;margin-bottom:12px"></div><div class="sk" style="height:180px"></div></div></div>`;
 }
 function eqvErro(titulo, voltar, r, recarregar) {
@@ -118,8 +118,7 @@ async function telaEqVendas() {
   const eu = await eqEu();
   if (!eu) return;
   const p = eqvPeriodo();
-  if (!el().querySelector(".filtros")) eqvCarregando("Vendas", false);
-  const r = await apiEq("/app/equipe/api/vendas?" + eqvQuery(p));
+  const r = await apiEqRapido("/app/equipe/api/vendas?" + eqvQuery(p), telaEqVendas, () => eqvCarregando("Vendas", false, telaEqVendas));
   if (!r.ok) { eqvErro("Vendas", false, r, telaEqVendas); return; }
   EQV.postos = r.postos || EQV.postos;
   const c = r.combustivel || {}, pr = r.produtos || {};
@@ -210,8 +209,8 @@ async function telaEqComparativo() {
   const eu = await eqEu();
   if (!eu) return;
   const a = eqvPeriodo(), b = eqvPeriodoCmp(a);
-  if (!el().querySelector(".filtros")) eqvCarregando("Comparar períodos", true);
-  const r = await apiEq("/app/equipe/api/comparativo?" + eqvQuery(a) + "&cde=" + b.de + "&cate=" + b.ate);
+  const r = await apiEqRapido("/app/equipe/api/comparativo?" + eqvQuery(a) + "&cde=" + b.de + "&cate=" + b.ate, telaEqComparativo,
+    () => eqvCarregando("Comparar períodos", true, telaEqComparativo));
   if (!r.ok) { eqvErro("Comparar períodos", true, r, telaEqComparativo); return; }
   EQV.postos = r.postos || EQV.postos;
   const A = r.a || {}, B = r.b || {};
@@ -241,7 +240,7 @@ async function telaEqComparativo() {
 async function eqvMeses() {
   const caixa = document.getElementById("cmp-meses");
   if (!caixa) return;
-  const r = await apiEq("/app/equipe/api/meses" + (EQV.posto ? "?posto=" + encodeURIComponent(EQV.posto) : ""));
+  const r = await apiEqRapido("/app/equipe/api/meses" + (EQV.posto ? "?posto=" + encodeURIComponent(EQV.posto) : ""), eqvMeses);
   const alvo = document.getElementById("cmp-meses");
   if (!alvo) return;                                   // saiu da tela antes de chegar
   const meses = (r.ok && Array.isArray(r.meses) ? r.meses : []).filter(m => _n(m[1]));
@@ -255,8 +254,8 @@ async function eqvMeses() {
 async function telaEqEstoque() {
   const eu = await eqEu();
   if (!eu) return;
-  if (!el().querySelector(".filtros")) eqvCarregando("Estoque", true);
-  const r = await apiEq("/app/equipe/api/estoque" + (EQV.posto ? "?posto=" + encodeURIComponent(EQV.posto) : ""));
+  const r = await apiEqRapido("/app/equipe/api/estoque" + (EQV.posto ? "?posto=" + encodeURIComponent(EQV.posto) : ""), telaEqEstoque,
+    () => eqvCarregando("Estoque", true, telaEqEstoque, true));
   if (!r.ok) { eqvErro("Estoque", true, r, telaEqEstoque); return; }
   EQV.postos = r.postos || EQV.postos;
   const postos = Array.isArray(r.estoque) ? r.estoque : [];
@@ -290,8 +289,7 @@ async function telaEqDescargas() {
   const eu = await eqEu();
   if (!eu) return;
   const p = eqvPeriodo();
-  if (!el().querySelector(".filtros")) eqvCarregando("Descargas", true);
-  const r = await apiEq("/app/equipe/api/descargas?" + eqvQuery(p));
+  const r = await apiEqRapido("/app/equipe/api/descargas?" + eqvQuery(p), telaEqDescargas, () => eqvCarregando("Descargas", true, telaEqDescargas));
   if (!r.ok) { eqvErro("Descargas", true, r, telaEqDescargas); return; }
   EQV.postos = r.postos || EQV.postos;
   const ds = Array.isArray(r.descargas) ? r.descargas : [], rs = r.resumo || {}, varios = (EQV.postos || []).length > 1 && !EQV.posto;
@@ -318,8 +316,7 @@ async function telaEqComissao() {
   const eu = await eqEu();
   if (!eu) return;
   const p = eqvPeriodo();
-  if (!el().querySelector(".filtros")) eqvCarregando("Comissão", true);
-  const r = await apiEq("/app/equipe/api/comissao?" + eqvQuery(p));
+  const r = await apiEqRapido("/app/equipe/api/comissao?" + eqvQuery(p), telaEqComissao, () => eqvCarregando("Comissão", true, telaEqComissao));
   if (!r.ok) { eqvErro("Comissão", true, r, telaEqComissao); return; }
   EQV.postos = r.postos || EQV.postos;
   const vs = Array.isArray(r.vendedores) ? r.vendedores : [];

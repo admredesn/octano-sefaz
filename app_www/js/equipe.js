@@ -51,7 +51,59 @@ async function apiEq(caminho, corpo) {
   return Object.assign({ http: r.status }, j);
 }
 
+// ---------------------------------------------------------------- telas NA HORA (17/10/2026)
+// Ronan: "o app está travando muito, clico em Conta e demora quase 30 s; tem que ser mais fluido, instantâneo". Cada tela
+// abre NA HORA com a última resposta guardada (memória + armazenamento do celular) e se atualiza sozinha quando a nova
+// chega; sem nada guardado, mostra o esqueleto em vez de ficar parada; sem internet, fica com a última em vez de travar.
+const EQ_CACHE = {};
+const EQC = "psn_eqc:";
+function eqCacheLer(c) {
+  if (EQ_CACHE[c]) return EQ_CACHE[c];
+  try { const x = JSON.parse(localStorage.getItem(EQC + c) || "null"); if (x && x.r) { EQ_CACHE[c] = x; return x; } } catch (e) { /* sem armazenamento */ }
+  return null;
+}
+function eqCacheGravar(c, r) {
+  const x = { t: Date.now(), r };
+  EQ_CACHE[c] = x;
+  try {
+    localStorage.setItem(EQC + c, JSON.stringify(x));
+    const idx = JSON.parse(localStorage.getItem("psn_eqc_idx") || "[]").filter(k => k !== c);
+    idx.push(c);
+    while (idx.length > 30) localStorage.removeItem(EQC + idx.shift());          // guarda as 30 últimas telas
+    localStorage.setItem("psn_eqc_idx", JSON.stringify(idx));
+  } catch (e) { /* cheio ou sem armazenamento: fica só na memória */ }
+}
+function eqCacheLimpar() {             // ao sair: o próximo que entrar neste celular não vê os números de quem saiu
+  Object.keys(EQ_CACHE).forEach(k => delete EQ_CACHE[k]);
+  try {
+    JSON.parse(localStorage.getItem("psn_eqc_idx") || "[]").forEach(k => localStorage.removeItem(EQC + k));
+    localStorage.removeItem("psn_eqc_idx");
+  } catch (e) { /* sem armazenamento */ }
+}
+// GET com a última resposta guardada: devolve NA HORA e busca a nova por trás; se a nova for diferente e a pessoa ainda
+// estiver na mesma tela, `redesenhar()` roda de novo (e aí acha a resposta fresca, sem pedir outra vez).
+async function apiEqRapido(caminho, redesenhar, esqueleto) {
+  const velho = eqCacheLer(caminho), rota = location.hash;
+  if (velho && Date.now() - velho.t < 5000) return velho.r;            // acabou de chegar: não pede de novo
+  const buscar = apiEq(caminho).then(r => {
+    if (r && (r.ok || Array.isArray(r))) {
+      const mudou = !velho || JSON.stringify(r) !== JSON.stringify(velho.r);
+      eqCacheGravar(caminho, r);
+      if (velho && mudou && location.hash === rota && redesenhar) redesenhar();
+    }
+    return r;
+  });
+  if (velho) return velho.r;
+  if (esqueleto) esqueleto();
+  return buscar;
+}
+function eqEsqueleto(titulo, voltar) {
+  el().innerHTML = `<div class="tela">${titulo ? topoSimples(titulo, voltar) : '<div style="height:calc(env(safe-area-inset-top) + 64px)"></div>'}
+    <div class="secao" style="padding-top:2px"><div class="sk" style="height:96px;margin-bottom:12px"></div><div class="sk" style="height:150px;margin-bottom:12px"></div><div class="sk" style="height:150px"></div></div></div>`;
+}
+
 function eqSair() {
+  eqCacheLimpar();
   if (_eqVigia) { clearInterval(_eqVigia); _eqVigia = null; }
   _eqUltimo = 0;
   if (tokEq()) pushSairEquipe(apiEq);      // o celular para de receber os pedidos (antes de apagar a sessão)
@@ -86,13 +138,29 @@ function eqVigia() {
 async function eqEu() {
   if (!EQUIPE_NO_AR || !tokEq()) { ir("#/equipe"); return null; }
   if (EQ.eu) { eqVigia(); return EQ.eu; }
+  const guardado = eqCacheLer("/app/equipe/api/eu");
+  if (guardado) {                                          // abre na hora; nome, postos e permissões novos chegam por trás
+    EQ.eu = guardado.r;
+    eqBarraPermissoes();
+    eqVigia();
+    eqEuAtualizar();
+    return EQ.eu;
+  }
   const r = await apiEq("/app/equipe/api/eu");
   if (!r.ok) { eqSair(); return null; }
+  eqEuAplicar(r);
+  return r;
+}
+function eqEuAplicar(r) {
   EQ.eu = r;
+  eqCacheGravar("/app/equipe/api/eu", r);
   eqBarraPermissoes();
   eqVigia();
   if (r.push && eqAprova()) pushRegistrarEquipe(apiEq);    // app das lojas: pedido chega com o app fechado
-  return r;
+}
+async function eqEuAtualizar() {
+  const r = await apiEq("/app/equipe/api/eu");
+  if (r && r.ok) eqEuAplicar(r);                           // sessão encerrada (401): o apiEq já tira
 }
 // sem a lista de permissões (o dono) = pode tudo
 function eqPode(k) { const p = EQ.eu && EQ.eu.pode; return !p || p[k] !== false; }
@@ -229,7 +297,7 @@ function eqTotalRede(postos) {
 async function telaEqPainel() {
   const eu = await eqEu();
   if (!eu) return;
-  const r = await apiEq("/app/equipe/api/painel");
+  const r = await apiEqRapido("/app/equipe/api/painel", telaEqPainel, () => eqEsqueleto());
   const postos = Array.isArray(r.postos) ? r.postos : [], alertas = eqPode("ver_alertas") && Array.isArray(r.alertas) ? r.alertas : [];
   const pend = Number(r.pendentes || 0);
   eqContador(pend);
@@ -263,7 +331,8 @@ async function telaEqAprovacoes(aba) {
   if (!eu) return;
   if (EQA.ocupado) return;                         // aprovando em lote: a vigia não redesenha no meio
   const resolvidas = aba === "resolvidas";
-  const r = await apiEq("/app/equipe/api/aprovacoes?situacao=" + (resolvidas ? "resolvidas" : "pendentes"));
+  const r = await apiEqRapido("/app/equipe/api/aprovacoes?situacao=" + (resolvidas ? "resolvidas" : "pendentes"), () => telaEqAprovacoes(aba),
+    () => eqEsqueleto("Aprovações"));
   const lst = Array.isArray(r) ? r : [];
   if (!resolvidas) {
     eqContador(lst.length);
@@ -402,7 +471,7 @@ async function telaEqPedido(id) {
 async function telaEqPostos() {
   const eu = await eqEu();
   if (!eu) return;
-  const r = await apiEq("/app/equipe/api/painel");
+  const r = await apiEqRapido("/app/equipe/api/painel", telaEqPostos, () => eqEsqueleto("Postos"));
   const postos = Array.isArray(r.postos) ? r.postos : [];
   el().innerHTML = `<div class="tela">${topoSimples("Postos", false)}
     <div class="secao" style="padding-top:2px">${postos.length ? eqTotalRede(postos) + postos.map(eqCartaoPosto).join("")
@@ -412,7 +481,7 @@ async function telaEqPostos() {
 async function telaEqPosto(id) {
   const eu = await eqEu();
   if (!eu) return;
-  const p = await apiEq("/app/equipe/api/posto/" + encodeURIComponent(id));
+  const p = await apiEqRapido("/app/equipe/api/posto/" + encodeURIComponent(id), () => telaEqPosto(id), () => eqEsqueleto("Posto", true));
   if (!p.ok) { ir("#/eq-postos"); return; }
   const st = eqSituacao(p);
   const lista = (k, pode) => eqPode(pode) && Array.isArray(p[k]) ? p[k] : [];
@@ -489,7 +558,7 @@ async function telaEqPermissoes(perfil) {
   const eu = await eqEu();
   if (!eu) return;
   if (!eu.master) { ir("#/eq-conta"); return; }
-  const r = await apiEq("/app/equipe/api/permissoes");
+  const r = await apiEqRapido("/app/equipe/api/permissoes", () => telaEqPermissoes(perfil), () => eqEsqueleto("Permissões do app", true));
   const perfis = Array.isArray(r.perfis) ? r.perfis : [];
   const todas = EQ_PERMISSOES.reduce((n, g) => n + g[1].length, 0);
   const ligadas = p => EQ_PERMISSOES.reduce((n, g) => n + g[1].filter(x => (p.pode || {})[x[0]] !== false).length, 0);
