@@ -579,5 +579,6 @@ const TELAS = {
   bomba: a => telaBomba(a), acionar: a => telaAcionar(a),
 };
 
-window.addEventListener("hashchange", rota);
-window.addEventListener("load", rota);
+// lsPronto (base.js): dentro do app, espera o login guardado no aparelho voltar antes da 1ª tela
+window.addEventListener("hashchange", () => lsPronto.then(rota));
+window.addEventListener("load", () => lsPronto.then(rota));

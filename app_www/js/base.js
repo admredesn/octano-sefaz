@@ -9,7 +9,7 @@
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
-const VERSAO_APP = "1.0.3";
+const VERSAO_APP = "1.0.4";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
@@ -20,10 +20,12 @@ const DOC_PRIVACIDADE = SITE + "/privacidade.html";
 var EQUIPE_NO_AR = true;
 
 // armazenamento local tolerante (aba anônima / bloqueio de cookies não pode derrubar o app)
+// Dentro do app das lojas, as chaves de LS_GUARDAR também vão para o armazenamento do próprio app (ver lsGuardar).
+const LS_GUARDAR = ["psn_token", "psn_equipe", "psn_posto", "psn_push", "psn_push_tok", "psn_push_eq", "psn_push_eq_tok"];
 const LS = {
   get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sem armazenamento */ } },
-  del(k) { try { localStorage.removeItem(k); } catch (e) { /* sem armazenamento */ } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sem armazenamento */ } lsGuardar(k, v); },
+  del(k) { try { localStorage.removeItem(k); } catch (e) { /* sem armazenamento */ } lsGuardar(k, null); },
 };
 function tok() { return LS.get("psn_token") || ""; }
 
@@ -172,6 +174,35 @@ function nativo(plugin, metodo, opcoes) {
     return C.nativePromise(plugin, metodo, opcoes || {}).catch(() => null);
   } catch (e) { return Promise.resolve(null); }
 }
+
+// ---------- login guardado no aparelho (1.0.4, 16/10/2026) ----------
+// Dentro do app, o localStorage é do WebView, e o iPhone pode apagá-lo quando falta espaço: o cliente abriria o app
+// deslogado. As chaves de LS_GUARDAR (login do cliente e da equipe, posto, registro do aviso) vão também para o
+// armazenamento do próprio app (plugin @capacitor/preferences: UserDefaults no iPhone, SharedPreferences no Android).
+// Ao abrir, o que sumiu do localStorage volta de lá ANTES da 1ª tela (lsPronto, esperado pelo rota() do telas.js).
+// Na versão web nada disto roda.
+function lsGuardar(k, v) {
+  if (!NATIVO || LS_GUARDAR.indexOf(k) < 0) return;
+  if (v == null) nativo("Preferences", "remove", { key: k });
+  else nativo("Preferences", "set", { key: k, value: String(v) });
+}
+
+async function lsRestaurar() {
+  if (!NATIVO) return;
+  const guardados = await Promise.all(LS_GUARDAR.map(k => nativo("Preferences", "get", { key: k })));
+  LS_GUARDAR.forEach((k, i) => {
+    const g = guardados[i] && guardados[i].value != null ? guardados[i].value : null;
+    const atual = LS.get(k);
+    if (atual == null && g != null) {
+      try { localStorage.setItem(k, g); } catch (e) { /* sem armazenamento */ }
+    } else if (atual != null && atual !== g) {
+      lsGuardar(k, atual);          // 1ª abertura depois de atualizar da 1.0.3: copia o login que já existia
+    }
+  });
+  S.posto = LS.get("psn_posto") || S.posto;
+}
+// no máximo 1,5 s: se a ponte nativa não responder, o app abre com o que tiver
+const lsPronto = Promise.race([lsRestaurar().catch(() => {}), new Promise(ok => setTimeout(ok, 1500))]);
 
 // cor do relógio/bateria no topo: claros sobre o topo azul e a câmera, escuros nas telas de fundo claro
 // (a página vai até atrás da barra de status — viewport-fit=cover)
