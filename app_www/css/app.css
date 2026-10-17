@@ -417,3 +417,16 @@ img { display: block; max-width: 100%; }
 .rank { width: 26px; height: 26px; border-radius: 50%; background: var(--azul-claro); color: var(--azul); font-weight: 800; font-size: .8rem;
         display: flex; align-items: center; justify-content: center; flex: none; }
 .rank.r1 { background: #FFF1CC; color: #8A5A00; }
+
+/* ===== APROVAR EM LOTE (17/10/2026) ===== */
+.sel-topo { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 12px 18px 0;
+            font-size: .86rem; color: var(--mut); }
+.sel-topo .link { font-size: .9rem; }
+.linha.marcada { background: var(--verde-fundo); }
+.marca { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #C3CCD6; flex: none; display: flex;
+         align-items: center; justify-content: center; color: #fff; }
+.marca.on { background: var(--verde); border-color: var(--verde); }
+.lote { position: fixed; left: 0; right: 0; bottom: calc(var(--barra) + env(safe-area-inset-bottom) + 8px); z-index: 5;
+        max-width: 480px; margin: 0 auto; padding: 0 14px; display: grid; grid-template-columns: 1fr 1.6fr; gap: 10px; }
+.lote .btn { margin-top: 0; box-shadow: var(--sombra); }
+.lote .btn.recusa { background: var(--card); }

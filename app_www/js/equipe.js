@@ -253,30 +253,97 @@ async function telaEqPainel() {
 }
 
 // ================================================================ APROVAÇÕES
+// APROVAR EM LOTE (17/10/2026, pedido do Ronan com 6 aferições do Miranda na fila): "Selecionar" marca os pedidos (ou
+// "Todos") e aprova/recusa de uma vez, com UMA confirmação. Cada pedido passa pela MESMA rota de um a um (/decidir):
+// o servidor confere permissão, posto e validade de cada um — o lote não pula regra nenhuma.
+const EQA = { selecionando: false, marcados: new Set(), lista: [], ocupado: false };
+
 async function telaEqAprovacoes(aba) {
   const eu = await eqEu();
   if (!eu) return;
+  if (EQA.ocupado) return;                         // aprovando em lote: a vigia não redesenha no meio
   const resolvidas = aba === "resolvidas";
   const r = await apiEq("/app/equipe/api/aprovacoes?situacao=" + (resolvidas ? "resolvidas" : "pendentes"));
   const lst = Array.isArray(r) ? r : [];
-  if (!resolvidas) eqContador(lst.length);
+  if (!resolvidas) {
+    eqContador(lst.length);
+    EQA.lista = lst;
+    EQA.marcados = new Set([...EQA.marcados].filter(id => lst.some(x => x.id === id)));     // some o que já foi resolvido
+    if (lst.length < 2) EQA.selecionando = false;
+  } else EQA.selecionando = false;
+  eqaDesenhar(lst, resolvidas);
+}
+// desenha a lista sem ir ao servidor (marcar/desmarcar fica instantâneo no celular)
+function eqaDesenhar(lst, resolvidas) {
+  const sel = EQA.selecionando && !resolvidas;
   const ST = { aprovado: ["Aprovado", "verde"], recusado: ["Recusado", "cinza"], expirado: ["Venceu", "ouro"] };
   const linha = p => {
     const t = EQ_TIPOS[p.tipo] || { nome: p.tipo, ico: "aprovar" }, st = ST[p.situacao];
     const quando = !st && p.vence_em ? `<b data-vence="${esc(p.vence_em)}" style="color:#8A5A00"></b>` : esc(haQuanto(p.quando));
-    return `<button class="linha" onclick="ir('#/eq-pedido/${esc(p.id)}')"><span class="ic">${ICO[t.ico](20)}</span>
+    const marcado = sel && EQA.marcados.has(p.id);
+    return `<button class="linha ${marcado ? "marcada" : ""}" onclick="${sel ? `eqaMarcar('${esc(p.id)}')` : `ir('#/eq-pedido/${esc(p.id)}')`}"><span class="ic">${ICO[t.ico](20)}</span>
       <div class="meio"><div class="t">${esc(p.titulo || t.nome)}</div><div class="s">${esc(p.posto)} · ${esc(primeiroNome(p.pediu))} · ${quando}</div></div>
-      ${st ? `<span class="tag ${st[1]}">${st[0]}</span>` : `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
+      ${sel ? `<span class="marca ${marcado ? "on" : ""}">${marcado ? ICO.check(16) : ""}</span>` : st ? `<span class="tag ${st[1]}">${st[0]}</span>` : `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
   };
+  const n = EQA.marcados.size, todos = n === lst.length && n > 0;
   el().innerHTML = `<div class="tela">${topoSimples("Aprovações", false)}
     <div class="secao" style="padding-top:2px">
       <div class="seg"><button class="${resolvidas ? "" : "on"}" onclick="ir('#/eq-aprovacoes')">Pendentes</button><button class="${resolvidas ? "on" : ""}" onclick="ir('#/eq-aprovacoes/resolvidas')">Resolvidas</button></div>
     </div>
-    <div class="secao">${lst.length ? `<div class="card lista">${lst.map(linha).join("")}</div>`
+    ${!resolvidas && lst.length >= 2 ? `<div class="sel-topo">${sel
+      ? `<button class="link" onclick="eqaTodos()">${todos ? "Desmarcar todos" : "Selecionar todos (" + lst.length + ")"}</button><button class="link" onclick="eqaSelecionar(false)">Cancelar</button>`
+      : `<span>${lst.length} pedidos esperando</span><button class="link" onclick="eqaSelecionar(true)">Selecionar</button>`}</div>` : ""}
+    <div class="secao" style="${!resolvidas && lst.length >= 2 ? "padding-top:8px" : ""}">${lst.length ? `<div class="card lista">${lst.map(linha).join("")}</div>`
       : `<div class="card vazio" style="padding:16px">${resolvidas ? "Nenhum pedido resolvido ainda." : "Nenhum pedido esperando. Quando o caixa precisar de você, o celular avisa."}</div>`}
       ${resolvidas || !lst.some(x => x.vence_em) ? "" : '<div class="vazio" style="text-align:center">O caixa espera a resposta por 1 minuto. Depois disso o pedido vence e ele precisa pedir de novo.</div>'}</div>
+    ${sel ? `<div class="lote"><button class="btn recusa" ${n ? "" : "disabled"} onclick="eqaLote(false)">Recusar</button>
+      <button class="btn verde" ${n ? "" : "disabled"} onclick="eqaLote(true)">${n ? "Aprovar " + n : "Marque os pedidos"}</button></div><div style="height:84px"></div>` : ""}
   </div>`;
   if (!resolvidas && lst.length) eqRelogio();
+}
+function eqaSelecionar(on) { EQA.selecionando = on; EQA.marcados = new Set(); eqaDesenhar(EQA.lista, false); }
+function eqaMarcar(id) { if (EQA.marcados.has(id)) EQA.marcados.delete(id); else EQA.marcados.add(id); eqaDesenhar(EQA.lista, false); }
+function eqaTodos() {
+  EQA.marcados = EQA.marcados.size === EQA.lista.length ? new Set() : new Set(EQA.lista.map(x => x.id));
+  eqaDesenhar(EQA.lista, false);
+}
+// resumo do que vai ser decidido: "6 aferições · Posto Miranda"
+function eqaResumo(ids) {
+  const it = EQA.lista.filter(x => ids.includes(x.id)), tipos = {}, postos = new Set(it.map(x => x.posto));
+  it.forEach(x => { const nome = { afericao: "aferição", desconto: "desconto", prazo: "a prazo" }[x.tipo] || "pedido"; tipos[nome] = (tipos[nome] || 0) + 1; });
+  const plural = (q, s) => q + " " + (q === 1 ? s : s === "aferição" ? "aferições" : s === "desconto" ? "descontos" : s === "a prazo" ? "a prazo" : s + "s");
+  return Object.keys(tipos).map(k => plural(tipos[k], k)).join(", ") + " · " + [...postos].join(", ");
+}
+function eqaLote(aprovar) {
+  const ids = [...EQA.marcados];
+  if (!ids.length) return;
+  folha(`<h2 style="font-size:1.15rem">${aprovar ? "Aprovar" : "Recusar"} ${ids.length} ${ids.length === 1 ? "pedido" : "pedidos"}?</h2>
+    <div style="color:var(--mut);margin-top:6px">${esc(eqaResumo(ids))}. ${aprovar ? "O caixa recebe a resposta na hora." : "O caixa recebe a recusa na hora."}</div>
+    ${aprovar ? "" : '<div class="campo"><label for="lt-motivo">Motivo (opcional, vale para todos)</label><input id="lt-motivo" maxlength="120" placeholder="Ex.: aferição repetida"></div>'}
+    <button class="btn ${aprovar ? "verde" : "verm"}" id="lt-ok">${aprovar ? "Aprovar" : "Recusar"} ${ids.length}</button><button class="btn sec" onclick="fecharFolha()">Voltar</button>`);
+  document.getElementById("lt-ok").onclick = async () => {
+    const motivo = aprovar ? "" : (document.getElementById("lt-motivo").value || "").trim();
+    const btn = document.getElementById("lt-ok");
+    btn.disabled = true;
+    EQA.ocupado = true;
+    let ok = 0;
+    const falhas = [];
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        btn.textContent = (aprovar ? "Aprovando " : "Recusando ") + (i + 1) + " de " + ids.length + "…";
+        const r = await apiEq("/app/equipe/api/aprovacoes/" + encodeURIComponent(ids[i]) + "/decidir", { aprovar, motivo });
+        if (r && r.ok) ok++; else falhas.push(r && r.erro ? r.erro : "não consegui registrar");
+      }
+    } finally {
+      EQA.ocupado = false;
+    }
+    fecharFolha();
+    EQA.selecionando = false;
+    EQA.marcados = new Set();
+    toast(ok ? `${ok} ${ok === 1 ? "pedido" : "pedidos"} ${aprovar ? (ok === 1 ? "aprovado" : "aprovados") : (ok === 1 ? "recusado" : "recusados")}.` +
+      (falhas.length ? ` ${falhas.length} não ${falhas.length === 1 ? "foi" : "foram"}: ${falhas[0]}` : "") : "Nenhum foi registrado: " + (falhas[0] || "tente de novo."), 4200);
+    telaEqAprovacoes();
+  };
 }
 
 async function telaEqPedido(id) {
