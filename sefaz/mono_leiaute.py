@@ -71,13 +71,17 @@ def aprender(ambiente, cstat, usou_novo=False):
     return False
 
 
-def grupos_ret(ano, cclass="620006"):
+def grupos_ret(ano, cclass="620006", ambiente=None):
     """Grupos do gIBSCBSMono (antes dos totais do item) para a monofasia RETIDA ANTERIORMENTE.
     So' para cClassTrib com ind_gMonoRet=1 (620006 = posto revendedor); outro cClassTrib -> '' (nao inventa)."""
     if str(cclass or "620006") != "620006":
         return ""
     ano = int(ano)
     ibs = "AdValorem" if ano <= 2028 else "AdRem"
-    cbs = "AdValorem" if ano <= 2026 else "AdRem"
+    # CBS em HOMOLOGACAO vai AD REM ja' em 2026 (17/10/2026: com AD VALOREM a SEFAZ-MG de homologacao recusou 1270
+    # "informado indevidamente gpBioDiferenca da CBS Ad Valorem" sem o grupo ter sido mandado). A NT preve': a UB95a-10
+    # (CBS Ad Rem indevida ate' 2026) NAO se aplica em homologacao, e a UB100-20 dispensa o Ad Valorem em homologacao
+    # quando o gCBSMonoAdRem vem informado. Producao segue a tabela por ano.
+    cbs = "AdValorem" if (ano <= 2026 and str(ambiente or "") != "homologacao") else "AdRem"
     return (f"<gIBSMono{ibs}><gMonoRet><vIBSMonoRet>0.00</vIBSMonoRet></gMonoRet></gIBSMono{ibs}>"
             f"<gCBSMono{cbs}><gMonoRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet></gCBSMono{cbs}>")

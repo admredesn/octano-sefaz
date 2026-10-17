@@ -158,7 +158,7 @@ def _imposto_item(it, crt="3"):
         # MONOFASIA RETIDA ANTERIORMENTE no leiaute NOVO (NT 2025.002 v1.50+, 17/10/2026; rejeicao 1229 / UB90-20):
         # grupos de mono_leiaute.grupos_ret(ano). Vai quando montar_infnfe marca _mono_ano no item: NF-e consolidada
         # (it["gmono_ret"]) ou chave MONO_LEIAUTE. O gMonoRet ANTIGO (qBCMonoRet/adRemIBSRet) dava 225.
-        gret = mono_leiaute.grupos_ret(it["_mono_ano"], cclass) if it.get("_mono_ano") else ""
+        gret = mono_leiaute.grupos_ret(it["_mono_ano"], cclass, it.get("_mono_amb")) if it.get("_mono_ano") else ""
         ibscbs = (
             f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
             f"<gIBSCBSMono>{gret}<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
@@ -280,6 +280,7 @@ def montar_infnfe(nota, ambiente):
     for it in nota["itens"]:
         if str(it.get("cst_icms")) == "61" and (it.get("gmono_ret") or _novo):
             it["_mono_ano"] = dh.year
+            it["_mono_amb"] = ambiente
     # itens + totais
     crt_emit = str(emit.get("crt", "3"))
     dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))

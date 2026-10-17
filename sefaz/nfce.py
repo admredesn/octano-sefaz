@@ -112,7 +112,7 @@ def _imposto_item_nfce(it):
         pis = "<PIS><PISNT><CST>04</CST></PISNT></PIS>"
         cof = "<COFINS><COFINSNT><CST>04</CST></COFINSNT></COFINS>"
         # leiaute NOVO da monofasia (NT 2025.002 v1.50+, 17/10/2026): so' com a chave MONO_LEIAUTE (mono_leiaute.py)
-        _mono = mono_leiaute.grupos_ret(it["_mono_ano"]) if it.get("_mono_ano") else ""
+        _mono = mono_leiaute.grupos_ret(it["_mono_ano"], ambiente=it.get("_mono_amb")) if it.get("_mono_ano") else ""
         ibscbs = ("<IBSCBS><CST>620</CST><cClassTrib>620006</cClassTrib>"
                   "<gIBSCBSMono>" + _mono + "<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
                   "<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>")
@@ -341,6 +341,7 @@ def montar_infnfce(nota, empresa, ambiente):
         for it in itens_emit:
             if str(it.get("cst_icms")) == "61":
                 it["_mono_ano"] = dh.year
+                it["_mono_amb"] = ambiente
     if tp_amb == "2" and itens_emit:
         itens_emit[0]["xProd"] = "NOTA FISCAL EMITIDA EM AMBIENTE DE HOMOLOGACAO - SEM VALOR FISCAL"
     dets = "".join(_det_item_nfce(it, i + 1, cnpj_emit) for i, it in enumerate(itens_emit))
