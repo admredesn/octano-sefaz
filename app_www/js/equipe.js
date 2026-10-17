@@ -47,7 +47,8 @@ async function apiEq(caminho, corpo) {
   let j;
   try { j = await r.json(); } catch (e) { j = { erro: "Resposta inválida do servidor (" + r.status + ")." }; }
   if (Array.isArray(j)) { j.http = r.status; return j; }
-  if (r.status === 401 && tokEq()) eqSair();
+  // só sai da conta quando o servidor diz que a SESSÃO acabou (17/10/2026: banco lento virava 401 e deslogava a pessoa)
+  if (r.status === 401 && tokEq() && /sess/i.test((j && j.erro) || "")) eqSair();
   return Object.assign({ http: r.status }, j);
 }
 
@@ -352,7 +353,7 @@ function eqaDesenhar(lst, resolvidas) {
     const marcado = sel && EQA.marcados.has(p.id);
     return `<button class="linha ${marcado ? "marcada" : ""}" onclick="${sel ? `eqaMarcar('${esc(p.id)}')` : `ir('#/eq-pedido/${esc(p.id)}')`}"><span class="ic">${ICO[t.ico](20)}</span>
       <div class="meio"><div class="t">${esc(p.titulo || t.nome)}</div><div class="s">${esc(p.posto)} · ${esc(primeiroNome(p.pediu))} · ${quando}</div></div>
-      ${sel ? `<span class="marca ${marcado ? "on" : ""}">${marcado ? ICO.check(16) : ""}</span>` : st ? `<span class="tag ${st[1]}">${st[0]}</span>` : `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
+      ${sel ? `<span class="sel-marca ${marcado ? "on" : ""}">${marcado ? ICO.check(16) : ""}</span>` : st ? `<span class="tag ${st[1]}">${st[0]}</span>` : `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
   };
   const n = EQA.marcados.size, todos = n === lst.length && n > 0;
   el().innerHTML = `<div class="tela">${topoSimples("Aprovações", false)}

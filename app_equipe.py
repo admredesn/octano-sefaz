@@ -304,9 +304,11 @@ def _prefs(uid):
     def busca():
         try:
             r = cp._sget(f"oct_app_equipe?usuario_id=eq.{uid}&select=avisos,token_versao&limit=1")
-            return r[0] if r else {}
-        except Exception:
-            return {}                               # SQL-APP-EQUIPE.sql ainda não rodado
+        except Exception as e:
+            if "PGRST205" in str(e) or "oct_app_equipe" in str(e) and "404" in str(e):
+                return {}                           # SQL-APP-EQUIPE.sql ainda não rodado
+            raise                                   # banco lento/fora: NÃO é sessão encerrada (ver _eu)
+        return r[0] if r else {}
     return _guardado("prefs|" + uid, 60, busca)
 
 
@@ -382,13 +384,22 @@ def _eu():
     if not val:
         return None
     uid, ver = val
-    try:
-        p = _perfil(uid)
-    except Exception:
-        return None
+    # 17/10/2026: falha do banco aqui virava None -> 401 "Sessão encerrada" -> o app deslogava a pessoa (o Ronan caiu na
+    # tela de entrar depois da lentidão de ~30 s). Agora o erro SOBE e vira 503 em _erro_do_servidor: o app mostra o que
+    # tem guardado e tenta de novo; só token inválido, acesso cortado ou "sair de todos os aparelhos" encerram a sessão.
+    p = _perfil(uid)
     if not _entra(p) or int(_prefs(uid).get("token_versao") or 0) != ver:
         return None
     return p
+
+
+@bp_equipe.errorhandler(Exception)
+def _erro_do_servidor(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    print(f"[app-equipe] {request.method} {request.path}: {str(e)[:200]}")
+    return jsonify({"erro": "O servidor demorou para responder. Tente de novo em instantes."}), 503
 
 
 def _nao_entrou():

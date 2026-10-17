@@ -423,9 +423,10 @@ img { display: block; max-width: 100%; }
             font-size: .86rem; color: var(--mut); }
 .sel-topo .link { font-size: .9rem; }
 .linha.marcada { background: var(--verde-fundo); }
-.marca { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #C3CCD6; flex: none; display: flex;
-         align-items: center; justify-content: center; color: #fff; }
-.marca.on { background: var(--verde); border-color: var(--verde); }
+/* .sel-marca, não .marca: .marca é a classe da LOGO nas telas de entrar (o nome igual achatou a logo, 17/10/2026) */
+.sel-marca { width: 24px; height: 24px; border-radius: 50%; border: 2px solid #C3CCD6; flex: none; display: flex;
+             align-items: center; justify-content: center; color: #fff; }
+.sel-marca.on { background: var(--verde); border-color: var(--verde); }
 .lote { position: fixed; left: 0; right: 0; bottom: calc(var(--barra) + env(safe-area-inset-bottom) + 8px); z-index: 5;
         max-width: 480px; margin: 0 auto; padding: 0 14px; display: grid; grid-template-columns: 1fr 1.6fr; gap: 10px; }
 .lote .btn { margin-top: 0; box-shadow: var(--sombra); }
