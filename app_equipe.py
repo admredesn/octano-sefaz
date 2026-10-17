@@ -724,11 +724,6 @@ def api_painel():
         postos.append(filtrar_posto(d, eid, nome, pode))
         alertas += _alertas(d, eid, nome, pode)
     pend, resumo = _pendentes_resumo(p)
-    if pode.get("ver_litros"):
-        try:
-            _aquecer_meses()                     # gráfico de meses do Comparar períodos pronto antes de alguém abrir
-        except Exception:
-            pass
     return jsonify({"ok": True, "postos": postos, "alertas": alertas, "pendentes": pend, "pendentes_resumo": resumo})
 
 
@@ -754,12 +749,10 @@ def api_posto(eid):
 #   * combustível = a pista (oct_pdv_abastecimentos, sem aferição; data_abast é a hora LOCAL rotulada +00:00); posto sem
 #     pista no período usa os itens "abastecimento" dos cupons, como o Monitor;
 #   * loja = itens "produto" dos cupons (oct_pdv_vendas, data_venda em UTC); formas = pagamentos dos cupons (+ fila de hoje);
-#   * estoque do dia (o livro, como no LMC) = medição da abertura + descargas (sonda com entrega_em_progresso) − vendido
-#     pelos bicos daquele tanque; medidor = a última leitura;
+#   * estoque do dia (o livro, como no LMC) = medição da abertura + descargas (oct_sonda_entregas, as mesmas da tela
+#     Descargas) − vendido pelos bicos daquele tanque; medidor = a última leitura;
 #   * comissão = pista por crachá (vendedor) com o nome do cadastro (oct_pessoas.cartao_idf); a regra ainda não existe.
 GESTAO_MAX_DIAS = 400
-DESCARGA_MIN_L = 300            # subida mínima do tanque para a janela de "entrega" da sonda contar como descarga
-_POOL_AQUECER = ThreadPoolExecutor(max_workers=2)   # meses fechados calculados em segundo plano (não disputa com os pedidos)
 
 
 def _tudo(q, maxpag=80):
@@ -823,8 +816,16 @@ def _postos_da_gestao(p):
     return meus, meus, None
 
 
+def _ontem_de(iso):
+    return (_dia(iso) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+# Período que vai até hoje = dias FECHADOS (guardados 30 min: não mudam) + HOJE (1 min). Antes, "Este mês" e a previsão
+# do mês buscavam o mês inteiro de novo a cada minuto (medição de 17/10: consultas de 7–8 s nos abastecimentos).
 def _pista(eid, de, ate):
     hoje = _agora_local().strftime("%Y-%m-%d")
+    if de < hoje <= ate:
+        return _pista(eid, de, _ontem_de(hoje)) + _pista(eid, hoje, hoje)
     return _guardado(f"g-pista|{eid}|{de}|{ate}", 60 if ate >= hoje else 1800, lambda: _tudo(
         "oct_pdv_abastecimentos?select=data_abast,litros,valor_total,preco_litro,combustivel,produto_nome,vendedor,tanque_id"
         f"&empresa_id=eq.{eid}&data_abast=gte.{de}&data_abast=lt.{_seguinte(ate)}&{SEM_AFERICAO}&order=data_abast"))
@@ -832,6 +833,8 @@ def _pista(eid, de, ate):
 
 def _cupons(eid, de, ate):
     hoje = _agora_local().strftime("%Y-%m-%d")
+    if de < hoje <= ate:
+        return _cupons(eid, de, _ontem_de(hoje)) + _cupons(eid, hoje, hoje)
     return _guardado(f"g-cupons|{eid}|{de}|{ate}", 60 if ate >= hoje else 1800, lambda: _tudo(
         "oct_pdv_vendas?select=valor_total,pagamentos,status,itens"
         f"&empresa_id=eq.{eid}&data_venda=gte.{_utc_do_dia(de)}&data_venda=lt.{_utc_do_dia(_seguinte(ate))}&order=data_venda"))
@@ -1062,21 +1065,6 @@ def _ultimos_meses(agora, n=6):
     return out[::-1]
 
 
-_aquecido = [0.0]
-
-
-def _aquecer_meses():
-    """Calcula em segundo plano os meses fechados de todos os postos (6 h de validade): o gráfico do Comparar abre na hora.
-    Chamado quando alguém da equipe abre o Painel; no máximo uma vez a cada 5 h por processo."""
-    if time.time() - _aquecido[0] < 5 * 3600:
-        return
-    _aquecido[0] = time.time()
-    agora = _agora_local()
-    for eid in _empresas_ativas():
-        for _, ini, fim in _ultimos_meses(agora)[:-1]:
-            _POOL_AQUECER.submit(_litros_mes, eid, ini, fim)
-
-
 @bp_equipe.route("/app/equipe/api/meses", methods=["GET"])
 def api_meses():
     """Litros por mês (últimos 6) do filtro de postos — o gráfico do Comparar períodos, pedido à parte (é a parte lenta)."""
@@ -1101,72 +1089,62 @@ def api_meses():
     return jsonify({"ok": True, "meses": meses})
 
 
-def estoque_do_dia(tanques, leituras, pista, abertura_ontem, agora):
+def estoque_do_dia(tanques, primeiras, ultimas, entregas, pista, abertura_ontem):
     """PURA. Livro do dia por tanque (como no LMC) × medidor.
-    tanques = oct_tanques; leituras = oct_medicoes de hoje (ordem de medido_em); pista = abastecimentos de hoje (com tanque_id);
-    abertura_ontem = {numero: volume} da última leitura antes da meia-noite (posto sem leitura hoje ainda).
-    Descarga = trecho com entrega_em_progresso: entrou = volume depois − volume antes + o que os bicos venderam no meio."""
-    por_tq = {}
-    for m in leituras:
-        if _num(m.get("volume")) > 0 and _num(m.get("altura")) > 0:      # a sonda às vezes manda 0/0: descarta
+    primeiras/ultimas = leituras de hoje (oct_medicoes) em ordem crescente/decrescente — vale a 1ª de cada tanque;
+    entregas = descargas de hoje já sem repetição (_entregas_unicas de oct_sonda_entregas, o mesmo da tela Descargas);
+    pista = abastecimentos de hoje (com tanque_id); abertura_ontem = {numero: volume} da última leitura antes da meia-noite.
+    Sistema = abertura + descargas − vendido pelos bicos daquele tanque; medidor = a última leitura."""
+    def por_tanque(leituras):
+        out = {}
+        for m in leituras:
             try:
-                por_tq.setdefault(int(m.get("tanque_numero")), []).append(m)
+                n = int(m.get("tanque_numero"))
             except Exception:
-                pass
+                continue
+            if n not in out and _num(m.get("volume")) > 0 and _num(m.get("altura")) > 0:   # a sonda às vezes manda 0/0
+                out[n] = m
+        return out
+    abre, fecha = por_tanque(primeiras), por_tanque(ultimas)
     num_do_id = {str(t.get("id")): int(_num(t.get("numero"))) for t in tanques}
-    vendas = {}
+    vendido, entrou = {}, {}
     for a in pista:
         n = num_do_id.get(str(a.get("tanque_id")))
         if n is not None:
-            vendas.setdefault(n, []).append((_instante(a.get("data_abast"), local=True), _num(a.get("litros"))))
+            vendido[n] = vendido.get(n, 0.0) + _num(a.get("litros"))
+    for e in entregas:
+        entrou[e["tanque"]] = entrou.get(e["tanque"], 0.0) + e["litros"]
     out = []
     for t in sorted(tanques, key=lambda x: _num(x.get("numero"))):
         n, cap = int(_num(t.get("numero"))), _num(t.get("capacidade"))
-        ls = por_tq.get(n, [])
-        vend = vendas.get(n, [])
-        vendido = sum(v for _, v in vend)
-        medidor = _num(ls[-1].get("volume")) if ls else None
-        abertura = _num(ls[0].get("volume")) if ls else abertura_ontem.get(n)
-        entrou, i = 0.0, 0
-        while i < len(ls):
-            if ls[i].get("entrega_em_progresso"):
-                j = i
-                while j < len(ls) and ls[j].get("entrega_em_progresso"):
-                    j += 1
-                antes = ls[i - 1] if i > 0 else ls[i]
-                depois = ls[j] if j < len(ls) else ls[j - 1]
-                subiu = _num(depois.get("volume")) - _num(antes.get("volume"))
-                # a sonda marca "entrega" à toa (janelas sem mudança de volume, Florestal 17/10): só vale se o tanque SUBIU
-                # de verdade — caminhão traz milhares de litros. Sem isso, um caminhão abastecendo 250 L no meio virava descarga.
-                if subiu >= DESCARGA_MIN_L:
-                    t0, t1 = _instante(antes.get("medido_em")), _instante(depois.get("medido_em"))
-                    entrou += subiu + sum(v for q, v in vend if q and t0 and t1 and t0 <= q <= t1)
-                i = j
-            else:
-                i += 1
-        sistema = (abertura + entrou - vendido) if abertura is not None else None
+        medidor = _num(fecha[n].get("volume")) if n in fecha else None
+        abertura = _num(abre[n].get("volume")) if n in abre else abertura_ontem.get(n)
+        ent, vend = entrou.get(n, 0.0), vendido.get(n, 0.0)
+        sistema = (abertura + ent - vend) if abertura is not None else None
         out.append({"numero": n, "produto": _combustivel(t.get("combustivel")), "capacidade": int(round(cap)),
                     "medidor": int(round(medidor)) if medidor is not None else None,
                     "sistema": int(round(sistema)) if sistema is not None else None,
                     "abertura": int(round(abertura)) if abertura is not None else None,
-                    "entrou": int(round(entrou)), "vendido": int(round(vendido)),
+                    "entrou": int(round(ent)), "vendido": int(round(vend)),
                     "cabe": int(round(max(0.0, cap - medidor))) if (medidor is not None and cap > 0) else None,
                     "pct": round(medidor / cap * 100) if (medidor is not None and cap > 0) else None,
                     "baixo": bool(medidor is not None and cap > 0 and medidor / cap * 100 <= TANQUE_BAIXO_PCT)})
-    medido = max((_instante(ls[-1].get("medido_em")) for ls in por_tq.values() if ls), default=None)
+    medido = max((_instante(m.get("medido_em")) for m in fecha.values()), default=None)
     return out, _iso_utc(medido)
 
 
 def _estoque_posto(eid):
     def busca():
-        agora = _agora_local()
-        hoje = agora.strftime("%Y-%m-%d")
+        hoje = _agora_local().strftime("%Y-%m-%d")
         meia_noite = _utc_do_dia(hoje)
+        base = f"oct_medicoes?select=tanque_numero,volume,altura,medido_em&empresa_id=eq.{eid}&volume=gt.0&altura=gt.0"
         f = {"tanques": _POOL.submit(cp._sget, f"oct_tanques?select=id,numero,combustivel,capacidade&empresa_id=eq.{eid}&ativo=is.true&order=numero"),
-             "leituras": _POOL.submit(_tudo, "oct_medicoes?select=tanque_numero,volume,altura,medido_em,entrega_em_progresso"
-                                      f"&empresa_id=eq.{eid}&medido_em=gte.{meia_noite}&order=medido_em", 12),
-             "ontem": _POOL.submit(cp._sget, f"oct_medicoes?select=tanque_numero,volume,altura&empresa_id=eq.{eid}"
-                                   f"&medido_em=lt.{meia_noite}&volume=gt.0&altura=gt.0&order=medido_em.desc&limit=60"),
+             # ~4 leituras por minuto por posto: 200 linhas cobrem com folga a 1ª e a última de cada tanque
+             "primeiras": _POOL.submit(cp._sget, f"{base}&medido_em=gte.{meia_noite}&order=medido_em&limit=200"),
+             "ultimas": _POOL.submit(cp._sget, f"{base}&medido_em=gte.{meia_noite}&order=medido_em.desc&limit=200"),
+             "ontem": _POOL.submit(cp._sget, f"{base}&medido_em=lt.{meia_noite}&order=medido_em.desc&limit=60"),
+             "entregas": _POOL.submit(cp._sget, "oct_sonda_entregas?select=tanque_numero,inicio,fim,vol_ini,vol_fim,entregue,origem"
+                                      f"&empresa_id=eq.{eid}&inicio=gte.{meia_noite}&order=inicio&limit=200"),
              "pista": _POOL.submit(_pista, eid, hoje, hoje)}
         r = {k: v.result(timeout=60) for k, v in f.items()}
         ab = {}
@@ -1175,7 +1153,7 @@ def _estoque_posto(eid):
                 ab.setdefault(int(m.get("tanque_numero")), _num(m.get("volume")))
             except Exception:
                 pass
-        return estoque_do_dia(r["tanques"], r["leituras"], r["pista"], ab, agora)
+        return estoque_do_dia(r["tanques"], r["primeiras"], r["ultimas"], _entregas_unicas(r["entregas"]), r["pista"], ab)
     return _guardado("g-estoque|" + eid, 60, busca)
 
 
