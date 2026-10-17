@@ -22,6 +22,8 @@ Sem biblioteca nova: o acesso ao Google é um JWT RS256 assinado com `cryptograp
 """
 
 import base64
+import hashlib
+import io
 import json
 import os
 import threading
@@ -139,9 +141,10 @@ def _access_token(sa):
     return _tok["v"]
 
 
-def enviar_um(token_aparelho, titulo, texto, imagem=None, dados=None, canal="campanhas"):
+def enviar_um(token_aparelho, titulo, texto, imagem=None, dados=None, canal="campanhas", imagem_ios=None):
     """Uma notificação para um celular. Devolve (ok, erro, token_morto).
-    token_morto = o app foi desinstalado ou o token trocou: o aparelho deve sair da lista."""
+    token_morto = o app foi desinstalado ou o token trocou: o aparelho deve sair da lista.
+    imagem = a do Android (e de quem não tiver imagem_ios); imagem_ios = a do iPhone (ver imagens_push)."""
     sa = _sa()
     if not sa:
         return False, "Firebase não configurado (FIREBASE_SA)", False
@@ -154,7 +157,8 @@ def enviar_um(token_aparelho, titulo, texto, imagem=None, dados=None, canal="cam
     }
     if imagem:
         msg["notification"]["image"] = imagem
-        msg["apns"]["fcm_options"] = {"image": imagem}
+    if imagem_ios or imagem:
+        msg["apns"]["fcm_options"] = {"image": imagem_ios or imagem}
     try:
         r = rq.post(f"https://fcm.googleapis.com/v1/projects/{sa['project_id']}/messages:send",
                     headers={"Authorization": "Bearer " + _access_token(sa), "Content-Type": "application/json"},
@@ -166,6 +170,133 @@ def enviar_um(token_aparelho, titulo, texto, imagem=None, dados=None, canal="cam
     det = (r.text or "")[:300]
     morto = r.status_code == 404 or "UNREGISTERED" in det
     return False, f"HTTP {r.status_code}: {det}", morto
+
+
+# ------------------------------------------------------------------
+# Imagem da notificação (16/10/2026)
+# ------------------------------------------------------------------
+# O iPhone só mostra imagem anexada em JPG, PNG ou GIF (quem baixa e anexa é a extensão do app, a partir
+# da versão 1.0.3); WebP — o formato das artes animadas — não aparece. Antes de enviar a campanha, a arte vira:
+#   iPhone  -> GIF animado se a arte se mexe (até 720 px e LIMITE_GIF: a extensão tem pouca memória), senão JPG
+#   Android -> JPG (o Android mostra a imagem parada)
+# Ficam no mesmo bucket público do retaguarda, em campanhas/push/<hash da URL>.gif|.jpg, e são reaproveitadas
+# (pelo outro worker do gunicorn e depois de reiniciar). Qualquer falha = manda a arte original, como antes.
+BUCKET_APP = "octano-app"
+LIMITE_GIF = 1_500_000
+LIMITE_BAIXAR = 15_000_000
+_imagens = {}
+
+
+def _url_publica(caminho):
+    url, _ = _supa()
+    return f"{url}/storage/v1/object/public/{BUCKET_APP}/{caminho}"
+
+
+def _existe(url):
+    try:
+        return rq.head(url, timeout=10).status_code == 200
+    except Exception:
+        return False
+
+
+def _subir(caminho, dados, tipo):
+    url, key = _supa()
+    r = rq.post(f"{url}/storage/v1/object/{BUCKET_APP}/{caminho}", data=dados, timeout=60,
+                headers={"apikey": key, "Authorization": "Bearer " + key, "Content-Type": tipo, "x-upsert": "true"})
+    r.raise_for_status()
+    return _url_publica(caminho)
+
+
+def _quadros(im):
+    """Quadros da arte em RGB (fundo branco no lugar da transparência) + duração de cada um, começando pelo
+    quadro mais "cheio" se o 1º estiver quase vazio (arte que vai aparecendo): o 1º quadro é a miniatura."""
+    from PIL import Image, ImageSequence
+    quadros, tempos = [], []
+    for q in ImageSequence.Iterator(im):
+        rgba = q.convert("RGBA")
+        f = Image.new("RGB", rgba.size, (255, 255, 255))
+        f.paste(rgba, mask=rgba.getchannel("A"))
+        quadros.append(f)
+        tempos.append(int(q.info.get("duration") or 0))
+        if len(quadros) >= 60:
+            break
+    padrao = max(set(t for t in tempos if t) or {100}, key=tempos.count)
+    tempos = [t or padrao for t in tempos]
+    if len(quadros) > 1:
+        ent = [q.convert("L").resize((200, max(1, 200 * q.height // q.width))).entropy() for q in quadros]
+        melhor = ent.index(max(ent))
+        if ent[0] < 0.8 * ent[melhor]:
+            quadros, tempos = quadros[melhor:] + quadros[:melhor], tempos[melhor:] + tempos[:melhor]
+    return quadros, tempos
+
+
+def _reduzir(f, largura):
+    from PIL import Image
+    return f if f.width <= largura else f.resize((largura, round(f.height * largura / f.width)), Image.LANCZOS)
+
+
+def _jpg(f, largura=1024):
+    b = io.BytesIO()
+    _reduzir(f, largura).save(b, "JPEG", quality=85, optimize=True, progressive=True)
+    return b.getvalue()
+
+
+def _gif(quadros, tempos, largura):
+    """GIF com UMA paleta para todos os quadros (tirada de uma amostra deles): o que não muda entre um quadro e
+    outro fica igual e o GIF guarda só a diferença — metade do tamanho (arte do etanol: 1,3 MB em 720 px)."""
+    from PIL import Image
+    red = [_reduzir(q, largura) for q in quadros]
+    amostra = red[::max(1, len(red) // 8)]
+    w, h = amostra[0].size
+    mosaico = Image.new("RGB", (w * len(amostra), h))
+    for i, a in enumerate(amostra):
+        mosaico.paste(a, (i * w, 0))
+    paleta = mosaico.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+    fr = [q.quantize(palette=paleta, dither=Image.Dither.NONE) for q in red]
+    b = io.BytesIO()
+    fr[0].save(b, "GIF", save_all=True, append_images=fr[1:], duration=tempos, loop=0, disposal=1)
+    return b.getvalue()
+
+
+def imagens_push(url):
+    """(imagem do iPhone, imagem do Android) para a arte da campanha. Sem arte = (None, None)."""
+    if not url:
+        return None, None
+    if url in _imagens:
+        return _imagens[url]
+    res = (url, url)
+    try:
+        base = "campanhas/push/" + hashlib.sha1(url.encode()).hexdigest()[:20]
+        u_gif, u_jpg = _url_publica(base + ".gif"), _url_publica(base + ".jpg")
+        if _existe(u_jpg):                       # já convertida (o .gif sobe antes do .jpg)
+            res = (u_gif if _existe(u_gif) else u_jpg, u_jpg)
+        else:
+            from PIL import Image
+            r = rq.get(url, timeout=30)
+            r.raise_for_status()
+            if len(r.content) > LIMITE_BAIXAR:
+                raise ValueError(f"arte grande demais ({len(r.content) // 1_000_000} MB)")
+            im = Image.open(io.BytesIO(r.content))
+            animada = getattr(im, "is_animated", False) and getattr(im, "n_frames", 1) > 1
+            if not animada and (im.format or "").upper() in ("JPEG", "PNG") and len(r.content) <= 1_000_000:
+                res = (url, url)                 # JPG/PNG leve: o iPhone e o Android já mostram a original
+            else:
+                quadros, tempos = _quadros(im)
+                ios = None
+                if animada:
+                    for larg in (720, 540, 400):
+                        g = _gif(quadros, tempos, larg)
+                        if len(g) <= LIMITE_GIF:
+                            ios = _subir(base + ".gif", g, "image/gif")
+                            break
+                jpg = _subir(base + ".jpg", _jpg(quadros[0]), "image/jpeg")
+                res = (ios or jpg, jpg)
+                _log(f"imagem da notificação: {'GIF animado + ' if ios else ''}JPG em {base}")
+    except Exception as e:
+        _log(f"imagem da notificação: mando a original ({str(e)[:150]})")
+        res = (url, url)
+    _imagens[url] = res
+    return res
 
 
 # ------------------------------------------------------------------
@@ -200,9 +331,10 @@ def enviar_campanha(c):
     canal = "avisos" if c.get("tipo") == "aviso" else "campanhas"
     devs = publico(c)
     _log(f"campanha {c['id']} '{titulo[:40]}': {len(devs)} aparelho(s)")
+    img_ios, img_android = imagens_push(c.get("imagem_url")) if devs else (None, None)
 
     def um(d):
-        ok, erro, morto = enviar_um(d["token"], titulo, texto, c.get("imagem_url"), dados, canal)
+        ok, erro, morto = enviar_um(d["token"], titulo, texto, img_android, dados, canal, imagem_ios=img_ios)
         return d, ok, erro, morto
 
     linhas, total, erros, mortos = [], 0, 0, []
