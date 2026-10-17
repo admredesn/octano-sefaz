@@ -44,6 +44,78 @@ import cashback_portal as cp
 
 bp_equipe = Blueprint("equipe", __name__)
 
+
+# ------------------------------------------------------------------ medição de lentidão (17/10/2026)
+# Ronan: "o app está travando muito, clico em Conta e demora quase 30 s". 30 s = o _sget do cashback_portal esperando 10 s
+# de leitura + 20 s da 2ª tentativa. Para achar a causa com número (e não no chute): cada pedido ao servidor e cada
+# consulta ao banco mais lentos ficam guardados em memória e saem em /app/diag/lentidao (só rota, tabela e tempo — nada de
+# dado de cliente). ?zerar=1 recomeça a contagem.
+from collections import deque
+import threading as _th
+
+_DIAG = {"desde": time.time(), "rotas": {}, "lentas": deque(maxlen=120), "banco": {}, "banco_lento": deque(maxlen=120)}
+_DIAG_TRAVA = _th.Lock()
+_DIAG_LENTO_MS = 800
+
+
+def _diag_conta(tab, chave, ms):
+    x = tab.setdefault(chave, [0, 0.0, 0.0])
+    x[0] += 1
+    x[1] += ms
+    x[2] = max(x[2], ms)
+
+
+_sget_original = cp._sget
+
+
+def _sget_medido(q):
+    t0 = time.time()
+    try:
+        return _sget_original(q)
+    finally:
+        ms = (time.time() - t0) * 1000
+        tabela = str(q).split("?")[0]
+        with _DIAG_TRAVA:
+            _diag_conta(_DIAG["banco"], tabela, ms)
+            if ms >= _DIAG_LENTO_MS:
+                _DIAG["banco_lento"].append((time.strftime("%H:%M:%S", time.gmtime(time.time() - 3 * 3600)), tabela, round(ms)))
+
+
+cp._sget = _sget_medido          # vale para o cashback_portal e para todos os módulos que consultam o banco por ele
+
+
+@bp_equipe.before_app_request
+def _diag_inicio():
+    request._diag_t0 = time.time()
+
+
+@bp_equipe.after_app_request
+def _diag_fim(resp):
+    try:
+        ms = (time.time() - getattr(request, "_diag_t0", time.time())) * 1000
+        rota = request.url_rule.rule if request.url_rule else "(estático)"
+        with _DIAG_TRAVA:
+            _diag_conta(_DIAG["rotas"], request.method + " " + rota, ms)
+            if ms >= _DIAG_LENTO_MS:
+                _DIAG["lentas"].append((time.strftime("%H:%M:%S", time.gmtime(time.time() - 3 * 3600)), request.method + " " + rota, round(ms), resp.status_code))
+    except Exception:
+        pass
+    return resp
+
+
+@bp_equipe.route("/app/diag/lentidao", methods=["GET"])
+def api_diag_lentidao():
+    with _DIAG_TRAVA:
+        if request.args.get("zerar"):
+            _DIAG.update(desde=time.time(), rotas={}, banco={})
+            _DIAG["lentas"].clear()
+            _DIAG["banco_lento"].clear()
+        fmt = lambda tab: sorted(({"nome": k, "vezes": v[0], "media_ms": round(v[1] / v[0]), "max_ms": round(v[2])} for k, v in tab.items()),
+                                 key=lambda x: -x["max_ms"])[:40]
+        return jsonify({"processo": os.getpid(), "minutos": round((time.time() - _DIAG["desde"]) / 60, 1),
+                        "rotas": fmt(_DIAG["rotas"]), "banco": fmt(_DIAG["banco"]),
+                        "pedidos_lentos": list(_DIAG["lentas"])[-40:], "consultas_lentas": list(_DIAG["banco_lento"])[-40:]})
+
 # Tipos de pedido que JÁ chegam ao app. Aferição usa o que já existe (oct_pdv_abastecimentos.status = 'afericao_pendente' e a mesma
 # decisão do retaguarda); desconto e a prazo dependem do PDV pedir pelo servidor (próxima etapa).
 TIPOS_NO_AR = {"afericao": True, "desconto": True, "prazo": False}
