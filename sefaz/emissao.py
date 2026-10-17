@@ -155,9 +155,16 @@ def _imposto_item(it, crt="3"):
         # 15/09/2026: igual à NFC-e autorizada (nfce.py) — só os totais do item.
         # O gMonoRet zerado + gMono no total passavam no XSD local (antigo) e a
         # SEFAZ-MG respondeu 225 (falha de schema) na 1ª devolução do Tijuco.
+        # gMonoRet (17/10/2026, rejeicao 1229 "Nao informada Tributacao Monofasica ... do IBS" na NF-e de faturamento):
+        # a NF-e 55 cobra o grupo da monofasia RETIDA ANTERIORMENTE (cClassTrib 620006). So' quando o chamador pede
+        # (it["gmono_ret"]) -- a devolucao autorizada em 15/09 segue sem ele. Aliquota ad rem 0 (2026, como o total).
+        gret = ""
+        if it.get("gmono_ret"):
+            gret = (f"<gMonoRet><qBCMonoRet>{float(it['qCom']):.4f}</qBCMonoRet><adRemIBSRet>0.0000</adRemIBSRet>"
+                    f"<vIBSMonoRet>0.00</vIBSMonoRet><adRemCBSRet>0.0000</adRemCBSRet><vCBSMonoRet>0.00</vCBSMonoRet></gMonoRet>")
         ibscbs = (
             f"<IBSCBS><CST>{cst_rt}</CST><cClassTrib>{cclass}</cClassTrib>"
-            f"<gIBSCBSMono><vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
+            f"<gIBSCBSMono>{gret}<vTotIBSMonoItem>0.00</vTotIBSMonoItem>"
             f"<vTotCBSMonoItem>0.00</vTotCBSMonoItem></gIBSCBSMono></IBSCBS>"
         )
     else:
