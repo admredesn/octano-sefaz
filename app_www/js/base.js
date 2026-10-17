@@ -9,7 +9,7 @@
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
-const VERSAO_APP = "1.0.7";
+const VERSAO_APP = "1.0.8";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
