@@ -1117,6 +1117,223 @@ def api_estoque():
     return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "estoque": out})
 
 
+# ---- DESCARGAS (17/10/2026, pedido do Ronan: "histórico de descarga para identificar se houve ou não a entrega")
+# Entrega = registro da SONDA do posto (oct_sonda_entregas: console do medidor e detector do núcleo, conferidos contra o PDF
+# do console, ≤ 20 L). NÃO usa oct_nfe_descarga: em 17/10 ela cortava a descarga ao meio (AC T3 13/10: sonda 4.974 L,
+# tabela 2.571 L "sem nota") e virava "sem nota" falso. A nota é casada aqui com as regras do relatório Descargas × Notas
+# do retaguarda (relatorio_descargas.js): item de combustível em litros ≥ 400 L, mesma família do tanque, emissão perto
+# da descarga, volume parecido (1 nota ou 2 somadas — dois compartimentos/notas no mesmo caminhão).
+_RE_DET = re.compile(r"<det\b.*?</det>", re.S)
+
+
+def _tag(txt, nome):
+    m = re.search(r"<%s>([^<]*)</%s>" % (nome, nome), txt or "")
+    return m.group(1).strip() if m else None
+
+
+def _familia(xprod=None, anp=None, tanque=None):
+    """Família do combustível (mesma régua de _descFamNota/_descFamTanque do retaguarda)."""
+    if tanque is not None:
+        c = str(tanque or "").upper()
+        if "ADT" in c or "ADIT" in c:
+            return "GAS_ADT"
+        if "GAS" in c:
+            return "GASOLINA"
+        if "ETAN" in c or "ALCOOL" in c:
+            return "ETANOL"
+        return "DIESEL_S500" if "S500" in c else "DIESEL_S10" if "S10" in c else "DIESEL"
+    t, a = str(xprod or "").upper(), str(anp or "")
+    if a.startswith("3201") or ("GAS" in t and "DIES" not in t):
+        return "GAS_ADT" if (a == "320102002" or "ADIT" in t) else "GASOLINA"
+    if a.startswith("8101") or "ETAN" in t or "ALCOOL" in t:
+        return "ETANOL"
+    if a.startswith("8201") or "DIES" in t:
+        return "DIESEL_S500" if "S500" in t else "DIESEL_S10" if "S10" in t else "DIESEL"
+    return None
+
+
+def notas_combustivel(linhas):
+    """PURA. Linhas de oct_nfe_manifestadas (com xml) -> itens de combustível de notas de ENTRADA válidas:
+    [{chave, numero, fornecedor, emissao (UTC), fam, litros, produto, valor}]. Tira cancelada, devolvida e saída."""
+    notas, devolvidas = {}, set()
+    for x in linhas:
+        ch, xml = x.get("chave_nfe"), x.get("xml") or ""
+        if not ch or not xml:
+            continue
+        resumo = x.get("tipo") == "resumo"
+        if ch in notas and not (notas[ch]["resumo"] and not resumo):
+            continue
+        dh = _tag(xml, "dhEmi")
+        notas[ch] = {"chave": ch, "numero": x.get("numero") or str(int(ch[25:34])), "resumo": resumo,
+                     "fornecedor": cp._nome_bonito(x.get("emitente") or _tag(xml, "xNome") or ""),
+                     "emissao": _instante(dh) if dh else (_dia(x.get("emissao")) - FUSO + timedelta(hours=12) if _dia(x.get("emissao")) else None),
+                     "tpNF": _tag(xml, "tpNF"), "cSit": _tag(xml, "cSitNFe"), "valor": _num(_tag(xml, "vNF") or x.get("valor")),
+                     "itens": [] if resumo else [(_tag(d, "xProd"), _num(_tag(d, "qCom")), str(_tag(d, "uCom") or "").upper(), _tag(d, "cProdANP"))
+                                                  for d in _RE_DET.findall(xml)]}
+        if _tag(xml, "tpNF") == "0":
+            devolvidas.update(re.findall(r"<refNFe>(\d{44})</refNFe>", xml))
+    out = []
+    for n in notas.values():
+        if n["tpNF"] != "1" or n["cSit"] == "3" or n["chave"] in devolvidas:
+            continue
+        for prod, q, uni, anp in n["itens"]:
+            fam = _familia(prod, anp)
+            if fam and uni in ("L", "LT", "LTS", "LITRO") and q >= 400:
+                out.append({"chave": n["chave"], "numero": n["numero"], "fornecedor": n["fornecedor"], "emissao": n["emissao"],
+                            "fam": fam, "litros": q, "produto": _NOME_FAM.get(fam, _combustivel(prod)), "valor": n["valor"]})
+    return out
+
+
+# nome da família para a tela (a gasolina C vem como "ONU 3475 MIST ETA E GAS ...")
+_NOME_FAM = {"GASOLINA": "Gasolina comum", "GAS_ADT": "Gasolina aditivada", "ETANOL": "Etanol", "DIESEL_S10": "Diesel S10",
+             "DIESEL_S500": "Diesel S500", "DIESEL": "Diesel"}
+
+
+def casar_descargas(entregas, itens, fam_do_tanque):
+    """PURA. Liga cada entrega (em ordem de hora) à nota (ou 2 notas somadas) da mesma família, emitida até 4 dias antes
+    ou 12 h depois, com volume dentro de max(300 L, 6%). Usa cada item uma vez só. Devolve as entregas com 'notas'.
+    Empate (duas notas de 2.000 L que servem): ganha a do MESMO CAMINHÃO — nota que tem outro item casando com outra
+    descarga do posto em até 3 h (Miranda 03/10: diesel da Royal junto com a gasolina da Royal, não a nota da Setta) — e,
+    depois, a emitida mais perto da descarga (0,5 L de penalidade por hora)."""
+    usados = set()
+    ordem = sorted(entregas, key=lambda x: x["inicio"] or datetime.min)
+
+    def mesmo_caminhao(i, e):
+        it = itens[i]
+        for o in ordem:
+            if o is e or not o["inicio"] or not e["inicio"] or abs((o["inicio"] - e["inicio"]).total_seconds()) > 3 * 3600:
+                continue
+            fo = fam_do_tanque.get(o["tanque"])
+            if any(j != i and itens[j]["chave"] == it["chave"] and itens[j]["fam"] == fo for j in range(len(itens))):
+                return True
+        return False
+
+    def nota_pontos(idx, e, d):
+        horas = sum(abs((e["inicio"] - itens[i]["emissao"]).total_seconds()) / 3600 for i in idx) / len(idx)
+        return d + 0.5 * horas - (100 if any(mesmo_caminhao(i, e) for i in idx) else 0)
+
+    for e in ordem:
+        fam, vol, t0 = fam_do_tanque.get(e["tanque"]), e["litros"], e["inicio"]
+        tol = max(300.0, vol * 0.06)
+        cand = [i for i, it in enumerate(itens) if i not in usados and it["fam"] == fam and it["emissao"] and t0
+                and t0 - timedelta(days=4) <= it["emissao"] <= t0 + timedelta(hours=12)]
+        melhor = None
+        for i in cand:                                            # uma nota
+            d = abs(itens[i]["litros"] - vol)
+            if d <= tol:
+                pts = nota_pontos([i], e, d)
+                if melhor is None or pts < melhor[0]:
+                    melhor = (pts, [i])
+        if melhor is None:                                        # duas notas no mesmo caminhão
+            for a in range(len(cand)):
+                for b in range(a + 1, len(cand)):
+                    d = abs(itens[cand[a]]["litros"] + itens[cand[b]]["litros"] - vol)
+                    if d <= tol:
+                        pts = nota_pontos([cand[a], cand[b]], e, d)
+                        if melhor is None or pts < melhor[0]:
+                            melhor = (pts, [cand[a], cand[b]])
+        e["notas"] = []
+        if melhor:
+            usados.update(melhor[1])
+            e["notas"] = [itens[i] for i in melhor[1]]
+    return entregas, [it for i, it in enumerate(itens) if i not in usados]
+
+
+def _entregas_unicas(linhas):
+    """oct_sonda_entregas traz a MESMA descarga duas vezes (console do medidor + detector do núcleo): junta por tanque e
+    início a até 20 min, ficando com a do console."""
+    out = []
+    for x in sorted(linhas, key=lambda r: (0 if r.get("origem") == "console" else 1, str(r.get("inicio")))):
+        ini = _instante(x.get("inicio"))
+        if not ini:
+            continue
+        vol = _num(x.get("entregue")) or (_num(x.get("vol_fim")) - _num(x.get("vol_ini")))
+        if vol < 150:
+            continue
+        tq = int(_num(x.get("tanque_numero")))
+        if any(o["tanque"] == tq and abs((o["inicio"] - ini).total_seconds()) <= 1200 for o in out):
+            continue
+        out.append({"tanque": tq, "inicio": ini, "fim": _instante(x.get("fim")), "litros": vol,
+                    "antes": _num(x.get("vol_ini")), "depois": _num(x.get("vol_fim")), "origem": x.get("origem") or ""})
+    return out
+
+
+def _descargas_posto(eid, de, ate):
+    hoje = _agora_local().strftime("%Y-%m-%d")
+
+    def busca():
+        # descargas até 4 dias DEPOIS do período entram no casamento (nota de 30/09 descarregada em 01/10 não é "sem
+        # descarga"), mas a tela só lista as do período
+        ini_utc = _utc_do_dia(de)
+        fim_utc = _utc_do_dia((_dia(ate) + timedelta(days=5)).strftime("%Y-%m-%d")) if ate < hoje else _utc_do_dia(_seguinte(ate))
+        f = {"entregas": _POOL.submit(cp._sget, "oct_sonda_entregas?select=tanque_numero,inicio,fim,vol_ini,vol_fim,entregue,origem"
+                                      f"&empresa_id=eq.{eid}&inicio=gte.{ini_utc}&inicio=lt.{fim_utc}&order=inicio&limit=1000"),
+             "tanques": _POOL.submit(cp._sget, f"oct_tanques?select=numero,combustivel,capacidade&empresa_id=eq.{eid}&order=numero"),
+             "notas": _POOL.submit(_tudo, "oct_nfe_manifestadas?select=numero,emissao,emitente,valor,chave_nfe,tipo,xml"
+                                   f"&empresa_id=eq.{eid}&emissao=gte.{(_dia(de) - timedelta(days=4)).strftime('%Y-%m-%d')}"
+                                   f"&emissao=lte.{_seguinte(ate)}&tipo=in.(nfe_completa,resumo)&valor=gte.1000&order=id", 20),
+             # 1º registro da sonda deste posto: nota emitida antes dele não tem com o que comparar (SEVEN só grava desde out/2026)
+             "primeira": _POOL.submit(cp._sget, f"oct_sonda_entregas?select=inicio&empresa_id=eq.{eid}&order=inicio&limit=1")}
+        r = {k: v.result(timeout=90) for k, v in f.items()}
+        fam = {int(_num(t.get("numero"))): _familia(tanque=t.get("combustivel")) for t in r["tanques"]}
+        nome_tq = {int(_num(t.get("numero"))): _combustivel(t.get("combustivel")) for t in r["tanques"]}
+        entregas, sobra = casar_descargas(_entregas_unicas(r["entregas"]), notas_combustivel(r["notas"]), fam)
+        desde = _instante(r["primeira"][0].get("inicio")) if r["primeira"] else None
+        return entregas, sobra, nome_tq, desde
+    return _guardado(f"g-desc|{eid}|{de}|{ate}", 120 if ate >= hoje else 1800, busca)
+
+
+@bp_equipe.route("/app/equipe/api/descargas", methods=["GET"])
+def api_descargas():
+    p = _eu()
+    if not p:
+        return _nao_entrou()
+    if not pode_de(p).get("ver_tanques"):
+        return jsonify({"erro": "Seu perfil não vê os tanques."}), 403
+    de, ate, erro = _periodo_args()
+    postos, meus, erro2 = _postos_da_gestao(p)
+    if erro or erro2:
+        return jsonify({"erro": erro or erro2}), 400
+    agora_utc = _agora_utc()
+    ini_per, fim_per = _dia(de) - FUSO, _dia(_seguinte(ate)) - FUSO
+    descargas, sem_desc, sem_sonda = [], [], []
+    try:
+        futs = [(eid, nome, _POOL_POSTOS.submit(_descargas_posto, eid, de, ate)) for eid, nome in postos]
+        for eid, nome, f in futs:
+            entregas, sobra, nome_tq, sonda_desde = f.result(timeout=120)
+            if not sonda_desde:
+                sem_sonda.append(nome)
+            for e in entregas:
+                if not (ini_per <= e["inicio"] < fim_per):        # descarga dos dias seguintes: só serviu para casar nota
+                    continue
+                notas = e.get("notas") or []
+                lit_nf = sum(n["litros"] for n in notas)
+                dif = round(e["litros"] - lit_nf, 1) if notas else None
+                situ = "sem_nota" if not notas else ("diferenca" if abs(dif) > max(150.0, lit_nf * 0.02) else "conferida")
+                descargas.append({"posto": nome, "tanque": e["tanque"], "produto": nome_tq.get(e["tanque"], "Tanque %s" % e["tanque"]),
+                                  "inicio": _iso_utc(e["inicio"]), "fim": _iso_utc(e["fim"]), "litros": round(e["litros"]),
+                                  "antes": round(e["antes"]), "depois": round(e["depois"]), "situacao": situ, "diferenca": dif,
+                                  "notas": [{"numero": n["numero"], "fornecedor": n["fornecedor"], "litros": round(n["litros"]),
+                                             "emissao": _iso_utc(n["emissao"])} for n in notas]})
+            if sonda_desde:                                # sem registro da sonda: toda nota pareceria "sem descarga"
+                for it in sobra:
+                    if it["emissao"] and ini_per <= it["emissao"] < fim_per and it["emissao"] >= sonda_desde - timedelta(days=1):
+                        sem_desc.append({"posto": nome, "numero": it["numero"], "fornecedor": it["fornecedor"], "produto": it["produto"],
+                                         "litros": round(it["litros"]), "valor": _r2(it["valor"]), "emissao": _iso_utc(it["emissao"]),
+                                         # nota recente: o caminhão pode ainda não ter chegado
+                                         "aguardando": (agora_utc - it["emissao"]) < timedelta(hours=36)})
+    except Exception as e:
+        print("[app-equipe] descargas:", str(e)[:160])
+        return jsonify({"erro": "Não consegui ler as descargas agora. Tente de novo."}), 502
+    descargas.sort(key=lambda d: d["inicio"] or "", reverse=True)
+    sem_desc.sort(key=lambda d: d["emissao"] or "", reverse=True)
+    return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "descargas": descargas, "notas_sem_descarga": sem_desc,
+                    "sem_sonda": sem_sonda,
+                    "resumo": {"descargas": len(descargas), "litros": sum(d["litros"] for d in descargas),
+                               "sem_nota": sum(1 for d in descargas if d["situacao"] == "sem_nota"),
+                               "notas_sem_descarga": sum(1 for n in sem_desc if not n["aguardando"])}})
+
+
 def _crachas():
     """{crachá: nome} do cadastro (oct_pessoas.cartao_idf)."""
     def busca():

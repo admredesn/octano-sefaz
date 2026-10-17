@@ -107,7 +107,7 @@ function barraEquipe(nome) {
   if (mostra) document.querySelector(".app").classList.remove("sem-barra");
   // telas de dentro acendem a aba de onde se chega nelas (Gestão, 17/10/2026: Postos, comparativo, estoque e comissão)
   const ativo = { "eq-pedido": "eq-aprovacoes", "eq-posto": "eq-gestao", "eq-postos": "eq-gestao", "eq-comparativo": "eq-gestao",
-    "eq-estoque": "eq-gestao", "eq-comissao": "eq-gestao", "eq-permissoes": "eq-conta" }[nome] || nome;
+    "eq-estoque": "eq-gestao", "eq-comissao": "eq-gestao", "eq-descargas": "eq-gestao", "eq-permissoes": "eq-conta" }[nome] || nome;
   b.querySelectorAll("[data-aba]").forEach(x => x.classList.toggle("on", x.dataset.aba === ativo));
 }
 function eqBarraPermissoes() {       // quem não aprova nada não tem a aba Aprovações; quem não vê vendas não tem a aba Vendas…

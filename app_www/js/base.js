@@ -9,7 +9,7 @@
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
-const VERSAO_APP = "1.0.6";
+const VERSAO_APP = "1.0.7";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
@@ -159,6 +159,8 @@ const ICO = (() => {
     comparar: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
     moeda: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9a2.5 2.5 0 0 0-2.3-1.5h-1a2.3 2.3 0 0 0 0 4.5h1a2.3 2.3 0 0 1 0 4.5h-1A2.5 2.5 0 0 1 9.2 15"/><path d="M12 6v1.5M12 16.5V18"/>',
     filtro: '<path d="M3 5h18l-7 8.5V19l-4 2v-7.5Z"/>',
+    caminhao: '<path d="M2 6h11v10H2z"/><path d="M13 9h4l4 4v3h-8"/><circle cx="6" cy="17.5" r="1.8"/><circle cx="17" cy="17.5" r="1.8"/>',
+    nota: '<path d="M6 3h9l4 4v14H6Z"/><path d="M14 3v5h5M9 12h7M9 16h5"/>',
   };
   const out = {};
   Object.keys(P).forEach(k => { out[k] = t => s(P[k], t); });

@@ -12,7 +12,7 @@
 // SERVIDOR que deixa de mandar o que o perfil não pode ver (R$ sem ver_vendas, litros sem ver_litros…).
 // ============================================================
 
-["eq-vendas", "eq-gestao", "eq-comparativo", "eq-estoque", "eq-comissao"].forEach(r => { EQ_ROTAS.push(r); PUBLICAS.push(r); });
+["eq-vendas", "eq-gestao", "eq-comparativo", "eq-estoque", "eq-comissao", "eq-descargas"].forEach(r => { EQ_ROTAS.push(r); PUBLICAS.push(r); });
 
 // período e posto escolhidos: valem para todas as telas da gestão enquanto o app está aberto
 const EQV = { per: "hoje", de: "", ate: "", posto: "", postos: [], cmp: "anterior", cde: "", cate: "" };
@@ -185,6 +185,7 @@ async function telaEqGestao() {
     (eqPode("ver_vendas") || eqPode("ver_litros")) && b("eq-vendas", "grafico", "Vendas", "Por período, combustível, horário e loja"),
     (eqPode("ver_vendas") || eqPode("ver_litros")) && b("eq-comparativo", "comparar", "Comparar períodos", "Litros, faturamento e tickets lado a lado"),
     eqPode("ver_tanques") && b("eq-estoque", "tanque", "Estoque", "Sistema × medidor e quanto ainda cabe"),
+    eqPode("ver_tanques") && b("eq-descargas", "caminhao", "Descargas", "Cada entrega no tanque e a nota de cada uma"),
     eqPode("ver_comissao") && b("eq-comissao", "moeda", "Comissão", "Vendas e comissão de cada vendedor"),
   ].filter(Boolean);
   el().innerHTML = `<div class="tela">${topoSimples("Gestão", false)}
@@ -272,7 +273,59 @@ async function telaEqEstoque() {
     ${postos.length ? postos.map(p => `<div class="secao"><div class="secao-tit"><h2>${esc(p.nome)}</h2><span style="color:var(--mut);font-size:.8rem">${esc(p.medido_em ? "medidor às " + horaBr(p.medido_em) : "sem leitura do medidor")}</span></div>
       <div class="card">${(p.tanques || []).map(tanque).join("") || '<div class="vazio" style="padding:14px 16px">Nenhum tanque cadastrado.</div>'}</div></div>`).join("")
       : '<div class="secao"><div class="card vazio" style="padding:16px">Nenhum posto liberado para o seu perfil.</div></div>'}
+    <div class="secao"><button class="card bloco" style="width:100%;min-height:0;flex-direction:row;align-items:center" onclick="ir('#/eq-descargas')"><span class="ic" style="margin:0">${ICO.caminhao(20)}</span>
+      <div style="flex:1"><div class="t">Descargas</div><div class="s">Cada entrega no tanque e a nota de cada uma</div></div><span class="seta">${ICO.seta(18)}</span></button></div>
     <div class="secao"><div class="vazio" style="padding-top:0"><b>Sistema</b> é o estoque do livro no dia, como no LMC: a medição da abertura, mais as descargas, menos o que as bombas daquele tanque venderam hoje. <b>Medidor</b> é a última leitura da sonda. A diferença (perda ou sobra do dia) fica em vermelho quando passa de 3% do tanque. <b>Cabe</b> é quanto ainda entra até a capacidade.</div></div>
+  </div>`;
+}
+
+// ================================================================ DESCARGAS (17/10/2026)
+// Pedido do Ronan: "histórico de descarga de combustível para ficar mais fácil identificar se houve ou não a entrega".
+// Cada entrega medida pela SONDA do posto, casada com a nota de compra; e as notas de combustível sem subida no tanque.
+function _diaLongo(iso) {
+  const d = new Date(iso);
+  return d.toLocaleDateString("pt-BR", { weekday: "long", day: "2-digit", month: "2-digit" }).replace(/^./, c => c.toUpperCase());
+}
+async function telaEqDescargas() {
+  const eu = await eqEu();
+  if (!eu) return;
+  const p = eqvPeriodo();
+  if (!el().querySelector(".filtros")) eqvCarregando("Descargas", true);
+  const r = await apiEq("/app/equipe/api/descargas?" + eqvQuery(p));
+  if (!r.ok) { eqvErro("Descargas", true, r, telaEqDescargas); return; }
+  EQV.postos = r.postos || EQV.postos;
+  const ds = Array.isArray(r.descargas) ? r.descargas : [], ns = Array.isArray(r.notas_sem_descarga) ? r.notas_sem_descarga : [];
+  const rs = r.resumo || {}, varios = (EQV.postos || []).length > 1 && !EQV.posto;
+  const TAG = { conferida: ["Nota conferida", "verde"], diferenca: ["Diferença", "ouro"], sem_nota: ["Sem nota", "verm"] };
+  const descarga = d => {
+    const t = TAG[d.situacao] || ["", "cinza"];
+    const nfs = (d.notas || []).map(n => "NF " + esc(n.numero) + " · " + esc((n.fornecedor || "").split(" ")[0]) + " · " + _l(n.litros)).join(" + ");
+    const dif = !_n(d.diferenca) ? "" : Math.round(d.diferenca) === 0 ? " (igual à nota)" : ` (${d.diferenca > 0 ? "+" : ""}${num(Math.round(d.diferenca))} L)`;
+    return `<div class="linha" style="align-items:flex-start"><span class="ic">${ICO.caminhao(20)}</span>
+      <div class="meio"><div class="t">${esc(d.produto)} · tanque ${esc(d.tanque)}</div>
+        <div class="s">${horaBr(d.inicio)}${d.fim ? "–" + horaBr(d.fim) : ""}${varios ? " · " + esc(d.posto) : ""} · de ${_l(d.antes)} para ${_l(d.depois)}</div>
+        <div class="s" style="margin-top:3px;color:${d.situacao === "sem_nota" ? "#B42318" : "var(--mut)"}">${nfs ? nfs + dif : "Nenhuma nota de compra casou com esta entrega"}</div></div>
+      <div class="dir">${_l(d.litros)}<div style="margin-top:4px"><span class="tag ${t[1]}">${t[0]}</span></div></div></div>`;
+  };
+  const porDia = {};
+  ds.forEach(d => { const k = new Date(d.inicio).toLocaleDateString("pt-BR"); (porDia[k] = porDia[k] || []).push(d); });
+  const nota = n => `<div class="linha"><span class="ic" style="background:var(--ouro-fundo);color:#8A5A00">${ICO.nota(20)}</span>
+    <div class="meio"><div class="t">NF ${esc(n.numero)} · ${esc(n.produto)}</div>
+      <div class="s">${esc(n.fornecedor)} · emitida ${dataBr(n.emissao)} ${horaBr(n.emissao)}${varios ? " · " + esc(n.posto) : ""}</div></div>
+    <div class="dir">${_l(n.litros)}<div style="margin-top:4px"><span class="tag ${n.aguardando ? "cinza" : "ouro"}">${n.aguardando ? "Aguardando" : "Sem descarga"}</span></div></div></div>`;
+  el().innerHTML = `<div class="tela">${topoSimples("Descargas", true)}${eqvFiltros(telaEqDescargas)}
+    <div class="secao" style="padding-top:12px"><div class="card heroi"><div class="rot">Combustível descarregado</div>
+      <div class="val">${_l(rs.litros)}</div><div class="s">${num(rs.descargas || 0)} ${rs.descargas === 1 ? "descarga" : "descargas"} no período</div>
+      ${rs.sem_nota || rs.notas_sem_descarga ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">
+        ${rs.sem_nota ? `<span class="tag verm">${rs.sem_nota} sem nota</span>` : ""}${rs.notas_sem_descarga ? `<span class="tag ouro">${rs.notas_sem_descarga} ${rs.notas_sem_descarga === 1 ? "nota" : "notas"} sem descarga</span>` : ""}</div>`
+        : '<div style="margin-top:10px"><span class="tag verde">Todas as descargas com nota</span></div>'}</div></div>
+    ${ns.length ? `<div class="secao"><div class="secao-tit"><h2>Notas sem descarga</h2></div><div class="card lista">${ns.map(nota).join("")}</div>
+      <div class="vazio">Nota de combustível emitida sem subida de volume no tanque que a explique: pode ser carga descarregada em outro posto, nota substituída, ou descarga que ainda vai acontecer.</div></div>` : ""}
+    ${Object.keys(porDia).length ? Object.keys(porDia).map(k => `<div class="secao"><div class="secao-tit"><h2 style="font-size:.95rem">${esc(_diaLongo(porDia[k][0].inicio))}</h2></div>
+      <div class="card lista">${porDia[k].map(descarga).join("")}</div></div>`).join("")
+      : '<div class="secao"><div class="card vazio" style="padding:16px">Nenhuma descarga no período.</div></div>'}
+    ${(r.sem_sonda || []).length ? `<div class="secao"><div class="vazio">Sem registro da sonda: ${esc(r.sem_sonda.join(", "))}.</div></div>` : ""}
+    <div class="secao"><div class="vazio" style="padding-top:0">A descarga é a subida de volume medida pela sonda do tanque (console do medidor). A nota é casada pelo combustível, pela data e pelo volume; diferença acima de 2% fica marcada.</div></div>
   </div>`;
 }
 
@@ -299,4 +352,5 @@ async function telaEqComissao() {
   </div>`;
 }
 
-Object.assign(TELAS, { "eq-vendas": telaEqVendas, "eq-gestao": telaEqGestao, "eq-comparativo": telaEqComparativo, "eq-estoque": telaEqEstoque, "eq-comissao": telaEqComissao });
+Object.assign(TELAS, { "eq-vendas": telaEqVendas, "eq-gestao": telaEqGestao, "eq-comparativo": telaEqComparativo, "eq-estoque": telaEqEstoque,
+  "eq-comissao": telaEqComissao, "eq-descargas": telaEqDescargas });
