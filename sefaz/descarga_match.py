@@ -1,17 +1,36 @@
 """
 sefaz/descarga_match.py  -  Fase 2: casa a DESCARGA (sonda) com a NF de combustivel.
 
-Roda no servidor SEFAZ logo apos a consulta DistDFe (mesmo claim, 1x/h por empresa).
-Para cada empresa:
-  1) detecta descargas no historico da sonda (oct_medicoes) - salto grande e rapido;
-  2) reconstroi o volume recebido = salto + vendas do periodo (oct_pdv_abastecimentos);
-  3) casa com a(s) NF(s) de combustivel (oct_nfe_manifestadas): mesmo combustivel (por ANP),
-     volume +-tolerancia, emitida ate N dias antes. Tenta 1 nota; se nao, combo de 2 notas
-     (entrega dupla = 2 compartimentos);
-  4) grava o par (candidato) em oct_nfe_descarga - modo preview, SEM dar entrada (Fase 3).
+Roda no ciclo do dfe_auto (10 em 10 min, todas as empresas). Para cada empresa:
+  1) le as descargas que a SONDA do posto registrou (oct_sonda_entregas: console do medidor
+     e detector minuto a minuto do nucleo, conferidos contra o PDF do console, <= 20 L);
+  2) junta os compartimentos do mesmo caminhao no mesmo tanque (bloco);
+  3) casa cada bloco com a(s) NF(s) de combustivel (oct_nfe_manifestadas): mesmo combustivel
+     (por ANP), emitida ate DIAS_NF dias antes / 12 h depois, volume parecido. 1 nota; senao
+     2 notas somadas (dois compartimentos/notas no mesmo caminhao);
+  4) grava o par em oct_nfe_descarga. confianca 'alta' (1 nota, diferenca <= max(TOL_ABS,
+     TOL_PCT%), sem outra nota que sirva) -> entrada_auto da' a entrada; 'media' fica para
+     conferir; 'sem_nf' -> ciencia nas notas resumo da janela (puxa o XML completo).
 
-Config (env): DESCARGA_DIAS (7), TOL_PCT (1.0), TOL_ABS (150), DIAS_NF (3).
-Idempotente: upsert por (empresa_id, tanque_numero, descarga_ini). Nao rebaixa status.
+ATE' 17/10/2026 a descarga era detectada AQUI, pelas leituras cruas de oct_medicoes (salto >
+500 L numa janela de 75 min), e isso cortava a descarga ao meio e gerava "sem nota" falso:
+  - o `ini` era o 1o ponto cuja janela de 75 min alcancava a subida -> ~72 min ANTES da
+    descarga real (AC T3 13/10: sonda 18:04, tabela 16:52);
+  - as medicoes chegam ao vivo e o ciclo e' de 10 min: o 1o ciclo que via a subida pegava o
+    caminhao AINDA descarregando e gravava o volume parcial (2.571 L de 4.974);
+  - nos ciclos seguintes a deteccao completa tinha o MESMO `ini`, mas o _gravar (vizinhanca de
+    23/09) so' aceitava "mesma descarga" com salto +-10% -> tentava POST -> a UNIQUE
+    (empresa, tanque, descarga_ini) recusava em silencio (409) -> a linha ficava congelada em
+    'sem_nf' (22-23 POSTs recusados por descarga no replay de 24/09 a 15/10);
+  - _vendas comparava data_abast (hora LOCAL rotulada +00:00) com UTC: somava as vendas de 3 h
+    depois (quase sempre 0 na hora do ciclo).
+A sonda do posto ja' fecha a descarga certa (inicio = ultima leitura antes de subir, fim = pico,
+compartimentos separados). Por isso a fonte passou a ser oct_sonda_entregas.
+
+Config (env): DESCARGA_DIAS (7), DESCARGA_TOL_PCT (1.0), DESCARGA_TOL_ABS (150),
+DESCARGA_DIAS_NF (4), DESCARGA_ESPERA_MIN (60).
+Idempotente: a linha e' achada por SOBREPOSICAO (mesmo tanque, intervalo encostando no bloco);
+nunca mexe em linha que ja' saiu de 'candidato' (entrada feita).
 """
 
 import os
@@ -26,13 +45,20 @@ from datetime import datetime, timedelta, timezone
 from .empresa_cert import carregar_empresa, _rest_get, _supabase_conf
 
 DESCARGA_DIAS = int(os.environ.get("DESCARGA_DIAS", "7"))
-TOL_PCT = float(os.environ.get("DESCARGA_TOL_PCT", "1.0"))
+TOL_PCT = float(os.environ.get("DESCARGA_TOL_PCT", "1.0"))     # confianca 'alta'
 TOL_ABS = float(os.environ.get("DESCARGA_TOL_ABS", "150"))
-DIAS_NF = int(os.environ.get("DESCARGA_DIAS_NF", "3"))
+DIAS_NF = int(os.environ.get("DESCARGA_DIAS_NF", "4"))         # nota emitida ate N dias antes...
+HORAS_NF_DEPOIS = 12                                           # ...ou ate 12 h depois da descarga
+ESPERA_MIN = int(os.environ.get("DESCARGA_ESPERA_MIN", "60"))  # bloco fechado ha' pelo menos isso
 
-MIN_DESCARGA = 500.0
-JANELA_MIN = 75
-QUEDA_FIM = 250.0
+TOL_LARGA_PCT = 6.0     # casa como 'media' (conferir) -- mesma regua do relatorio do retaguarda
+TOL_LARGA_ABS = 300.0
+MIN_ENTREGA = 150.0     # registro da sonda menor que isso e' ruido
+MIN_ITEM_NF = 400.0     # item de combustivel menor que isso nao e' carga de caminhao
+MESMA_INI_MIN = 15      # console x nucleo: mesma descarga = inicio a ate 15 min...
+MESMA_VOL_INI = 150.0   # ...E volume inicial a ate 150 L (regra do nucleo)
+BLOCO_GAP_MIN = 20      # compartimentos do mesmo caminhao: proximo comeca ate 20 min depois
+FOLGA_MIN = 10          # linha gravada x bloco: encostam com ate 10 min de folga
 NS = {"n": "http://www.portalfiscal.inf.br/nfe"}
 
 
@@ -87,228 +113,299 @@ def _fuel_anp(anp, xprod):
 
 
 def _t(s):
-    return datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    d = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
 def _iso(dt):
     return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat()
 
 
-# ------------------------------------------------------------------
-# 1. detector de descarga
-# ------------------------------------------------------------------
-def _puxar_medicoes(emp_id):
-    desde = (datetime.now(timezone.utc) - timedelta(days=DESCARGA_DIAS)).strftime("%Y-%m-%dT%H:%M:%S")
-    linhas, off = [], 0
-    while True:
-        p = (f"oct_medicoes?empresa_id=eq.{emp_id}&select=tanque_numero,volume,medido_em"
-             f"&medido_em=gte.{desde}&order=tanque_numero.asc,medido_em.asc&limit=1000&offset={off}")
-        try:
-            parte = _rest_get(p.split("?", 1)[0], "?" + p.split("?", 1)[1])
-        except Exception:
-            break
-        linhas += parte
-        if len(parte) < 1000 or off > 40000:
-            break
-        off += 1000
-    return linhas
-
-
-def _detectar(serie):
-    limpo, visto = [], set()
-    for dt, v in serie:
-        if v is None or v <= 0:
-            continue
-        k = dt.replace(microsecond=0).isoformat()
-        if k in visto:
-            continue
-        visto.add(k); limpo.append((dt, float(v)))
-    n = len(limpo); ds = []; i = 0
-    while i < n - 1:
-        base = limpo[i][1]; pico = base; pico_idx = i; k = i + 1; subiu = False
-        while k < n and (limpo[k][0] - limpo[i][0]).total_seconds() < JANELA_MIN * 60:
-            v = limpo[k][1]
-            if v > pico:
-                pico = v; pico_idx = k
-            if v > base + 100:
-                subiu = True
-            if subiu and v < pico - QUEDA_FIM and (pico - base) > MIN_DESCARGA:
-                break
-            k += 1
-        if pico - base > MIN_DESCARGA:
-            ds.append({"ini": limpo[i][0], "fim": limpo[pico_idx][0], "v_ini": base, "v_pico": pico})
-            i = pico_idx + 1
-        else:
-            i += 1
-    fund = []
-    for d in ds:
-        if fund and (d["ini"] - fund[-1]["fim"]).total_seconds() < 20 * 60:
-            fund[-1]["fim"] = d["fim"]; fund[-1]["v_pico"] = max(fund[-1]["v_pico"], d["v_pico"])
-        else:
-            fund.append(dict(d))
-    for d in fund:
-        d["salto"] = round(d["v_pico"] - d["v_ini"], 1)
-    return fund
-
-
-# ------------------------------------------------------------------
-# 2. vendas na janela (reconstrucao)
-# ------------------------------------------------------------------
-def _vendas(emp_id, fuel, ini, fim):
-    i2 = urllib.parse.quote(_iso(ini - timedelta(minutes=10)))
-    f2 = urllib.parse.quote(_iso(fim + timedelta(minutes=10)))
+def _num(v):
     try:
-        ab = _rest_get("oct_pdv_abastecimentos",
-                       f"?empresa_id=eq.{emp_id}&data_abast=gte.{i2}&data_abast=lte.{f2}"
-                       f"&select=combustivel,litros&limit=800")
-    except Exception:
+        return float(v or 0)
+    except (TypeError, ValueError):
         return 0.0
-    return round(sum(float(a.get("litros") or 0) for a in ab if _fuel_tanque(a.get("combustivel")) == fuel), 1)
+
+
+def _todas(path, params, pagina=1000, maximo=20):
+    out = []
+    for i in range(maximo):
+        parte = _rest_get(path, f"{params}&limit={pagina}&offset={i * pagina}") or []
+        out += parte
+        if len(parte) < pagina:
+            break
+    return out
 
 
 # ------------------------------------------------------------------
-# 3. NFs de combustivel (parse XML)
+# 1. descargas da sonda (puras)
 # ------------------------------------------------------------------
-def _nfs_combustivel(emp_id):
-    try:
-        rows = _rest_get("oct_nfe_manifestadas",
-                         f"?empresa_id=eq.{emp_id}&tipo=eq.nfe_completa"
-                         f"&select=numero,chave_nfe,emitente,emissao,xml,status&order=emissao.desc&limit=80")
-    except Exception:
-        return []
-    itens = []
-    for n in rows:
+def entregas_unicas(linhas, agora=None):
+    """oct_sonda_entregas -> [{tanque, ini, fim, litros, vol_ini, vol_fim, origem}] sem repeticao.
+
+    A MESMA descarga vem duas vezes (console do medidor + detector do nucleo). Mesma = mesmo
+    tanque e (inicio a ate 15 min E volume inicial a ate 150 L, ou intervalos sobrepostos).
+    So' o horario NAO serve: juntava compartimentos (AC T3 24/09: 702 + 1.208 + 5.118 L com
+    4 min entre um e outro). Fica a de MAIOR volume: o console as vezes comeca atrasado
+    (FLO T4 29/09: console 16:44 2.857 L, nucleo 16:40 3.118 L)."""
+    cand = []
+    for x in linhas:
+        try:
+            ini = _t(x["inicio"])
+            fim = _t(x.get("fim") or x["inicio"])
+        except Exception:
+            continue
+        if ini.year < 2020 or (agora and ini > agora + timedelta(hours=1)):
+            continue                                  # console com relogio errado (AC voltou a 2017)
+        vi, vf = _num(x.get("vol_ini")), _num(x.get("vol_fim"))
+        vol = _num(x.get("entregue")) or (vf - vi)
+        if vol < MIN_ENTREGA:
+            continue
+        cand.append({"tanque": int(_num(x.get("tanque_numero"))), "ini": ini, "fim": max(fim, ini),
+                     "litros": round(vol, 1), "vol_ini": vi, "vol_fim": vf, "origem": x.get("origem") or ""})
+    cand.sort(key=lambda e: (-e["litros"], 0 if e["origem"] == "console" else 1, e["ini"]))
+    out = []
+    for e in cand:
+        if any(o["tanque"] == e["tanque"] and (
+                (abs((o["ini"] - e["ini"]).total_seconds()) <= MESMA_INI_MIN * 60
+                 and abs(o["vol_ini"] - e["vol_ini"]) <= MESMA_VOL_INI)
+                or (min(o["fim"], e["fim"]) - max(o["ini"], e["ini"])).total_seconds() > 60)
+               for o in out):
+            continue
+        out.append(e)
+    return sorted(out, key=lambda e: (e["tanque"], e["ini"]))
+
+
+def blocos(entregas):
+    """Compartimentos do mesmo caminhao no mesmo tanque viram UM bloco: a sonda separa quando a
+    vazao para e volta (AC T3 01/10: 4.914 + 3.027 L). Proximo registro comecando ate
+    BLOCO_GAP_MIN depois do fim do anterior = mesmo bloco."""
+    out = []
+    for e in sorted(entregas, key=lambda e: (e["tanque"], e["ini"])):
+        b = out[-1] if out else None
+        if b and b["tanque"] == e["tanque"] and (e["ini"] - b["fim"]).total_seconds() <= BLOCO_GAP_MIN * 60:
+            b["fim"] = max(b["fim"], e["fim"]); b["litros"] = round(b["litros"] + e["litros"], 1)
+            b["vol_fim"] = e["vol_fim"]; b["partes"].append(e)
+        else:
+            out.append({"tanque": e["tanque"], "ini": e["ini"], "fim": e["fim"], "litros": e["litros"],
+                        "vol_ini": e["vol_ini"], "vol_fim": e["vol_fim"], "partes": [e]})
+    return out
+
+
+# ------------------------------------------------------------------
+# 2. NFs de combustivel (pura: linhas de oct_nfe_manifestadas com xml)
+# ------------------------------------------------------------------
+def notas_combustivel(linhas, canceladas=()):
+    """-> itens de combustivel de notas de ENTRADA validas: [{chave, numero, emitente, cnpj,
+    emissao (UTC), fuel, qcom}]. Fora: cancelada, devolvida (refNFe de nota de entrada do
+    fornecedor -- Tijuco 369375/370218), nota que nao e' de saida do emitente, item < 400 L."""
+    notas, devolvidas = [], set()
+    for n in linhas:
         xml = n.get("xml") or ""
-        if "cProdANP" not in xml:
+        if "cProdANP" not in xml and "<refNFe>" not in xml:
             continue
         try:
             root = ET.fromstring(xml)
         except Exception:
             continue
+        tp = root.findtext(".//n:ide/n:tpNF", default="", namespaces=NS)
+        if tp == "0":
+            devolvidas.update(r.text.strip() for r in root.findall(".//n:ide/n:NFref/n:refNFe", NS) if r.text)
+            continue
+        notas.append((n, root, tp))
+    itens = []
+    for n, root, tp in notas:
+        ch = n.get("chave_nfe")
+        if tp != "1" or not ch or ch in canceladas or ch in devolvidas:
+            continue
+        dh = root.findtext(".//n:ide/n:dhEmi", default="", namespaces=NS)
+        try:
+            emissao = _t(dh) if dh else _t((n.get("emissao") or "")[:10] + "T12:00:00-03:00")
+        except Exception:
+            continue
+        cnpj = root.findtext(".//n:emit/n:CNPJ", default="", namespaces=NS)
         for det in root.findall(".//n:det", NS):
             prod = det.find("n:prod", NS)
             if prod is None:
                 continue
-            anp = prod.findtext("n:comb/n:cProdANP", default="", namespaces=NS)
-            xprod = prod.findtext("n:xProd", default="", namespaces=NS)
-            fuel = _fuel_anp(anp, xprod)
-            if not fuel:
+            fuel = _fuel_anp(prod.findtext("n:comb/n:cProdANP", default="", namespaces=NS),
+                             prod.findtext("n:xProd", default="", namespaces=NS))
+            q = round(_num(prod.findtext("n:qCom", default="0", namespaces=NS)), 2)
+            if not fuel or q < MIN_ITEM_NF:
                 continue
-            try:
-                qcom = round(float(prod.findtext("n:qCom", default="0", namespaces=NS)), 2)
-            except (TypeError, ValueError):
-                qcom = 0.0
-            if qcom <= 0:
-                continue
-            itens.append({"numero": n.get("numero"), "chave": n.get("chave_nfe"),
-                          "emitente": n.get("emitente"), "emissao": (n.get("emissao") or "")[:10],
-                          "fuel": fuel, "qcom": qcom})
+            itens.append({"numero": n.get("numero"), "chave": ch, "emitente": n.get("emitente"),
+                          "cnpj": cnpj, "emissao": emissao, "fuel": fuel, "qcom": q})
     return itens
 
 
 # ------------------------------------------------------------------
-# 4. casamento (1 nota; senao combo de 2)
+# 3. casamento (puro)
 # ------------------------------------------------------------------
-def _casar(recon, fuel, dia, nfs):
-    cands = []
-    for nf in nfs:
-        if nf["fuel"] != fuel:
+def tol_alta(vol):
+    return max(TOL_ABS, vol * TOL_PCT / 100.0)
+
+
+def tol_larga(vol):
+    return max(TOL_LARGA_ABS, vol * TOL_LARGA_PCT / 100.0)
+
+
+def casar(blocos_, itens, fuel_do_tanque):
+    """Liga cada bloco (em ordem de hora) a 1 nota -- ou 2 somadas -- do mesmo combustivel,
+    emitida ate DIAS_NF dias antes ou HORAS_NF_DEPOIS depois, volume dentro de tol_larga.
+    Cada item de nota serve uma vez so'. Empate: ganha a nota do MESMO CAMINHAO (outro item
+    dela casa com outra descarga do posto em ate 3 h) e depois a emitida mais perto (0,5 L de
+    penalidade por hora) -- mesma regua do relatorio Descargas x Notas do retaguarda.
+    Devolve {id(bloco): {"nfs", "qtot", "dif", "conf"} | None}."""
+    usados, res = set(), {}
+    ordem = sorted(blocos_, key=lambda b: b["ini"])
+
+    def janela(i, b):
+        it = itens[i]
+        return (it["fuel"] == fuel_do_tanque.get(b["tanque"])
+                and b["ini"] - timedelta(days=DIAS_NF) <= it["emissao"] <= b["ini"] + timedelta(hours=HORAS_NF_DEPOIS))
+
+    def mesmo_caminhao(i, b):
+        for o in ordem:
+            if o is b or abs((o["ini"] - b["ini"]).total_seconds()) > 3 * 3600:
+                continue
+            fo = fuel_do_tanque.get(o["tanque"])
+            if any(j != i and itens[j]["chave"] == itens[i]["chave"] and itens[j]["fuel"] == fo for j in range(len(itens))):
+                return True
+        return False
+
+    def pontos(idx, b, d):
+        horas = sum(abs((b["ini"] - itens[i]["emissao"]).total_seconds()) / 3600 for i in idx) / len(idx)
+        return d + 0.5 * horas - (100 if any(mesmo_caminhao(i, b) for i in idx) else 0)
+
+    for b in ordem:
+        vol = b["litros"]
+        cand = [i for i in range(len(itens)) if i not in usados and janela(i, b)]
+        melhor, servem = None, []
+        for i in cand:                                       # uma nota
+            d = abs(itens[i]["qcom"] - vol)
+            if d <= tol_larga(vol):
+                p = pontos([i], b, d)
+                if d <= tol_alta(vol):
+                    servem.append(i)
+                if melhor is None or p < melhor[0]:
+                    melhor = (p, [i], d)
+        if melhor is None:                                   # duas notas no mesmo caminhao
+            for x in range(len(cand)):
+                for y in range(x + 1, len(cand)):
+                    a, c = cand[x], cand[y]
+                    if itens[a]["chave"] == itens[c]["chave"]:
+                        continue
+                    d = abs(itens[a]["qcom"] + itens[c]["qcom"] - vol)
+                    if d <= tol_larga(vol):
+                        p = pontos([a, c], b, d)
+                        if melhor is None or p < melhor[0]:
+                            melhor = (p, [a, c], d)
+        if not melhor:
+            res[id(b)] = None
             continue
-        try:
-            emi = datetime.fromisoformat(nf["emissao"]).date()
-        except Exception:
-            continue
-        dd = (dia.date() - emi).days
-        if 0 <= dd <= DIAS_NF:
-            cands.append(nf)
-    tol = max(TOL_ABS, recon * TOL_PCT / 100.0)
-    # 1 nota
-    sing = sorted(cands, key=lambda nf: abs(recon - nf["qcom"]))
-    dentro = [nf for nf in sing if abs(recon - nf["qcom"]) <= tol]
-    if dentro:
-        nf = dentro[0]
-        conf = "alta" if len(dentro) == 1 else "media"
-        return {"nfs": [nf], "qtot": nf["qcom"], "dif": round(abs(recon - nf["qcom"]), 1), "conf": conf}
-    # combo de 2 notas (entrega dupla)
-    m = len(cands); melhor = None
-    for a in range(m):
-        for b in range(a + 1, m):
-            soma = cands[a]["qcom"] + cands[b]["qcom"]
-            dif = abs(recon - soma)
-            if dif <= tol and (melhor is None or dif < melhor["dif"]):
-                melhor = {"nfs": [cands[a], cands[b]], "qtot": round(soma, 2), "dif": round(dif, 1), "conf": "media"}
-    if melhor:
-        return melhor
-    return None
+        idx, d = melhor[1], melhor[2]
+        # 'alta' = 1 nota, dentro da tolerancia estreita e SEM outra nota que tambem sirva
+        # (duas notas iguais na janela = quem decide e' a pessoa, nao o robo)
+        conf = "alta" if (len(idx) == 1 and d <= tol_alta(vol) and servem == idx) else "media"
+        usados.update(idx)
+        nfs = [itens[i] for i in idx]
+        res[id(b)] = {"nfs": nfs, "qtot": round(sum(n["qcom"] for n in nfs), 2), "dif": round(d, 1), "conf": conf}
+    return res
 
 
 # ------------------------------------------------------------------
-# 5. grava candidato (idempotente; nao rebaixa status)
+# 4. linha gravada x bloco (puras)
 # ------------------------------------------------------------------
-VIZINHANCA_H = 2   # mesma descarga re-detectada com `ini` deslocado (borda da janela)
-
-
-def _gravar(emp_id, d, fuel, recon, vend, match):
-    chave_desc = _iso(d["ini"])
-    # A MESMA descarga fisica volta a ser detectada com `ini` deslocado alguns
-    # minutos quando a borda da janela de DESCARGA_DIAS passa por cima dela (o
-    # primeiro ponto da serie muda a cada ciclo, entao a "base" do salto muda).
-    # Chavear por descarga_ini EXATO criava uma linha nova a cada ciclo por ~1h,
-    # 7 dias depois da descarga (803 linhas excedentes em 23/09/2026). Por isso a
-    # busca e' por VIZINHANCA: mesma empresa+tanque, ini dentro de +-VIZINHANCA_H.
-    # OBS: o '+00:00' do timestamp PRECISA de URL-encode ('+' cru vira espaco no
-    # PostgREST -> busca falha -> POST duplicado silencioso e a linha nunca atualiza)
-    ini_de = urllib.parse.quote(_iso(d["ini"] - timedelta(hours=VIZINHANCA_H)))
-    ini_ate = urllib.parse.quote(_iso(d["ini"] + timedelta(hours=VIZINHANCA_H)))
+def encosta(linha, b):
+    """A linha de oct_nfe_descarga e' desta descarga? Mesmo tanque e intervalos encostando
+    (folga de FOLGA_MIN). Cobre as linhas antigas, cujo `ini` ficou ~72 min antes da descarga
+    e o `fim` no meio dela, e a troca nucleo -> console (inicio 1-4 min diferente)."""
     try:
-        ex = _rest_get("oct_nfe_descarga",
-                       f"?empresa_id=eq.{emp_id}&tanque_numero=eq.{d['tanque']}"
-                       f"&descarga_ini=gte.{ini_de}&descarga_ini=lte.{ini_ate}"
-                       f"&select=id,status,diferenca,confianca,volume_salto,nf_chaves&order=criado_em.asc")
+        li, lf = _t(linha["descarga_ini"]), _t(linha.get("descarga_fim") or linha["descarga_ini"])
     except Exception:
-        ex = []
-    # "mesma descarga" = vizinha no tempo E salto compativel (ou mesma NF). Dois
-    # compartimentos do mesmo produto no mesmo tanque, 1h um do outro, tem saltos
-    # diferentes (ex.: AC 10/09: 4.816 L e 8.029 L) e continuam sendo 2 linhas.
-    nf_new = ",".join(x.get("chave") or "" for x in match["nfs"]) if match else ""
+        return False
+    folga = timedelta(minutes=FOLGA_MIN)
+    return (int(_num(linha.get("tanque_numero"))) == b["tanque"]
+            and li <= b["fim"] + folga and lf >= b["ini"] - folga)
 
-    def _mesma(e):
-        try:
-            vs = float(e.get("volume_salto") or 0)
-        except (TypeError, ValueError):
-            vs = 0.0
-        if abs(vs - d["salto"]) <= max(300.0, 0.10 * d["salto"]):
-            return True
-        return bool(nf_new) and (e.get("nf_chaves") or "") == nf_new
-    ex = [e for e in ex if _mesma(e)]
-    if any(e.get("status") not in (None, "candidato", "sem_nf") for e in ex):
-        return  # ja confirmado/entrada feita -> nao mexe
-    if ex:
-        # ja existe candidato p/ essa descarga: so' atualiza se o casamento novo
-        # for igual ou melhor (a deteccao na borda da janela sai truncada e pode
-        # piorar a diferenca); e mantem o descarga_ini original da linha.
-        old = ex[0]
-        old_dif = old.get("diferenca")
-        new_dif = match["dif"] if match else None
-        if old.get("confianca") not in (None, "sem_nf"):
-            if new_dif is None or (old_dif is not None and new_dif > float(old_dif)):
-                return
-    reg = {
-        "empresa_id": emp_id, "tanque_numero": d["tanque"], "combustivel": fuel,
-        "descarga_ini": chave_desc, "descarga_fim": _iso(d["fim"]),
-        "volume_salto": d["salto"], "volume_vendas": vend, "volume_reconstruido": recon,
+
+def registro(emp_id, b, fuel, match, agora):
+    # sem somar as vendas da janela: a descarga dura 5-15 min e, no ensaio de set/out, somar o
+    # que o PDV vendeu nesse tempo nao aproximou da nota (AC T3 09/10: -54 L -> -121 L)
+    return {
+        "empresa_id": emp_id, "tanque_numero": b["tanque"], "combustivel": fuel,
+        "descarga_ini": _iso(b["ini"]), "descarga_fim": _iso(b["fim"]),
+        "volume_salto": round(b["litros"], 1), "volume_vendas": 0,
+        "volume_reconstruido": round(b["litros"], 1),
         "nf_chaves": (",".join(x.get("chave") or "" for x in match["nfs"]) if match else None),
         "nf_numeros": (",".join(str(x.get("numero") or "") for x in match["nfs"]) if match else None),
         "qcom_total": (match["qtot"] if match else None),
         "diferenca": (match["dif"] if match else None),
         "confianca": (match["conf"] if match else "sem_nf"),
-        "status": "candidato", "atualizado_em": _iso(datetime.now(timezone.utc)),
+        "status": "candidato", "atualizado_em": _iso(agora),
     }
-    if ex:
-        reg.pop("descarga_ini", None)   # chave original fica; nunca cria 2a linha
-        _rest("PATCH", f"oct_nfe_descarga?id=eq.{ex[0]['id']}", body=reg, prefer="return=minimal")
-    else:
-        _rest("POST", "oct_nfe_descarga", body=reg, prefer="return=minimal")
+
+
+_CAMPOS_CMP = ("descarga_ini", "descarga_fim", "volume_salto", "volume_vendas", "nf_chaves", "confianca", "diferenca")
+
+
+def _igual(a, b):
+    if a is None or b is None:
+        return a is None and b is None
+    try:
+        return abs(float(a) - float(b)) < 0.05
+    except (TypeError, ValueError):
+        pass
+    try:
+        return _t(a) == _t(b)
+    except Exception:
+        return str(a) == str(b)
+
+
+def planejar(emp_id, blocos_, existentes, fuel_do_tanque, match_de, agora):
+    """Decide o que gravar, sem gravar: [(acao, bloco, reg, linha)], acao em
+    'ja_feita' (linha encostada ja' saiu de 'candidato': nao mexe e nao cria outra),
+    'igual', 'patch' (corrige a linha existente, inclusive o descarga_ini antigo) e 'post'.
+    Cada linha existente serve a um bloco so'."""
+    plano, tomadas = [], set()
+    for b in sorted(blocos_, key=lambda b: b["ini"]):
+        viz = [e for e in existentes if encosta(e, b)]
+        feita = [e for e in viz if e.get("status") not in (None, "candidato")]
+        if feita:
+            plano.append(("ja_feita", b, None, feita[0]))
+            continue
+        reg = registro(emp_id, b, fuel_do_tanque.get(b["tanque"]), match_de.get(id(b)), agora)
+        # a que ja' tem o mesmo descarga_ini primeiro (corrigir outra para esse ini daria 409
+        # na UNIQUE); depois a mais antiga
+        livres = sorted((e for e in viz if e["id"] not in tomadas),
+                        key=lambda e: (not _igual(e.get("descarga_ini"), reg["descarga_ini"]), str(e.get("descarga_ini"))))
+        if livres:
+            alvo = livres[0]; tomadas.add(alvo["id"])
+            igual = all(_igual(alvo.get(k), reg.get(k)) for k in _CAMPOS_CMP)
+            plano.append(("igual" if igual else "patch", b, reg, alvo))
+        else:
+            plano.append(("post", b, reg, None))
+    return plano
+
+
+# ------------------------------------------------------------------
+# 5. leitura do banco
+# ------------------------------------------------------------------
+def _entregas(emp_id, desde):
+    d = urllib.parse.quote(_iso(desde))
+    return _todas("oct_sonda_entregas",
+                  f"?empresa_id=eq.{emp_id}&inicio=gte.{d}"
+                  f"&select=tanque_numero,inicio,fim,vol_ini,vol_fim,entregue,origem&order=inicio.asc")
+
+
+def _nfs_combustivel(emp_id, desde):
+    linhas = _todas("oct_nfe_manifestadas",
+                    f"?empresa_id=eq.{emp_id}&tipo=eq.nfe_completa&emissao=gte.{desde.date().isoformat()}"
+                    f"&select=numero,chave_nfe,emitente,emissao,xml,status&order=id.asc", pagina=200)
+    # sem a lista de canceladas, nota cancelada poderia ganhar entrada: sem ela, nao casa agora
+    from .entrada_auto import chaves_canceladas
+    return notas_combustivel(linhas, chaves_canceladas(emp_id))
 
 
 # ------------------------------------------------------------------
@@ -530,66 +627,73 @@ def _reciencia_presas(emp_id):
 # ------------------------------------------------------------------
 # ENTRADA: casa as descargas de uma empresa
 # ------------------------------------------------------------------
-def casar_empresa(emp_id):
+def casar_empresa(emp_id, dias=None, simular=False, agora=None):
+    """Casa as descargas da sonda dos ultimos `dias` (DESCARGA_DIAS) com as notas e grava.
+    simular=True: nao grava nem da' ciencia -- devolve o plano (ensaio/correcao do historico)."""
+    agora = agora or datetime.now(timezone.utc)
     # a ciencia das notas de distribuidora nao depende da sonda: vem antes de tudo
-    try:
-        _ciencia_distribuidoras(emp_id)
-    except Exception as e:
-        print(f"[descarga] {emp_id}: ciencia de distribuidora: {e}")
-    try:
-        med = _puxar_medicoes(emp_id)
-        if not med:
-            return {"ok": True, "casadas": 0, "obs": "sem medicoes"}
-        tanques = _rest_get("oct_tanques", f"?empresa_id=eq.{emp_id}&select=numero,combustivel")
-        tq = {t["numero"]: _fuel_tanque(t["combustivel"]) for t in tanques}
-        por_tanque = {}
-        for l in med:
-            por_tanque.setdefault(l["tanque_numero"], []).append((_t(l["medido_em"]), l.get("volume")))
-        nfs = _nfs_combustivel(emp_id)
-        # NF ja' CONSUMIDA por uma descarga com entrada feita nao concorre de novo.
-        # Senao a 2a carga do mesmo produto (NF nova ainda chegando pelo DistDFe)
-        # casa com a NF velha em conf 'alta', o entrada_auto responde "ja importada"
-        # e a NF certa nunca da' entrada (13 NFs em 2 descargas ate 23/09/2026).
+    if not simular:
         try:
-            feitas = _rest_get("oct_nfe_descarga",
-                               f"?empresa_id=eq.{emp_id}&status=eq.entrada_feita&select=nf_chaves&limit=1000")
-            usadas = {c for r in feitas for c in (r.get("nf_chaves") or "").split(",") if c}
-        except Exception:
-            usadas = set()
-        nfs = [nf for nf in nfs if nf.get("chave") not in usadas]
-        n_casadas = 0
-        n_descargas = 0
-        datas_sem_nf = set()
-        for t, serie in por_tanque.items():
-            fuel = tq.get(t)
-            if not fuel:
+            _ciencia_distribuidoras(emp_id)
+        except Exception as e:
+            print(f"[descarga] {emp_id}: ciencia de distribuidora: {e}")
+    try:
+        desde = agora - timedelta(days=dias or DESCARGA_DIAS)
+        # 1 dia a mais na leitura: bloco que comecou antes de `desde` sai inteiro (e fica de fora)
+        ent = _entregas(emp_id, desde - timedelta(days=1))
+        if not ent:
+            return {"ok": True, "casadas": 0, "obs": "sem registro da sonda"}
+        tanques = _rest_get("oct_tanques", f"?empresa_id=eq.{emp_id}&select=numero,combustivel")
+        fq = {int(_num(t["numero"])): _fuel_tanque(t["combustivel"]) for t in tanques}
+        espera = timedelta(minutes=ESPERA_MIN)
+        # so' bloco FECHADO: o compartimento seguinte do nucleo chega ~26 min depois do fim
+        # (ate 35 min depois do fim do anterior em set/out) e mudaria o volume do bloco
+        bl = [b for b in blocos(entregas_unicas(ent, agora))
+              if b["ini"] >= desde and agora - b["fim"] >= espera and fq.get(b["tanque"])]
+        de = urllib.parse.quote(_iso(desde - timedelta(days=1)))
+        existentes = _todas("oct_nfe_descarga",
+                            f"?empresa_id=eq.{emp_id}&descarga_fim=gte.{de}"
+                            f"&select=id,tanque_numero,combustivel,descarga_ini,descarga_fim,status,confianca,"
+                            f"nf_chaves,diferenca,volume_salto,volume_vendas&order=descarga_ini.asc")
+        # nota ja' CONSUMIDA (linha que saiu de 'candidato') nao concorre de novo -- por item:
+        # (chave, combustivel). A entrada e' da nota inteira, entao o outro item dela (etanol da
+        # mesma nota da gasolina) continua podendo casar com a descarga do outro tanque; o
+        # entrada_auto responde "ja importada" e so' fecha a linha, sem entrada em dobro.
+        feitas = _rest_get("oct_nfe_descarga",
+                           f"?empresa_id=eq.{emp_id}&status=neq.candidato&select=nf_chaves,combustivel&limit=5000")
+        usadas = {(c, r.get("combustivel")) for r in feitas for c in (r.get("nf_chaves") or "").split(",") if c}
+        nfs = [nf for nf in _nfs_combustivel(emp_id, desde - timedelta(days=DIAS_NF + 1))
+               if (nf["chave"], nf["fuel"]) not in usadas]
+        fechadas = [e for e in existentes if e.get("status") not in (None, "candidato")]
+        abertos = [b for b in bl if not any(encosta(e, b) for e in fechadas)]
+        match_de = casar(abertos, nfs, fq)
+        plano = planejar(emp_id, bl, existentes, fq, match_de, agora)
+        if simular:
+            return {"ok": True, "plano": plano, "blocos": bl, "nfs": nfs, "existentes": existentes, "match_de": match_de}
+        n_casadas, datas_sem_nf = 0, set()
+        for acao, b, reg, linha in plano:
+            if acao == "ja_feita":
                 continue
-            serie_ord = sorted(serie, key=lambda x: x[0])
-            borda = serie_ord[0][0] + timedelta(minutes=JANELA_MIN)
-            for d in _detectar(serie_ord):
-                if d["ini"] < borda:
-                    # Descarga CORTADA pela borda da janela de DESCARGA_DIAS: a
-                    # "base" do salto e' o 1o ponto da serie (parcial) e o `ini`
-                    # anda a cada ciclo. Ela ja' foi gravada inteira quando era
-                    # recente -- ignora em vez de gerar linha nova/truncada.
-                    continue
-                n_descargas += 1
-                d["tanque"] = t
-                vend = _vendas(emp_id, fuel, d["ini"], d["fim"])
-                recon = round(d["salto"] + vend, 1)
-                match = _casar(recon, fuel, d["ini"], nfs)
-                _gravar(emp_id, d, fuel, recon, vend, match)
-                if match:
-                    n_casadas += 1
-                else:
-                    datas_sem_nf.add(d["ini"].date())
+            if reg.get("nf_chaves"):
+                n_casadas += 1
+            else:
+                datas_sem_nf.add(b["ini"].date())
+            if acao == "patch":
+                st, r = _rest("PATCH", f"oct_nfe_descarga?id=eq.{linha['id']}", body=reg, prefer="return=minimal")
+            elif acao == "post":
+                st, r = _rest("POST", "oct_nfe_descarga", body=reg, prefer="return=minimal")
+            else:
+                continue
+            if st not in (200, 201, 204):
+                # nunca mais em silencio: foi um 409 calado que congelou as descargas ate' 17/10
+                print(f"[descarga] {emp_id}: {acao} RECUSADO T{b['tanque']} {_iso(b['ini'])}: {st} {str(r)[:160]}")
         # descarga sem nota casada -> da ciencia nas resumo da janela p/ puxar o XML completo
         _ciencia_resumos(emp_id, datas_sem_nf)
         _reciencia_presas(emp_id)
         if n_casadas:
             print(f"[descarga] {emp_id}: {n_casadas} descarga(s) casada(s) com NF")
-        return {"ok": True, "casadas": n_casadas, "descargas": n_descargas,
-                "nfs_combustivel": len(nfs), "medicoes": len(med)}
+        return {"ok": True, "casadas": n_casadas, "descargas": len(bl),
+                "nfs_combustivel": len(nfs), "entregas": len(ent)}
     except Exception as e:
         import traceback
         tb = traceback.format_exc()

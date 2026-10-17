@@ -80,8 +80,15 @@ def _hoje():
     return datetime.now().date().isoformat()
 
 
-def _data_descarga(cab):
+def _data_descarga(cab, cand=None):
     """Dia em que o combustivel ENTROU no tanque, para o LMC.
+
+    17/10/2026: primeiro o dia LOCAL da descarga casada com a nota (cand =
+    linha de oct_nfe_descarga; desde o descarga_match pela sonda, descarga_ini
+    e' o inicio real da descarga). A data da nota adiantava 1 dia quando a
+    nota sai a' noite e o caminhao descarrega de manha: 9 de 53 entradas do
+    robo de 25/08 a 17/10 (AC 14605-14607 emitidas 31/08, descarga 01/09
+    06:02; Tijuco 377898 30/09 -> 01/10 09:41).
 
     Nao e' a data em que o robo processou a nota: a nota costuma ser
     manifestada/baixada no dia seguinte a' descarga, e o LMC e' diario. Media
@@ -90,8 +97,17 @@ def _data_descarga(cab):
     -5.007 L de falta no outro, com o mes fechando certo. O mesmo padrao
     aparece nos tres postos, em todo tanque que recebeu descarga.
 
-    Ordem: saida da mercadoria (dhSaiEnt) > emissao (dhEmi) > hoje.
+    Ordem: descarga casada > saida da mercadoria (dhSaiEnt) > emissao (dhEmi) > hoje.
     """
+    ini = (cand or {}).get("descarga_ini")
+    if ini:
+        try:
+            d = datetime.fromisoformat(str(ini).replace("Z", "+00:00"))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
+            return (d.astimezone(timezone.utc) - timedelta(hours=3)).date().isoformat()   # Brasilia, sem horario de verao
+        except ValueError:
+            pass
     for campo in ("dhSaiEnt", "dhEmi"):
         v = (cab or {}).get(campo)
         if v and len(str(v)) >= 10:
@@ -537,7 +553,7 @@ def _entrar_nota(emp_id, dados_emp, chave, cand):
     # 3) cabecalho da entrada
     st, nfe = _rest("POST", "oct_nfe_entrada", body={
         "empresa_id": emp_id, "numero": cab["numero"], "serie": cab["serie"], "chave_nfe": cab["chave"],
-        "emissao": cab["dhEmi"] or None, "entrada": _data_descarga(cab), "fornecedor_id": forn, "natureza": cab["natOp"],
+        "emissao": cab["dhEmi"] or None, "entrada": _data_descarga(cab, cand), "fornecedor_id": forn, "natureza": cab["natOp"],
         "cfop": cab["cfopCapa"], "valor_total": cab["vNF"], "valor_icms": cab["vICMS"], "valor_pis": cab["vPIS"],
         "valor_cofins": cab["vCOFINS"], "valor_frete": cab["vFrete"], "valor_desconto": cab["vDesc"],
         "status": "importada", "xml_completo": nota["xml"], "n_prot": cab["nProt"] or None})
@@ -579,7 +595,7 @@ def _entrar_nota(emp_id, dados_emp, chave, cand):
                     obs += f" [ATENCAO: estoque calculado {novo:.0f} L acima da capacidade {cap:.0f} L - conferir a sonda]"
                 _rest("PATCH", f"oct_tanques?id=eq.{tanque_id}", body={"estoque_atual": novo}, prefer="return=minimal")
                 _rest("POST", "oct_lmc", body={
-                    "empresa_id": emp_id, "tanque_id": tanque_id, "data": _data_descarga(cab),
+                    "empresa_id": emp_id, "tanque_id": tanque_id, "data": _data_descarga(cab, cand),
                     "saldo_anterior": ant, "entrada": it["qCom"], "saldo_final": novo,
                     "observacoes": obs}, prefer="return=minimal")
 
