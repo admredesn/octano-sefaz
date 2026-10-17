@@ -162,7 +162,8 @@ def _imposto_item(it, crt="3"):
         )
     else:
         # Aliquotas-teste 2026: IBS estadual 0,10%, IBS municipal 0%, CBS 0,90%.
-        vbc_rt = vprod_pc
+        # base sem o desconto do item (NF-e de faturamento com desconto da fatura, 17/10/2026)
+        vbc_rt = round(vprod_pc - float(it.get("vDesc") or 0), 2)
         p_ibs_uf, p_ibs_mun, p_cbs = 0.10, 0.00, 0.90
         v_ibs_uf = round(vbc_rt * p_ibs_uf / 100, 2)
         v_ibs_mun = round(vbc_rt * p_ibs_mun / 100, 2)
@@ -236,7 +237,8 @@ def _det_item(it, n, crt="3"):
         f"<uTrib>{it.get('uTrib', it['uCom'])}</uTrib>"
         f"<qTrib>{float(it['qCom']):.4f}</qTrib>"
         f"<vUnTrib>{float(it['vUnCom']):.10f}</vUnTrib>"
-        f"<indTot>1</indTot>"
+        + (f"<vDesc>{float(it['vDesc']):.2f}</vDesc>" if float(it.get("vDesc") or 0) > 0.004 else "")
+        + f"<indTot>1</indTot>"
         + _comb_item(it)
         + "</prod>"
         + _imposto_item(it, crt)
@@ -272,6 +274,9 @@ def montar_infnfe(nota, ambiente):
     crt_emit = str(emit.get("crt", "3"))
     dets = "".join(_det_item(it, i + 1, crt_emit) for i, it in enumerate(nota["itens"]))
     v_prod = sum(float(it["vProd"]) for it in nota["itens"])
+    # DESCONTO por item (17/10/2026, NF-e de faturamento igual a do TecnoX: produtos - desconto da fatura = valor da nota)
+    v_desc = round(sum(round(float(it.get("vDesc") or 0), 2) for it in nota["itens"]), 2)
+    v_nf = round(v_prod - v_desc, 2)
     v_tot_trib = ibpt.v_tot_trib(nota["itens"])  # Lei 12.741 (IBPT-MG); 0.00 se NCM ausente
     # ICMS proprio = 0 (CST 61/60). vICMSMono soma dos monofasicos:
     v_icms_mono = sum(
@@ -282,11 +287,12 @@ def montar_infnfe(nota, ambiente):
     # Itens monofasicos (CST 61) NAO entram no gIBS/gCBS; entram no gMono (zerados).
     nao_mono = [it for it in nota["itens"] if str(it.get("cst_icms")) != "61"]
     tem_mono = any(str(it.get("cst_icms")) == "61" for it in nota["itens"])
-    v_ibs_uf_tot = sum(round(float(it["vProd"]) * 0.10 / 100, 2) for it in nao_mono)
+    _bc = lambda it: round(float(it["vProd"]) - float(it.get("vDesc") or 0), 2)   # mesma base do item
+    v_ibs_uf_tot = sum(round(_bc(it) * 0.10 / 100, 2) for it in nao_mono)
     v_ibs_mun_tot = 0.00
     v_ibs_tot = round(v_ibs_uf_tot + v_ibs_mun_tot, 2)
-    v_cbs_tot = sum(round(float(it["vProd"]) * 0.90 / 100, 2) for it in nao_mono)
-    v_bc_rt_tot = sum(float(it["vProd"]) for it in nao_mono)
+    v_cbs_tot = sum(round(_bc(it) * 0.90 / 100, 2) for it in nao_mono)
+    v_bc_rt_tot = sum(_bc(it) for it in nao_mono)
 
     # destinatario: CNPJ ou CPF
     doc_dest = re.sub(r"\D", "", dest.get("cnpj_cpf") or dest.get("documento") or "")
@@ -312,7 +318,8 @@ def montar_infnfe(nota, ambiente):
         f"<ide><cUF>{cuf}</cUF><cNF>{cnf_fmt}</cNF>"
         f"<natOp>{xml_escape(str(nota.get('natureza_op') or 'VENDA'))[:60]}</natOp>"
         f"<mod>{modelo}</mod><serie>{serie}</serie><nNF>{numero}</nNF>"
-        f"<dhEmi>{dh_emi}</dhEmi><tpNF>1</tpNF><idDest>{id_dest}</idDest>"
+        f"<dhEmi>{dh_emi}</dhEmi>" + (f"<dhSaiEnt>{dh_emi}</dhSaiEnt>" if nota.get("dh_sai_ent") else "")
+        + f"<tpNF>1</tpNF><idDest>{id_dest}</idDest>"
         f"<cMunFG>{emit.get('c_mun','3118601')}</cMunFG>"
         f"<tpImp>1</tpImp><tpEmis>{tp_emis}</tpEmis><cDV>{cdv}</cDV>"
         f"<tpAmb>{tp_amb}</tpAmb><finNFe>{fin_nfe}</finNFe><indFinal>{ind_final}</indFinal>"
@@ -360,9 +367,9 @@ def montar_infnfe(nota, ambiente):
         f"<vICMSDeson>0.00</vICMSDeson><vFCP>0.00</vFCP><vBCST>0.00</vBCST>"
         f"<vST>0.00</vST><vFCPST>0.00</vFCPST><vFCPSTRet>0.00</vFCPSTRet>{tag_mono}"
         f"<vProd>{v_prod:.2f}</vProd><vFrete>0.00</vFrete><vSeg>0.00</vSeg>"
-        f"<vDesc>0.00</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
+        f"<vDesc>{v_desc:.2f}</vDesc><vII>0.00</vII><vIPI>0.00</vIPI><vIPIDevol>0.00</vIPIDevol>"
         f"<vPIS>0.00</vPIS><vCOFINS>0.00</vCOFINS><vOutro>0.00</vOutro>"
-        f"<vNF>{v_prod:.2f}</vNF><vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
+        f"<vNF>{v_nf:.2f}</vNF><vTotTrib>{v_tot_trib:.2f}</vTotTrib></ICMSTot>"
     )
     # bloco IBSCBSTot (Reforma) - espelha o XML autorizado do posto
     tag_gmono = ""   # sem gMono: a NFC-e autorizada não manda (ver IBSCBS do item)
@@ -379,17 +386,33 @@ def montar_infnfe(nota, ambiente):
     )
     total = f"<total>{icmstot}{ibscbstot}</total>"
     transp = f"<transp><modFrete>{nota.get('mod_frete','9')}</modFrete></transp>"
+    # COBRANCA (17/10/2026): bloco FATURA da NF-e de faturamento (igual a do TecnoX) -- opcional
+    cobr = ""
+    cb = nota.get("cobr") or None
+    if cb:
+        fat = (f"<fat><nFat>{xml_escape(str(cb.get('nFat') or ''))[:60]}</nFat><vOrig>{float(cb.get('vOrig') or v_prod):.2f}</vOrig>"
+               f"<vDesc>{float(cb.get('vDesc') or v_desc):.2f}</vDesc><vLiq>{float(cb.get('vLiq') or v_nf):.2f}</vLiq></fat>")
+        dups = "".join(f"<dup><nDup>{str(d.get('nDup') or '001')[:60]}</nDup><dVenc>{d['dVenc']}</dVenc><vDup>{float(d['vDup']):.2f}</vDup></dup>"
+                       for d in (cb.get("dups") or [])[:120] if d.get("dVenc"))
+        cobr = f"<cobr>{fat}{dups}</cobr>"
     if fin_nfe in ("3", "4"):
         # ajuste/devolucao nao tem pagamento: tPag 90 com vPag zerado
         pag = "<pag><detPag><tPag>90</tPag><vPag>0.00</vPag></detPag></pag>"
     else:
-        pag = "<pag><detPag><tPag>01</tPag><vPag>%.2f</vPag></detPag></pag>" % v_prod
+        t_pag = re.sub(r"\D", "", str(nota.get("t_pag") or "01"))[:2].zfill(2)
+        pag = "<pag><detPag><tPag>%s</tPag><vPag>%.2f</vPag></detPag></pag>" % (t_pag, v_nf)
     inf_cpl = " ".join(str(nota.get("inf_complementar") or "").split())[:5000]
+    if nota.get("inf_ibpt"):
+        # "Val. Aprox. Tributos: R$ ... Fonte: IBPT" na frente (como a NF-e do TecnoX)
+        try:
+            inf_cpl = (ibpt.texto_cupom(nota["itens"]) + " " + inf_cpl).strip()[:5000]
+        except Exception:
+            pass
     inf_adic = f"<infAdic><infCpl>{xml_escape(inf_cpl)}</infCpl></infAdic>" if inf_cpl else ""
 
     inf = (
         f'<infNFe versao="4.00" Id="NFe{chave}">'
-        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{pag}{inf_adic}</infNFe>"
+        f"{ide}{emit_xml}{dest_xml}{dets}{total}{transp}{cobr}{pag}{inf_adic}</infNFe>"
     )
     nfe = f'<NFe xmlns="{NS}">{inf}</NFe>'
     return nfe, chave
