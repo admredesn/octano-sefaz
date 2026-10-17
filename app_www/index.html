@@ -11,7 +11,7 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icone.png?t=192">
 <link rel="icon" type="image/png" href="icone.png?t=192">
-<link rel="stylesheet" href="css/app.css?v=5">
+<link rel="stylesheet" href="css/app.css?v=6">
 </head>
 <body>
 <div class="app"><main id="tela"></main></div>
@@ -29,18 +29,20 @@
 <nav class="barra" id="barra-eq" style="display:none" aria-label="Navegação da equipe">
   <div class="barra-in quatro">
     <button data-aba="eq-painel" onclick="ir('#/eq-painel')"><span data-ico="painel"></span>Painel</button>
+    <button data-aba="eq-vendas" onclick="ir('#/eq-vendas')"><span data-ico="grafico"></span>Vendas</button>
     <button data-aba="eq-aprovacoes" onclick="ir('#/eq-aprovacoes')"><span data-ico="aprovar"></span>Aprovações<i class="conta" id="eq-pend-n"></i></button>
-    <button data-aba="eq-postos" onclick="ir('#/eq-postos')"><span data-ico="loja"></span>Postos</button>
+    <button data-aba="eq-gestao" onclick="ir('#/eq-gestao')"><span data-ico="maleta"></span>Gestão</button>
     <button data-aba="eq-conta" onclick="ir('#/eq-conta')"><span data-ico="perfil"></span>Conta</button>
   </div>
 </nav>
 
 <script src="js/marca.js?v=1"></script>
-<script src="js/base.js?v=6"></script>
+<script src="js/base.js?v=7"></script>
 <script src="js/telas.js?v=5"></script>
 <script src="js/faturas.js?v=5"></script>
 <script src="js/bomba.js?v=2"></script>
-<script src="js/equipe.js?v=5"></script>
+<script src="js/equipe.js?v=6"></script>
+<script src="js/equipe_gestao.js?v=1"></script>
 <script>
   document.querySelectorAll("[data-ico]").forEach(s => { s.innerHTML = ICO[s.dataset.ico](+(s.dataset.tam || 24)); });
 </script>

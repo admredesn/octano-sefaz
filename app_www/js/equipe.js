@@ -27,7 +27,8 @@ const EQ_TIPOS = {
 const EQ_PERMISSOES = [
   ["Pode aprovar", [["aprovar_desconto", "Desconto no caixa"], ["aprovar_prazo", "Venda a prazo acima do limite"], ["aprovar_afericao", "Aferição"]]],
   ["Pode ver", [["ver_vendas", "Vendas do dia em reais"], ["ver_litros", "Litros e número de abastecimentos"], ["ver_tanques", "Nível dos tanques"],
-    ["ver_recebido", "Recebido por forma de pagamento"], ["ver_precos", "Preço na bomba"], ["ver_alertas", "Alertas de tanque baixo, sonda parada e posto sem resposta"]]],
+    ["ver_recebido", "Recebido por forma de pagamento"], ["ver_precos", "Preço na bomba"], ["ver_alertas", "Alertas de tanque baixo, sonda parada e posto sem resposta"],
+    ["ver_comissao", "Comissão dos vendedores"]]],
 ];
 
 function tokEq() { return LS.get("psn_equipe") || ""; }
@@ -104,13 +105,16 @@ function barraEquipe(nome) {
   const mostra = EQ_ROTAS.includes(nome) && !!tokEq();
   b.style.display = mostra ? "" : "none";
   if (mostra) document.querySelector(".app").classList.remove("sem-barra");
-  const ativo = { "eq-pedido": "eq-aprovacoes", "eq-posto": "eq-postos", "eq-permissoes": "eq-conta" }[nome] || nome;
+  // telas de dentro acendem a aba de onde se chega nelas (Gestão, 17/10/2026: Postos, comparativo, estoque e comissão)
+  const ativo = { "eq-pedido": "eq-aprovacoes", "eq-posto": "eq-gestao", "eq-postos": "eq-gestao", "eq-comparativo": "eq-gestao",
+    "eq-estoque": "eq-gestao", "eq-comissao": "eq-gestao", "eq-permissoes": "eq-conta" }[nome] || nome;
   b.querySelectorAll("[data-aba]").forEach(x => x.classList.toggle("on", x.dataset.aba === ativo));
 }
-function eqBarraPermissoes() {       // quem não aprova nada não tem a aba Aprovações; quem não vê nada dos postos não tem a aba Postos
+function eqBarraPermissoes() {       // quem não aprova nada não tem a aba Aprovações; quem não vê vendas não tem a aba Vendas…
   const b = document.getElementById("barra-eq");
   if (!b) return;
-  const some = { "eq-aprovacoes": !eqAprova(), "eq-postos": !eqVePostos() };
+  const some = { "eq-aprovacoes": !eqAprova(), "eq-vendas": !(eqPode("ver_vendas") || eqPode("ver_litros")),
+    "eq-gestao": !(eqVePostos() || eqPode("ver_comissao")) };
   b.querySelectorAll("[data-aba]").forEach(x => { if (x.dataset.aba in some) x.style.display = some[x.dataset.aba] ? "none" : ""; });
 }
 function eqContador(n) {

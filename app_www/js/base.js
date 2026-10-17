@@ -9,7 +9,7 @@
 // ============================================================
 const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
 const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
-const VERSAO_APP = "1.0.4";
+const VERSAO_APP = "1.0.5";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
@@ -153,6 +153,12 @@ const ICO = (() => {
     prazo: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20M6 15h4"/>',
     alerta: '<path d="M12 3 2 20h20Z"/><path d="M12 10v4M12 17v.01"/>',
     tanque: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/>',
+    // gestão da equipe (17/10/2026)
+    grafico: '<path d="M3 3v18h18"/><path d="M7 16v-4M11.5 16V8M16 16v-6M20 16V5"/>',
+    maleta: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/><path d="M3 13h18"/>',
+    comparar: '<path d="M8 3 4 7l4 4"/><path d="M4 7h16"/><path d="m16 21 4-4-4-4"/><path d="M20 17H4"/>',
+    moeda: '<circle cx="12" cy="12" r="9"/><path d="M14.8 9a2.5 2.5 0 0 0-2.3-1.5h-1a2.3 2.3 0 0 0 0 4.5h1a2.3 2.3 0 0 1 0 4.5h-1A2.5 2.5 0 0 1 9.2 15"/><path d="M12 6v1.5M12 16.5V18"/>',
+    filtro: '<path d="M3 5h18l-7 8.5V19l-4 2v-7.5Z"/>',
   };
   const out = {};
   Object.keys(P).forEach(k => { out[k] = t => s(P[k], t); });
