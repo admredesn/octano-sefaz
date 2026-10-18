@@ -1499,6 +1499,15 @@ def api_acionamento_live():
             resp["fase"] = "desconto_" + bs
             resp["erro"] = info.get("erro")
             return jsonify(resp)
+        # preço com desconto na bomba: quanto falta do prazo para tirar o bico (18/10/2026, Ronan: 60 s).
+        # O prazo vem do núcleo (bomba_info.prazo_s), que é quem volta o preço; núcleo antigo não manda.
+        if bs == "pronto" and info.get("prazo_s"):
+            try:
+                desde = datetime.fromisoformat(str(ac.get("bomba_em")).replace("Z", "+00:00"))
+                resp["desconto_restam_s"] = max(0, int(float(info["prazo_s"])
+                                                       - (datetime.now(timezone.utc) - desde).total_seconds()))
+            except Exception:
+                pass
 
     # cashback gerado depois do acionamento? (fase final)
     try:

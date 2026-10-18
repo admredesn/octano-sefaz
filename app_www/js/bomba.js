@@ -15,7 +15,24 @@ function pararCamera() {
   const c = document.getElementById("camera");
   if (c) c.remove();
 }
-function pararVivo() { if (_vivoTimer) { clearInterval(_vivoTimer); _vivoTimer = null; } }
+function pararVivo() { if (_vivoTimer) { clearInterval(_vivoTimer); _vivoTimer = null; } pararPrazo(); }
+
+// DESCONTO NA BOMBA: contagem do prazo para tirar o bico (18/10/2026, Ronan: 60 s). O núcleo é quem volta o
+// preço; o servidor manda quanto falta (desconto_restam_s) e o celular conta de 1 em 1 s entre as consultas.
+let _prazoFim = 0, _prazoTic = null;
+function pararPrazo() { if (_prazoTic) { clearInterval(_prazoTic); _prazoTic = null; } _prazoFim = 0; }
+function mostrarPrazo() {
+  const x = document.getElementById("v-prazo");
+  if (!x || !_prazoFim) { pararPrazo(); return; }
+  const s = Math.max(0, Math.round((_prazoFim - Date.now()) / 1000));
+  x.textContent = s > 0 ? "Tire o bico e comece a abastecer em até " + s + " segundos. Depois disso o preço volta ao normal."
+    : "O prazo acabou: o preço do bico está voltando ao normal.";
+}
+function contarPrazo(restam) {
+  _prazoFim = Date.now() + Math.max(0, Number(restam) || 0) * 1000;
+  if (!_prazoTic) _prazoTic = setInterval(mostrarPrazo, 1000);
+  mostrarPrazo();
+}
 
 // "https://…/cashback?p=<posto>&bico=3" ou só o número
 function lerQr(texto) {
@@ -249,14 +266,21 @@ function acompanhar() {
       fase.textContent = r.fase === "desconto_expirado" ? "⌛ O desconto expirou" : r.fase === "desconto_cancelado" ? "Desconto cancelado" : "⚠️ Não deu para aplicar o desconto";
       n.textContent = "—";
       d.textContent = r.fase === "desconto_expirado"
-        ? "Você não começou a abastecer em 3 minutos e o preço do bico voltou ao normal."
+        ? "Você não começou a abastecer a tempo e o preço do bico voltou ao normal."
         : (r.erro ? "Motivo: " + r.erro + ". " : "") + "O preço do bico continua o normal.";
       if (r.fase !== "desconto_cancelado") deNovo(r.fase === "desconto_expirado" ? "Pedir de novo" : "Escolher de novo");
       pararVivo();
     } else if (r.fase === "aguardando_inicio" && desc) {
       fase.textContent = "✅ Desconto na bomba! Pode abastecer no bico " + (ac.bico || "?");
       n.textContent = brl(ac.preco_desconto) + "/L";
-      d.textContent = "Preço normal " + brl(ac.preco_normal) + "/L. Se não começar em 3 minutos, o preço volta ao normal.";
+      if (r.desconto_restam_s != null) {
+        if (!document.getElementById("v-prazo")) {
+          d.innerHTML = "Preço normal " + esc(brl(ac.preco_normal)) + "/L.<br><b id=\"v-prazo\"></b>";
+        }
+        contarPrazo(r.desconto_restam_s);
+      } else {
+        d.textContent = "Preço normal " + brl(ac.preco_normal) + "/L. Comece a abastecer logo: se demorar, o preço volta ao normal.";
+      }
     } else if (r.fase === "aguardando_inicio") { fase.textContent = "⏳ Pode abastecer no bico " + (ac.bico || "?"); n.textContent = "—"; d.textContent = "O caixa já sabe que é você."; }
     else if (r.fase === "abastecendo") {
       const lv = r.live || {};
