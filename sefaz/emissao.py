@@ -406,11 +406,13 @@ def montar_infnfe(nota, ambiente):
         dups = "".join(f"<dup><nDup>{str(d.get('nDup') or '001')[:60]}</nDup><dVenc>{d['dVenc']}</dVenc><vDup>{float(d['vDup']):.2f}</vDup></dup>"
                        for d in (cb.get("dups") or [])[:120] if d.get("dVenc"))
         cobr = f"<cobr>{fat}{dups}</cobr>"
-    if fin_nfe in ("3", "4"):
-        # ajuste/devolucao nao tem pagamento: tPag 90 com vPag zerado
+    t_pag = re.sub(r"\D", "", str(nota.get("t_pag") or "01"))[:2].zfill(2)
+    if fin_nfe in ("3", "4") or t_pag == "90":
+        # ajuste/devolucao nao tem pagamento: tPag 90 com vPag zerado.
+        # NF-e DE CUPOM (CFOP 5929, PDV "Cupom -> NF-e", 19/10/2026): o pagamento ja esta no cupom; sai 90 / 0,00,
+        # como a NF-e do TecnoX (AC, serie 0). Antes o t_pag 90 levava vPag = vNF.
         pag = "<pag><detPag><tPag>90</tPag><vPag>0.00</vPag></detPag></pag>"
     else:
-        t_pag = re.sub(r"\D", "", str(nota.get("t_pag") or "01"))[:2].zfill(2)
         pag = "<pag><detPag><tPag>%s</tPag><vPag>%.2f</vPag></detPag></pag>" % (t_pag, v_nf)
     inf_cpl = " ".join(str(nota.get("inf_complementar") or "").split())[:5000]
     if nota.get("inf_ibpt"):
