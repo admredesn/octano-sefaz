@@ -32,6 +32,11 @@ from .empresa_cert import _rest_get, _supabase_conf
 PENDENTES = ("pedida", "parcial", "divergente")
 DIAS_NF = 60            # olha notas emitidas nos ultimos N dias
 TOL_VALOR = 0.02
+# COMBUSTIVEL (19/10/2026): o pedido e' estimado e a nota vem com o preco do dia — no Florestal a
+# REQ-000006 (25.730,00) virou a NF 381401 (26.022,57, +1,1%). Com a tolerancia de centavos nada
+# ligava. Para combustivel vale valor ate' 3% de diferenca SE a nota sair perto da chegada prevista.
+TOL_VALOR_COMB = 0.03
+DIAS_COMB = 3
 TOL_LITROS_PERC = 0.01  # 1% do pedido
 TOL_LITROS_MIN = 10.0   # ... ou 10 L
 UNIDADES_LITRO = ("L", "LT", "LTS", "LITRO", "LITROS")
@@ -115,56 +120,63 @@ def candidatas_da_requisicao(req, doc_forn, nfs, usadas):
     doc_n = str(int(doc)) if doc and len(doc) <= 9 else None
     v = round(float(req.get("valor_total") or 0), 2)
     criada = str(req.get("criado_em") or "")[:10]
+    comb = req.get("categoria") == "combustivel"
+    ref = str(req.get("previsao_chegada") or "")[:10] or criada     # dia em que a nota deveria sair
     for n in nfs:
         ch = so_digitos(n.get("chave_nfe"))
         if len(ch) != 44 or ch in usadas or cnpj_da_chave(ch) != forn:
             continue
         mesmo_doc = bool(doc_n) and numero_nf(n.get("numero")) == doc_n
-        mesmo_valor = n.get("valor") is not None and abs(round(float(n["valor"]), 2) - v) <= TOL_VALOR
-        if not (mesmo_doc or mesmo_valor):
+        vn = round(float(n["valor"]), 2) if n.get("valor") is not None else None
+        mesmo_valor = vn is not None and abs(vn - v) <= TOL_VALOR
+        em = str(n.get("emissao") or "")[:10]
+        dist = None
+        try:
+            dist = abs((dt.date.fromisoformat(em) - dt.date.fromisoformat(ref)).days) if em and ref else None
+        except ValueError:
+            pass
+        valor_prox = (comb and vn is not None and v > 0 and abs(vn / v - 1) <= TOL_VALOR_COMB
+                      and dist is not None and dist <= DIAS_COMB)
+        if not (mesmo_doc or mesmo_valor or valor_prox):
             continue
         # a nota so' pode ser de DEPOIS do pedido (3 dias de folga: pedido lancado depois de a nota sair)
-        em = str(n.get("emissao") or "")[:10]
         if criada and em:
             try:
                 if dt.date.fromisoformat(em) < dt.date.fromisoformat(criada) - dt.timedelta(days=3):
                     continue
             except ValueError:
                 pass
-        out.append({"nf": n, "mesmo_doc": mesmo_doc, "mesmo_valor": mesmo_valor})
+        out.append({"nf": n, "mesmo_doc": mesmo_doc, "mesmo_valor": mesmo_valor, "valor_prox": valor_prox,
+                    "dist": dist if dist is not None else 99, "dv": abs((vn or 0) - v)})
     return out
 
 
+def _ordem(c):
+    """quem e' o par mais provavel: mesmo documento > nota mais perto da chegada > valor mais perto"""
+    return (0 if c["mesmo_doc"] else 1, c.get("dist", 99), round(c.get("dv", 0), 2))
+
+
 def pares_unicos(requisicoes, nfs, forn_doc, usadas):
-    """{requisicao_id: candidata} so' quando o par e' INEQUIVOCO (uma requisicao <-> uma NF).
-    Empate (varias NFs para uma requisicao, ou varias requisicoes para uma NF): vale so' quem tem o MESMO
-    DOCUMENTO, e so' se for um; senao ninguem e' ligado (fica para o operador)."""
+    """{requisicao_id: candidata} so' quando o par e' INEQUIVOCO: a NF e' a MELHOR candidata da requisicao
+    E a requisicao e' a MELHOR candidata da NF, sem empate dos dois lados (ordem: mesmo documento, nota
+    mais perto da chegada prevista, valor mais perto). Empate = ninguem e' ligado (fica para o operador).
+    19/10/2026: antes so' o documento desempatava; duas cargas de mesmo valor pedidas em dias seguidos
+    (REQ-000006/000007 do Florestal) ficavam sem ligar."""
     cand = {r["id"]: candidatas_da_requisicao(r, forn_doc.get(r.get("fornecedor_id")), nfs, usadas) for r in requisicoes}
-    escolha = {}
+    melhor = {}
     for rid, cs in cand.items():
-        if len(cs) == 1:
-            escolha[rid] = cs[0]
-        elif len(cs) > 1:
-            docs = [c for c in cs if c["mesmo_doc"]]
-            if len(docs) == 1:
-                escolha[rid] = docs[0]
+        o = sorted(cs, key=_ordem)
+        if o and (len(o) == 1 or _ordem(o[0]) < _ordem(o[1])):
+            melhor[rid] = o[0]
     por_nf = {}
-    for rid, c in escolha.items():
-        por_nf.setdefault(c["nf"]["chave_nfe"], []).append((rid, c))
-    # uma requisicao que tem a NF entre as candidatas mas escolheu outra (ou nenhuma) tambem disputa a NF
     for rid, cs in cand.items():
         for c in cs:
-            ch = c["nf"]["chave_nfe"]
-            if rid not in {x[0] for x in por_nf.get(ch, [])} and ch in por_nf:
-                por_nf[ch].append((rid, c))
+            por_nf.setdefault(c["nf"]["chave_nfe"], []).append((rid, c))
     pares = {}
-    for ch, lst in por_nf.items():
-        if len(lst) == 1:
-            pares[lst[0][0]] = lst[0][1]
-        else:
-            docs = [x for x in lst if x[1]["mesmo_doc"]]
-            if len(docs) == 1 and docs[0][0] in escolha and escolha[docs[0][0]]["nf"]["chave_nfe"] == ch:
-                pares[docs[0][0]] = docs[0][1]
+    for rid, c in melhor.items():
+        rivais = sorted(por_nf[c["nf"]["chave_nfe"]], key=lambda x: _ordem(x[1]))
+        if rivais[0][0] == rid and (len(rivais) == 1 or _ordem(rivais[0][1]) < _ordem(rivais[1][1])):
+            pares[rid] = c
     return pares
 
 
@@ -210,7 +222,7 @@ def processar_empresa(emp_id):
     hoje = dt.date.today()
     abertas = _q("oct_requisicoes_compra",
                  f"?empresa_id=eq.{emp_id}&status=in.({','.join(PENDENTES)},recebida)"
-                 "&select=id,numero,fornecedor_id,valor_total,documento,categoria,status,nfe_chave,pago_em,criado_em")
+                 "&select=id,numero,fornecedor_id,valor_total,documento,categoria,status,nfe_chave,pago_em,criado_em,previsao_chegada")
     if not abertas:
         return
     # fornecedores (CNPJ) das requisicoes abertas
@@ -231,6 +243,8 @@ def processar_empresa(emp_id):
             r = next(x for x in sem_nf if x["id"] == rid)
             n = c["nf"]
             motivo = ("mesmo documento" if c["mesmo_doc"] else "") + (" e " if c["mesmo_doc"] and c["mesmo_valor"] else "") + ("mesmo valor" if c["mesmo_valor"] else "")
+            if not motivo and c.get("valor_prox"):
+                motivo = "combustivel: valor ate' 3%% e nota %d dia(s) da chegada prevista" % c["dist"]
             dif = ""
             if n.get("valor") is not None and abs(round(float(n["valor"]), 2) - round(float(r["valor_total"]), 2)) > TOL_VALOR:
                 dif = " | ATENCAO: nota R$ %.2f, pedido R$ %.2f" % (float(n["valor"]), float(r["valor_total"]))
@@ -255,7 +269,7 @@ def processar_empresa(emp_id):
         if not num:
             continue
         tits = _rest_get("oct_contas_pagar",
-                         f"?empresa_id=eq.{emp_id}&requisicao_id=is.null&n_documento=like.{num}*"
+                         f"?empresa_id=eq.{emp_id}&requisicao_id=is.null&status=neq.cancelado&n_documento=like.{num}*"
                          "&select=id,n_documento,fornecedor_id,status") or []
         alvo = [t["id"] for t in tits if numero_nf(t.get("n_documento")) == num
                 and (not t.get("fornecedor_id") or t.get("fornecedor_id") == r.get("fornecedor_id"))]
