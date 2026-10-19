@@ -110,12 +110,19 @@ const COMBS = ["GASOLINA COMUM", "GASOLINA ADITIVADA", "ETANOL", "DIESEL S10", "
 async function telaAcionar() {
   const postos = await carregarPostos();
   if (!S.posto && S.me && S.me.posto_favorito) S.posto = S.me.posto_favorito;
+  // CÓDIGO DO BICO (19/10/2026, Ronan): 4 dígitos = número do posto (Florestal 1, AC 2, Tijuco 3, SEVEN 4) + bico com
+  // 3 dígitos (SEVEN bico 3 = 4003), impresso na etiqueta da bomba. Digitado, o app já escolhe o posto: o desconto
+  // não vai para o bico de mesmo número em outro posto. 1 a 3 dígitos = número do bico no posto escolhido (antigo).
+  const codigoDe = (posto, bico) => {
+    const p = postos.find(x => x.id === posto);
+    return p && p.codigo && bico ? String(p.codigo) + String(Number(bico)).padStart(3, "0") : String(bico || "");
+  };
   el().innerHTML = `<div class="tela">${topoSimples("Vou abastecer", true)}
     <div class="form">
       <div class="campo"><label>Posto</label><select id="a-posto"><option value="">Escolha o posto…</option>${postos.map(p =>
         `<option value="${esc(p.id)}" ${p.id === S.posto ? "selected" : ""}>${esc(p.nome)} · ${esc(p.cidade || "")}</option>`).join("")}</select></div>
       <div class="duas">
-        <div class="campo"><label>Número do bico</label><input id="a-bico" inputmode="numeric" maxlength="3" value="${esc(S.bico || "")}" placeholder="ex.: 3"></div>
+        <div class="campo"><label>Código do bico</label><input id="a-bico" inputmode="numeric" maxlength="4" value="${esc(codigoDe(S.posto, S.bico))}" placeholder="ex.: 4003"></div>
         <div class="campo"><label>Combustível</label><select id="a-comb"><option value="">—</option>${COMBS.map(c => `<option>${c}</option>`).join("")}</select></div>
       </div>
       <div id="a-info" class="vazio" style="padding:6px 2px 0"></div>
@@ -128,6 +135,22 @@ async function telaAcionar() {
       <div class="vazio" id="a-rodape" style="text-align:center">O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.</div>
     </div></div>`;
   const $ = id => document.getElementById(id);
+  // o que foi digitado: código de 4 dígitos (posto + bico) ou só o número do bico no posto escolhido
+  const lido = () => {
+    const v = soDigitos($("a-bico").value);
+    if (v.length === 4) {
+      const p = postos.find(x => x.codigo && String(x.codigo) === v[0]);
+      return p ? { posto: p.id, bico: String(Number(v.slice(1))) } : { posto: "", bico: "", invalido: true };
+    }
+    return { posto: $("a-posto").value, bico: v };
+  };
+  const aplicarCodigo = () => {           // código válido: o posto da lista acompanha
+    const l = lido();
+    if (l.posto && l.posto !== $("a-posto").value) {
+      $("a-posto").value = l.posto; S.posto = l.posto; LS.set("psn_posto", S.posto); prazo();
+    }
+    return l;
+  };
   // DESCONTO DO APP NA BOMBA (16/10/2026): bico com desconto na tabela DESCONTO APP do posto ganha a escolha
   // "Desconto agora" (o preço do bico baixa só para este cliente) × "Acumular" (cashback e pontos)
   let _desc = null;
@@ -145,11 +168,11 @@ async function telaAcionar() {
       : "O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.";
   };
   const descontoBico = async () => {
-    const b = soDigitos($("a-bico").value), posto = $("a-posto").value;
+    const { bico: b, posto } = lido();
     _desc = null; $("a-modo").innerHTML = ""; modo();
     if (!b || !posto) return;
     const r = await api(`/cashback/api/desconto?posto=${encodeURIComponent(posto)}&bico=${b}`);
-    if (!(r.ok && r.ativo) || soDigitos($("a-bico").value) !== b) return;
+    if (!(r.ok && r.ativo) || lido().bico !== b || lido().posto !== posto) return;
     _desc = r;
     $("a-modo").innerHTML = `<div class="campo"><label>O que você prefere?</label>
       <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="desconto" checked>
@@ -161,12 +184,13 @@ async function telaAcionar() {
     modo();
   };
   const infoBico = async () => {
-    const b = soDigitos($("a-bico").value), posto = $("a-posto").value;
+    const l = aplicarCodigo(), b = l.bico, posto = l.posto;
+    if (l.invalido) { $("a-info").textContent = "Código não encontrado. Confira o código na etiqueta da bomba."; descontoBico(); return; }
     if (!b || !posto) { $("a-info").textContent = ""; descontoBico(); return; }
     const r = await api(`/cashback/api/bico?posto=${encodeURIComponent(posto)}&bico=${b}`);
     if (r.ok && r.combustivel) {
       $("a-comb").value = r.combustivel;
-      $("a-info").innerHTML = `⛽ <b>${esc(r.combustivel)}</b>${r.preco_litro ? " · " + brl(r.preco_litro) + "/L" : ""}`;
+      $("a-info").innerHTML = `⛽ ${esc(nomePosto(posto))} · bico ${esc(b)} · <b>${esc(r.combustivel)}</b>${r.preco_litro ? " · " + brl(r.preco_litro) + "/L" : ""}`;
     } else $("a-info").textContent = "";
     descontoBico();
   };
@@ -179,18 +203,24 @@ async function telaAcionar() {
     if (!r.prazo && op) op.remove();
     $("a-prazo-msg").textContent = r.prazo ? "" : (r.motivo ? "A prazo: " + r.motivo : "");
   };
-  $("a-posto").onchange = () => { S.posto = $("a-posto").value; LS.set("psn_posto", S.posto); infoBico(); prazo(); };
+  $("a-posto").onchange = () => {
+    S.posto = $("a-posto").value; LS.set("psn_posto", S.posto);
+    const v = soDigitos($("a-bico").value);              // código de outro posto no campo: não vale para este
+    if (v.length === 4 && lido().posto !== S.posto) $("a-bico").value = "";
+    infoBico(); prazo();
+  };
   let t = null;
   $("a-bico").addEventListener("input", () => { clearTimeout(t); t = setTimeout(infoBico, 400); });
   infoBico(); prazo();
   $("a-btn").onclick = async () => {
-    const m = $("a-msg"), posto = $("a-posto").value, forma = $("a-forma").value;
+    const l = aplicarCodigo(), m = $("a-msg"), posto = $("a-posto").value, forma = $("a-forma").value, bico = l.bico;
     m.className = "msg erro";
+    if (l.invalido) { m.textContent = "Código não encontrado. Confira o código na etiqueta da bomba."; return; }
     if (!posto) { m.textContent = "Escolha o posto."; return; }
-    if (!soDigitos($("a-bico").value)) { m.textContent = "Informe o número do bico."; return; }
+    if (!bico) { m.textContent = "Informe o código do bico (está na etiqueta da bomba)."; return; }
     if (modoAtual() === "desconto") {
       m.className = "msg"; m.textContent = "Pedindo o desconto à bomba…";
-      const rd = await api("/cashback/api/acionar", { posto, bico: $("a-bico").value, combustivel: $("a-comb").value,
+      const rd = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value,
                                                       modo: "desconto", forma_id: $("a-forma-desc").value });
       if (!rd.ok) { m.className = "msg erro"; m.textContent = rd.erro || "Não consegui pedir o desconto."; return; }
       S.bico = "";
@@ -211,7 +241,7 @@ async function telaAcionar() {
       if (!selfie) { m.textContent = "Sem a foto, a compra a prazo não é autorizada pelo app."; return; }
     }
     m.className = "msg"; m.textContent = "Avisando o caixa…";
-    const r = await api("/cashback/api/acionar", { posto, bico: $("a-bico").value, combustivel: $("a-comb").value, forma, selfie });
+    const r = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value, forma, selfie });
     if (!r.ok) { m.className = "msg erro"; m.textContent = r.erro || "Não consegui avisar o caixa."; return; }
     S.bico = "";
     if (r.aviso) toast(r.aviso, 4500);

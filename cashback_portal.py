@@ -798,13 +798,31 @@ def _cashback_ligado(empresa_id):
 # ------------------------------------------------------------------
 # APIs
 # ------------------------------------------------------------------
+# CÓDIGO DO BICO (19/10/2026, Ronan): 4 dígitos = número do posto (ordem de aquisição) + número do bico com 3 dígitos.
+# Florestal 1001…, AC 2001…, Tijuco 3001…, SEVEN 4001…  Quem não lê o QR digita o código no app ("Digitar código") e o
+# app já sabe o posto: não dá para pedir o desconto no bico de outro posto. Posto novo: acrescentar aqui (o app e a
+# folha dos QR leem daqui).
+CODIGO_POSTO = {
+    "3f37007b-421d-40fa-b95f-74c8654a38f4": 1,   # Florestal
+    "6e778efd-54d1-464b-b343-147e94fed2bf": 2,   # AC (Antônio Carlos / Miranda)
+    "a364b2ad-e992-43e6-b266-65ed7df561ca": 3,   # Tijuco
+    "323541b8-2ea3-45a0-8013-c778444797a3": 4,   # SEVEN BH
+}
+
+
+def codigo_bico(empresa, bico):
+    p = CODIGO_POSTO.get(str(empresa))
+    return f"{p}{int(bico):03d}" if p else None
+
+
 @bp_cashback.route("/cashback/api/postos", methods=["GET"])
 def api_postos():
     try:
         rows = _sget("oct_empresas?ativo=eq.true&select=id,nome,nome_fantasia&order=nome")
         ligados = _cashback_ligados()
         rows = [r for r in rows if r["id"] in ligados]
-        return jsonify([{"id": r["id"], "nome": r.get("nome_fantasia") or r.get("nome") or "Posto"} for r in rows])
+        return jsonify([{"id": r["id"], "nome": r.get("nome_fantasia") or r.get("nome") or "Posto",
+                         "codigo": CODIGO_POSTO.get(r["id"])} for r in rows])
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
@@ -1716,7 +1734,7 @@ def api_rede_postos():
         out.append({"id": r["id"], "nome": _nome_bonito(nome),
                     "endereco": r.get("endereco"), "cidade": _nome_bonito(r.get("cidade")), "uf": r.get("uf"),
                     "latitude": r.get("latitude"), "longitude": r.get("longitude"), "foto_url": r.get("app_foto_url"),
-                    "cashback": bool(r.get("cashback_ativo"))})
+                    "cashback": bool(r.get("cashback_ativo")), "codigo": CODIGO_POSTO.get(r["id"])})
     return jsonify(out)
 
 
@@ -1993,63 +2011,89 @@ def qr_posto():
 # ------------------------------------------------------------------
 @bp_cashback.route("/cashback/qr-pdf", methods=["GET"])
 def qr_pdf():
-    import io
+    """Folha A4 com 6 etiquetas por página: QR do bico + CÓDIGO de 4 dígitos (19/10/2026, Ronan: "temos que ter opção
+    de digitar o código também"). Texto e QR em VETOR (fpdf2): a versão anterior desenhava em imagem com a fonte
+    DejaVu, que não existe no servidor, e o "BICO 1" saía minúsculo."""
     import qrcode
-    from PIL import Image, ImageDraw, ImageFont
+    from fpdf import FPDF
     posto = _uuid_ok(request.args.get("p"))
     if not posto:
         return jsonify({"erro": "parâmetro p (empresa) inválido"}), 400
-    # bicos: da URL ou do cadastro (oct_bicos)
+    # bicos: da URL ou do cadastro (oct_bicos), com o combustível pelo tanque
     brutos = _so_digitos_lista(request.args.get("bicos"))
-    if not brutos:
-        try:
-            rows = _sget(f"oct_bicos?empresa_id=eq.{posto}&select=numero&order=numero")
-            brutos = sorted({int(r["numero"]) for r in rows if r.get("numero") is not None})
-        except Exception:
-            brutos = []
+    comb = {}
+    try:
+        rows = _sget(f"oct_bicos?empresa_id=eq.{posto}&ativo=eq.true&select=numero,tanque_id&order=numero")
+        prods = _sget(f"oct_produtos?empresa_id=eq.{posto}&ativo=eq.true&tanque_id=not.is.null&select=nome,tanque_id")
+        por_tanque = {p["tanque_id"]: p["nome"] for p in prods}
+        for r in rows:
+            if r.get("numero") is not None:
+                comb[int(r["numero"])] = _nome_bonito(por_tanque.get(r.get("tanque_id")) or "")
+        if not brutos:
+            brutos = sorted(comb)
+    except Exception:
+        pass
     if not brutos:
         return jsonify({"erro": "nenhum bico encontrado (cadastre os bicos ou informe ?bicos=1,2,3)"}), 404
-    # nome do posto (cabeçalho do cartão)
-    nome_posto = "CASHBACK"
+    nome_posto = "POSTO"
     try:
         e = _sget(f"oct_empresas?id=eq.{posto}&select=nome,nome_fantasia")
         if e:
-            nome_posto = (e[0].get("nome_fantasia") or e[0].get("nome") or "CASHBACK")[:36].upper()
+            nome_posto = (e[0].get("nome_fantasia") or e[0].get("nome") or "POSTO")[:30].upper()
     except Exception:
         pass
-
     base_url = request.host_url.rstrip("/")
     if "localhost" not in base_url and "127.0.0.1" not in base_url:
         base_url = base_url.replace("http://", "https://")
 
-    LARG, ALT, COLS, LINHAS = 1240, 1754, 2, 3   # A4 ~150dpi, 6 cartões/página
-    try:
-        F_TIT = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 64)
-        F_SUB = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
-    except Exception:
-        F_TIT = F_SUB = ImageFont.load_default()
-    paginas = []
-    for p0 in range(0, len(brutos), COLS * LINHAS):
-        pag = Image.new("RGB", (LARG, ALT), "white")
-        dr = ImageDraw.Draw(pag)
-        cw, ch = LARG // COLS, ALT // LINHAS
-        for i, bico in enumerate(brutos[p0:p0 + COLS * LINHAS]):
-            cx0, cy0 = (i % COLS) * cw, (i // COLS) * ch
-            dr.rectangle([cx0 + 14, cy0 + 14, cx0 + cw - 14, cy0 + ch - 14], outline="#bbbbbb", width=2)
-            qr = qrcode.make(f"{base_url}/cashback?p={posto}&bico={bico}", box_size=10, border=2).convert("RGB")
-            qs = min(cw, ch) - 240
-            pag.paste(qr.resize((qs, qs)), (cx0 + (cw - qs) // 2, cy0 + 64))
-            t = nome_posto
-            dr.text((cx0 + (cw - dr.textlength(t, font=F_SUB)) / 2, cy0 + 26), t, fill="#666666", font=F_SUB)
-            t = f"BICO {bico}"
-            dr.text((cx0 + (cw - dr.textlength(t, font=F_TIT)) / 2, cy0 + 64 + qs + 6), t, fill="black", font=F_TIT)
-            t = "Cashback: aponte a camera e ative"
-            dr.text((cx0 + (cw - dr.textlength(t, font=F_SUB)) / 2, cy0 + 64 + qs + 84), t, fill="#666666", font=F_SUB)
-        paginas.append(pag)
-    buf = io.BytesIO()
-    paginas[0].save(buf, format="PDF", save_all=True, append_images=paginas[1:], resolution=150)
-    nome_arq = f"qrcodes-bicos-{brutos[0]}" + (f"-a-{brutos[-1]}" if len(brutos) > 1 else "") + ".pdf"
-    return Response(buf.getvalue(), mimetype="application/pdf",
+    AZUL, VERM, CINZA = (6, 37, 62), (223, 26, 36), (80, 92, 104)
+    MARG, GAP, CW, CH = 6, 6, 96, 91                      # mm: 2 colunas x 3 linhas no A4
+    pdf = FPDF(unit="mm", format="A4")
+    pdf.set_auto_page_break(False)
+    pdf.set_title(f"Códigos dos bicos - {nome_posto}")
+    for i, bico in enumerate(brutos):
+        if i % 6 == 0:
+            pdf.add_page()
+        x0 = MARG + (i % 2) * (CW + GAP)
+        y0 = MARG + ((i % 6) // 2) * (CH + GAP)
+        pdf.set_draw_color(*AZUL); pdf.set_line_width(0.6)
+        pdf.rect(x0, y0, CW, CH, style="D", round_corners=True, corner_radius=4)
+        # faixa do posto
+        pdf.set_fill_color(*AZUL)
+        pdf.rect(x0, y0, CW, 11, style="F", round_corners=("TOP_LEFT", "TOP_RIGHT"), corner_radius=4)
+        pdf.set_text_color(255, 255, 255); pdf.set_font("Helvetica", "B", 12)
+        pdf.set_xy(x0, y0 + 1.5); pdf.cell(CW, 8, f"POSTOS SN  ·  {nome_posto}", align="C")
+        # QR em vetor (corridas horizontais de módulos)
+        qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M, border=0)
+        qr.add_data(f"{base_url}/cashback?p={posto}&bico={bico}"); qr.make(fit=True)
+        mat = qr.get_matrix(); n = len(mat)
+        lado = 40.0; m = lado / n; qx = x0 + (CW - lado) / 2; qy = y0 + 14
+        pdf.set_fill_color(*AZUL)
+        for yy, linha in enumerate(mat):
+            xx = 0
+            while xx < n:
+                if linha[xx]:
+                    x_ini = xx
+                    while xx < n and linha[xx]:
+                        xx += 1
+                    pdf.rect(qx + x_ini * m, qy + yy * m, (xx - x_ini) * m, m, style="F")
+                else:
+                    xx += 1
+        # código para digitar
+        cod = codigo_bico(posto, bico)
+        pdf.set_text_color(*CINZA); pdf.set_font("Helvetica", "B", 9)
+        pdf.set_xy(x0, qy + lado + 2); pdf.cell(CW, 4, "CÓDIGO DO BICO" if cod else "BICO", align="C")
+        pdf.set_text_color(*AZUL); pdf.set_font("Helvetica", "B", 34)
+        pdf.set_xy(x0, qy + lado + 5.5); pdf.cell(CW, 13, cod or str(bico), align="C")
+        pdf.set_text_color(*VERM); pdf.set_font("Helvetica", "B", 12)
+        pdf.set_xy(x0, qy + lado + 18.5); pdf.cell(CW, 6, f"Bico {bico}" + (f"  ·  {comb[bico]}" if comb.get(bico) else ""), align="C")
+        pdf.set_text_color(*CINZA); pdf.set_font("Helvetica", "", 9)
+        pdf.set_xy(x0 + 4, qy + lado + 25)
+        pdf.cell(CW - 8, 4.5, "No app Postos SN: aponte a câmera para o QR", align="C")
+        pdf.set_xy(x0 + 4, qy + lado + 29.3)
+        pdf.cell(CW - 8, 4.5, "ou toque em Digitar código" + (f" e digite {cod}" if cod else ""), align="C")
+    nome_arq = f"codigos-bicos-{brutos[0]}" + (f"-a-{brutos[-1]}" if len(brutos) > 1 else "") + ".pdf"
+    return Response(bytes(pdf.output()), mimetype="application/pdf",
                     headers={"Content-Disposition": f'inline; filename="{nome_arq}"'})
 
 
