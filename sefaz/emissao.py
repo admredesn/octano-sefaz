@@ -211,6 +211,10 @@ def _comb_item(it):
     origens = it.get("orig_comb") or [{"indImport": "0",
                                        "cUFOrig": UF_CODIGO.get(it.get("uf_cons", "MG"), "31"),
                                        "pOrig": 100}]
+    # ...mas SO' no combustivel MONOFASICO (CST 02/15/53/61): no etanol CST 60 a SEFAZ recusa o grupo (rejeicao 747,
+    # 19/10/2026, NF-e de cupom do PDV); a NF-e do TecnoX manda o <comb> do etanol sem origComb.
+    if str(it.get("cst_icms") or "").strip() not in ("02", "15", "53", "61"):
+        origens = []
     orig_xml = "".join(
         f"<origComb><indImport>{o.get('indImport', '0')}</indImport>"
         f"<cUFOrig>{o.get('cUFOrig')}</cUFOrig><pOrig>{float(o.get('pOrig') or 0):.4f}</pOrig></origComb>"
