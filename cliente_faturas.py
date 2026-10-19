@@ -333,19 +333,24 @@ def api_detalhe(fatura_id):
     vendas = {}
     if nums:
         for v in cp._sget(f"oct_pdv_vendas?empresa_id=eq.{emp}&numero=in.({','.join(nums)})"
-                          f"&select=numero,data_venda,placa,odometro,veiculo,itens&limit=500") or []:
+                          f"&select=numero,data_venda,placa,odometro,veiculo,itens,prazo_dados&limit=500") or []:
             vendas[str(v["numero"])] = v
     linhas, cupons = [], []
     for t in titulos:
         v = vendas.get(str(t.get("numero_nfe")))
+        # placa/KM da venda do PDV do Octano ficam em prazo_dados (19/10/2026, igual ao portal empresas e ao PDF da fatura)
+        pd = (v or {}).get("prazo_dados") if isinstance((v or {}).get("prazo_dados"), dict) else {}
+        placa = (v or {}).get("placa") or pd.get("placa")
+        odometro = (v or {}).get("odometro") or pd.get("km") or pd.get("odometro")
+        veiculo = (v or {}).get("veiculo") or pd.get("veiculo")
         quando = (v or {}).get("data_venda") or t.get("registrado_em")
         itens = (v or {}).get("itens") if isinstance((v or {}).get("itens"), list) else []
         cupons.append({"nota_id": t["id"], "cupom": t.get("numero_nfe"), "data": quando,
                        "valor": round(float(t.get("valor") or 0), 2), "tem_foto": bool(t.get("foto_path")),
-                       "placa": (v or {}).get("placa")})
+                       "placa": placa})
         if not itens:
             linhas.append({"data": quando, "cupom": t.get("numero_nfe"), "produto": "Compra a prazo", "qtd": 0, "unit": 0,
-                           "total": round(float(t.get("valor") or 0), 2), "placa": (v or {}).get("placa")})
+                           "total": round(float(t.get("valor") or 0), 2), "placa": placa})
             continue
         for it in itens:
             qtd = float(it.get("qtd") or 0)
@@ -353,8 +358,8 @@ def api_detalhe(fatura_id):
             total = float(it["total"]) if it.get("total") is not None else qtd * unit
             linhas.append({"data": quando, "cupom": t.get("numero_nfe"), "produto": it.get("desc") or it.get("produto") or "",
                            "qtd": qtd, "unit": round(unit, 3), "total": round(total, 2),
-                           "placa": (v or {}).get("placa"), "odometro": (v or {}).get("odometro"),
-                           "veiculo": (v or {}).get("veiculo"), "litros": it.get("tipo") == "abastecimento"})
+                           "placa": placa, "odometro": odometro,
+                           "veiculo": veiculo, "litros": it.get("tipo") == "abastecimento"})
     b = bol[0] if bol else None
     venc = str(f.get("vencimento") or "")[:10]
     _log(cli, f"fatura {f.get('numero')} ({emp[:8]})")
