@@ -1374,6 +1374,18 @@ def _sanear_itens(brutos):
 # ------------------------------------------------------------------
 DESCONTO_APP_MAX = 1.00          # R$/L (o banco também trava)
 DESCONTO_SEM_RESPOSTA_S = 45     # pedido sem o núcleo pegar: o app oferece abastecer sem desconto
+DESCONTO_ESPERA_ABAST_S = 40     # preço voltou sem abastecimento informado pelo núcleo: espera isso antes de encerrar
+
+
+def _hora_do_posto(iso_utc):
+    """oct_pdv_abastecimentos.data_abast é a hora LOCAL do posto (concentrador) gravada com rótulo +00:00. Comparar
+    com um instante UTC (criado_em do acionamento) dava 3 h de diferença e o app nunca via o abastecimento
+    concluído (19/10/2026). Devolve o instante na hora de Brasília, no mesmo formato rotulado."""
+    try:
+        d = datetime.fromisoformat(str(iso_utc).replace("Z", "+00:00")).astimezone(timezone.utc) - timedelta(hours=3)
+        return d.replace(tzinfo=timezone.utc).isoformat()
+    except Exception:
+        return str(iso_utc)
 
 
 def _desconto_do_bico(empresa, bico):
@@ -1526,6 +1538,45 @@ def api_acionamento_live():
                                                        - (datetime.now(timezone.utc) - desde).total_seconds()))
             except Exception:
                 pass
+        # preço já voltou ao normal (19/10/2026, teste real no SEVEN): o núcleo diz QUAL abastecimento foi o do
+        # desconto (bomba_info.abastecimento_id = mesmo id em oct_pdv_abastecimentos). Sem ele, o bico saiu e voltou
+        # ao gancho sem abastecer: encerra (antes o app voltava a "Pode abastecer" e o cliente cancelava).
+        if bs == "restaurado":
+            ab_id = _uuid_ok(info.get("abastecimento_id"))
+            if ab_id:
+                try:
+                    abs_ = _sget(f"oct_pdv_abastecimentos?id=eq.{ab_id}"
+                                 "&select=litros,valor,preco_litro,produto_nome,data_abast,status&limit=1")
+                except Exception:
+                    abs_ = []
+                if abs_:
+                    resp["fase"] = "concluido"
+                    resp["abastecimento"] = abs_[0]
+                else:                                   # o núcleo ainda está subindo o abastecimento para a nuvem
+                    resp["fase"] = "abastecendo"
+                    resp["live"] = {}
+                return jsonify(resp)
+            try:                                        # o núcleo pode ter voltado o preço antes de ler o abastecimento
+                abs_ = _sget(f"oct_pdv_abastecimentos?empresa_id=eq.{ac['empresa_id']}&bico=eq.{bico}"
+                             f"&data_abast=gte.{rq.utils.quote(_hora_do_posto(ac['criado_em']), safe='')}"
+                             "&select=litros,valor,preco_litro,produto_nome,data_abast,status&order=data_abast.desc&limit=1")
+            except Exception:
+                abs_ = []
+            if abs_:
+                resp["fase"] = "concluido"
+                resp["abastecimento"] = abs_[0]
+                return jsonify(resp)
+            try:
+                voltou = (datetime.now(timezone.utc)
+                          - datetime.fromisoformat(str(ac.get("bomba_em")).replace("Z", "+00:00"))).total_seconds()
+            except Exception:
+                voltou = 999
+            if voltou > DESCONTO_ESPERA_ABAST_S:
+                resp["fase"] = "desconto_expirado"      # o app diz: não abasteceu a tempo, o preço voltou ao normal
+                return jsonify(resp)
+            resp["fase"] = "abastecendo"
+            resp["live"] = {}
+            return jsonify(resp)
 
     # cashback gerado depois do acionamento? (fase final)
     try:
@@ -1543,7 +1594,7 @@ def api_acionamento_live():
     if bico:
         try:
             abs_ = _sget(f"oct_pdv_abastecimentos?empresa_id=eq.{ac['empresa_id']}&bico=eq.{bico}"
-                         f"&data_abast=gte.{rq.utils.quote(ac['criado_em'], safe='')}"
+                         f"&data_abast=gte.{rq.utils.quote(_hora_do_posto(ac['criado_em']), safe='')}"
                          f"&select=litros,valor,preco_litro,produto_nome,data_abast,status"
                          f"&order=data_abast.desc&limit=1")
         except Exception:
