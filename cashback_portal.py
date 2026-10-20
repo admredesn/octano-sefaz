@@ -53,6 +53,13 @@ COMBUSTIVEIS = ["GASOLINA COMUM", "GASOLINA ADITIVADA", "ETANOL", "DIESEL S10", 
 FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("03", "Cartão de crédito"), ("04", "Cartão de débito"), ("05", "A Prazo")]   # 03/04: 20/10/2026 (sem desconto do app)
 
 
+def _prazo_app_ligado():
+    """A PRAZO pelo app SUSPENSO (20/10/2026, Ronan: "no app esta aparecendo forma de pagamento nota a prazo, tem que
+    tirar por enquanto"): a opção some do app e do portal (prazo-status) e o acionar recusa a forma 05.
+    Religar: APP_PRAZO_ATIVO=1 no Railway (octano-sefaz)."""
+    return os.environ.get("APP_PRAZO_ATIVO", "").strip().lower() in ("1", "true", "sim", "todos", "all")
+
+
 def _prazo_conta_confirmada(empresa_id, cli):
     """A prazo pelo app (05/10/2026, auditoria #17/#48): só para conta confirmada pelo
     contato que o POSTO tem da pessoa, ou cujo telefone do app é o mesmo do cadastro do
@@ -1153,6 +1160,8 @@ def api_acionar():
     conta_prazo = None
     selfie = None
     if forma == "05":
+        if not _prazo_app_ligado():
+            return jsonify({"erro": "A compra a prazo pelo app está suspensa por enquanto. Faça a compra a prazo no caixa."}), 403
         ok, motivo, conta_prazo = _prazo_liberado(empresa, cli["cpf"])
         if not ok:
             return jsonify({"erro": motivo}), 403
@@ -1275,7 +1284,7 @@ def api_prazo_status():
     if not cli:
         return jsonify({"erro": "sessão expirada"}), 401
     posto = _uuid_ok(request.args.get("posto"))
-    if not posto:
+    if not posto or not _prazo_app_ligado():
         return jsonify({"ok": True, "prazo": False})
     ok, motivo, conta = _prazo_liberado(posto, cli["cpf"])
     return jsonify({"ok": True, "prazo": ok, "motivo": motivo,
