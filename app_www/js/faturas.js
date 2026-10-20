@@ -175,7 +175,7 @@ function fatDesenharLista(posto, res, r, cab) {
 function fatLinhaCupom(c) {
   return `<div class="linha"><span class="ic">${ICO.bomba(20)}</span>
     <div class="meio"><div class="t">Cupom ${esc(c.cupom || "")}</div><div class="s">${esc(fatData(c.data))} ${esc(horaBr(c.data))}${c.placa ? " · " + esc(c.placa) : ""}</div></div>
-    <div class="dir">${brl(c.valor)}${c.tem_foto ? `<button class="foto-btn" onclick="faturaFoto('${esc(c.nota_id)}')" aria-label="Ver comprovante assinado">${ICO.camera(18)}</button>` : ""}${(S.fatPosto && S.fatPosto.pagamento_app) ? `<button class="pagar-btn" onclick="pagarNota('${esc(c.nota_id)}')">Pagar</button>` : ""}</div></div>`;
+    <div class="dir">${brl(c.valor)}${c.tem_foto ? `<button class="foto-btn" onclick="faturaFoto('${esc(c.nota_id)}')" aria-label="Ver comprovante assinado">${ICO.camera(18)}</button>` : ""}${(S.fatPosto && S.fatPosto.pagamento_app) ? `<button class="pagar-btn" onclick="pagarNota('${esc(c.nota_id)}', ${Number(c.valor || 0)}, '${esc(c.cupom || "")}')">Pagar</button>` : ""}</div></div>`;
 }
 
 // ---------------------------------------------------------------- detalhe
@@ -217,7 +217,7 @@ function fatDesenharFatura(r, cab) {
       <div class="s" style="margin-top:8px">Emissão ${esc(fatData(f.emissao))} · Vencimento ${esc(fatData(f.vencimento))}${f.da_empresa ? " · " + esc(f.titular) : ""}</div>
       ${f.acrescimo || f.desconto ? `<div class="s">Valor das compras ${brl(f.valor_bruto)}${f.acrescimo ? " + acréscimo " + brl(f.acrescimo) : ""}${f.desconto ? " − desconto " + brl(f.desconto) : ""}</div>` : ""}
     </div></div>
-    ${r.pagamento_app && f.status === "aberta" ? `<div class="secao"><button class="btn" onclick="pagarFatura('${esc(f.id)}')">Pagar a fatura com Pix</button></div>` : ""}
+    ${r.pagamento_app && f.status === "aberta" ? `<div class="secao"><button class="btn" onclick="pagarFatura('${esc(f.id)}')">Pagar a fatura</button></div>` : ""}
     ${b && f.status === "aberta" ? fatBoleto(f, b) : ""}
     <div class="secao"><div class="secao-tit"><h2>Documentos</h2></div><div class="card lista">
       <button class="linha" onclick="faturaPdf('${esc(f.id)}','fatura')"><span class="ic">${ICO.dados(20)}</span><div class="meio"><div class="t">Fatura detalhada (PDF)</div></div><span class="seta">${ICO.seta(18)}</span></button>
@@ -405,8 +405,15 @@ async function pixQr(id) {
   } catch (e) { /* sem QR: o botao de copiar continua valendo */ }
 }
 
-function pagarNota(notaId) { return pagarAlvo({ nota_id: notaId }, "esta compra"); }
-function pagarFatura(faturaId) { return pagarAlvo({ fatura_id: faturaId }, "a fatura"); }
+// 20/10/2026: com o cartão ligado no posto, o Pagar abre a escolha da forma (cartao.js); senão, o Pix de sempre
+function pagarNota(notaId, valor, cupom) {
+  return pagarEscolher("nota", notaId, "Cupom " + (cupom || ""), valor, S.fatPosto && S.fatPosto.empresa_id);
+}
+function pagarFatura(faturaId) {
+  const f = ((S.fatDet || {})[faturaId] || {}).r ? S.fatDet[faturaId].r.fatura : null;
+  return pagarEscolher("fatura", faturaId, f ? "Fatura " + f.numero : "Fatura", f ? f.valor : 0,
+                       (f && f.empresa_id) || (S.fatPosto && S.fatPosto.empresa_id));
+}
 
 // depois de pagar: recarrega a tela em que o cliente esta (lista ou fatura)
 function fatRecarregar() {

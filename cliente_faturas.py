@@ -367,6 +367,7 @@ def api_detalhe(fatura_id):
         "ok": True,
         "fatura": {
             "id": f["id"], "numero": f.get("numero"), "emissao": f.get("emissao"), "vencimento": venc or None,
+            "empresa_id": emp,                      # 20/10/2026: o app pergunta ao /cartao/config do posto da fatura
             "valor": round(_valor(f), 2), "valor_bruto": round(float(f.get("valor") or 0), 2),
             "acrescimo": round(float(f.get("acrescimo") or 0), 2), "desconto": round(float(f.get("desconto") or 0), 2),
             "status": f.get("status"), "liquidado_em": f.get("liquidado_em"),

@@ -431,3 +431,32 @@ img { display: block; max-width: 100%; }
         max-width: 480px; margin: 0 auto; padding: 0 14px; display: grid; grid-template-columns: 1fr 1.6fr; gap: 10px; }
 .lote .btn { margin-top: 0; box-shadow: var(--sombra); }
 .lote .btn.recusa { background: var(--card); }
+
+/* ---- pagar com cartão (cartao.js, 20/10/2026 — layout aprovado _ferramentas/app_cartao_layout_teste.html) ---- */
+.pg-passos { display: flex; gap: 4px; margin: 4px 0 12px; }
+.pg-passos i { flex: 1; height: 4px; border-radius: 2px; background: var(--borda); }
+.pg-passos i.on { background: var(--azul); }
+.pg-resumo { padding: 14px 16px; margin-bottom: 10px; }
+.pg-resumo .s { color: var(--mut); font-size: .84rem; }
+.pg-resumo .v { font-size: 1.6rem; font-weight: 800; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.pg-rot { color: var(--mut); font-size: .86rem; margin: 10px 2px 8px; }
+.pg-op { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 13px; margin-bottom: 8px;
+  border: 1.5px solid var(--borda); border-radius: 12px; background: var(--card); color: var(--txt); font: inherit; cursor: pointer; }
+.pg-op.sel { border-color: var(--azul); background: var(--azul-claro); }
+.pg-op .ic { width: 38px; height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 1.15rem; background: var(--fundo); flex: none; }
+.pg-op .txt { display: flex; flex-direction: column; min-width: 0; }
+.pg-op b { font-size: .92rem; }
+.pg-op .d { font-size: .78rem; color: var(--mut); }
+.pg-parc { display: flex; justify-content: space-between; align-items: center; width: 100%; padding: 11px 12px; margin-bottom: 6px;
+  border: 1.5px solid var(--borda); border-radius: 10px; background: var(--card); color: var(--txt); font: inherit; font-size: .9rem; cursor: pointer; }
+.pg-parc.sel { border-color: var(--azul); background: var(--azul-claro); }
+.pg-parc .t { font-size: .74rem; color: var(--mut); }
+.pg-tag { font-size: .62rem; font-weight: 700; padding: 2px 7px; border-radius: 8px; background: var(--verde-fundo); color: var(--verde); margin-left: 4px; }
+.pg-nota { color: var(--mut); font-size: .76rem; margin: 8px 2px 0; line-height: 1.35; }
+.pg-remover { display: block; background: none; border: none; padding: 4px 2px; cursor: pointer; font-size: .8rem; }
+.pg-ok { width: 74px; height: 74px; border-radius: 50%; background: var(--verde-fundo); color: var(--verde); display: flex;
+  align-items: center; justify-content: center; font-size: 2.4rem; margin: 6px auto 10px; }
+.pg-linhas { padding: 6px 16px; margin-top: 10px; }
+.pg-linhas > div { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; font-size: .88rem; border-bottom: 1px dashed var(--borda); }
+.pg-linhas > div:last-child { border: none; }
