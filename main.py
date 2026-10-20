@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-19-nfe-cupom-origcomb",
+                    "build": "2026-10-20-baixar-app",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -661,6 +661,45 @@ def app_web(arq="index.html"):
     resp = send_from_directory(pasta, arq)          # send_from_directory recusa ../
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+# ── Baixar o app (20/10/2026, Ronan: "cria um QR code que direciona para baixar o app") ──────────
+# UM endereço para o QR impresso (www.redesn.com.br/baixar), que escolhe a loja pelo celular de quem lê:
+# iPhone/iPad → App Store; Android → Google Play quando APP_PLAY_URL existir (env), senão a versão web do app;
+# computador ou leitor desconhecido → página com os botões. O QR não muda quando o Google Play sair.
+# /BAIXAR (maiúsculo) = o mesmo: deixa o QR no modo alfanumérico (menos quadradinhos, lê de mais longe).
+APP_STORE_URL = "https://apps.apple.com/br/app/postos-sn/id6823748853"
+
+
+@app.route("/baixar", methods=["GET"])
+@app.route("/baixar/", methods=["GET"])
+@app.route("/BAIXAR", methods=["GET"])
+def baixar_app():
+    from flask import redirect, Response
+    ua = (request.headers.get("User-Agent") or "").lower()
+    play = (os.environ.get("APP_PLAY_URL") or "").strip()
+    if any(x in ua for x in ("iphone", "ipad", "ipod")):
+        destino, onde = APP_STORE_URL, "ios"
+    elif "android" in ua:
+        destino, onde = (play or "/app/"), ("android-play" if play else "android-web")
+    else:
+        destino, onde = None, "outro"
+    print(f"[baixar] {onde} {request.args.get('o') or ''}".strip())
+    if destino:
+        return redirect(destino, code=302)
+    android = play or "/app/"
+    html = f"""<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Baixe o app Postos SN</title>
+<style>body{{margin:0;font-family:system-ui,-apple-system,Segoe UI,sans-serif;background:#06253E;color:#fff;
+display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px;box-sizing:border-box}}
+h1{{font-size:1.6rem;margin:0 0 6px}}p{{color:#cfd9e3;margin:0 0 22px}}a{{display:block;margin:10px auto;max-width:300px;
+padding:14px 18px;border-radius:12px;font-weight:700;text-decoration:none}}.ios{{background:#fff;color:#06253E}}
+.and{{background:#E8A317;color:#06253E}}</style></head><body><main>
+<h1>App Postos SN</h1><p>Promoções relâmpago, descontos em produtos e no abastecimento.</p>
+<a class="ios" href="{APP_STORE_URL}">Baixar na App Store (iPhone)</a>
+<a class="and" href="{android}">{"Baixar no Google Play (Android)" if play else "Android: usar a versão web"}</a>
+</main></body></html>"""
+    return Response(html, mimetype="text/html")
 
 
 # ── Site da Rede SN (10/10/2026) ─────────────────────────────────────────────────
