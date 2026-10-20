@@ -343,7 +343,9 @@ def api_pagar_cartao():
               "charges": [{"reference_id": f"oct-cartao-{cid}", "description": (a["desc"] or "Rede SN")[:60],
                            "amount": amount, "payment_method": pm}]}
     try:
-        st, j = _pb("POST", "/orders", pedido, idem=f"oct-cartao-{cid}")
+        # chave ÚNICA por tentativa (20/10/2026): "oct-cartao-<id>" repetia entre os testes (banco simulado, id 1) e
+        # a produção, e o PagBank recusava com 409 IDEMPOTENCY_CONFLICT ("request body must be the same")
+        st, j = _pb("POST", "/orders", pedido, idem=f"oct-cartao-{cid}-{uuid.uuid4().hex[:16]}")
     except rq.RequestException as e:
         cp._spatch(f"oct_cartao_cobrancas?id=eq.{cid}", {"status": "erro", "erro": f"sem resposta do PagBank: {e}"[:300]})
         return jsonify({"erro": "Não consegui falar com o PagBank. Confira no app do seu banco antes de tentar de novo.", "id": cid}), 502
