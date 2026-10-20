@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-20-app-1-0-13-cartao",
+                    "build": "2026-10-20-cartao-servidor-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -540,6 +540,14 @@ try:
     app.register_blueprint(bp_faturas)
 except Exception as _e:
     print("[cliente-faturas] nao carregou:", _e)
+
+# ── Cartão de crédito pelo app: parcelas com juros do cliente, cartão salvo e 3DS (PagBank) — 20/10/2026 ──
+# Desligado até CARTAO_APP_ATIVO (+ PAGBANK_TOKEN_SANDBOX/PAGBANK_TOKEN) — ver cliente_cartao.py.
+try:
+    from cliente_cartao import bp_cartao
+    app.register_blueprint(bp_cartao)
+except Exception as _e:
+    print("[cliente-cartao] nao carregou:", _e)
 
 # ── Portal Empresas (web): placas, consumo com foto do cupom, faturas, Pix e boleto novo (14/10/2026) ──
 # Só funciona para empresa com oct_pessoas.portal_empresas ligado e financeiro com "vê as faturas" — ver empresas_portal.py.
