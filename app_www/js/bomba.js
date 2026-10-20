@@ -126,9 +126,9 @@ async function telaAcionar() {
         <div class="campo"><label>Combustível</label><select id="a-comb"><option value="">—</option>${COMBS.map(c => `<option>${c}</option>`).join("")}</select></div>
       </div>
       <div id="a-info" class="vazio" style="padding:6px 2px 0"></div>
+      <div class="campo" id="a-forma-campo"><label>Como vai pagar</label><select id="a-forma"><option value="17">PIX</option><option value="01">Dinheiro</option><option value="03">Cartão de crédito</option><option value="04">Cartão de débito</option></select></div>
+      <div id="a-desc-aviso" class="vazio" style="padding:0 2px 6px"></div>
       <div id="a-modo"></div>
-      <div class="campo" id="a-forma-campo"><label>Como vai pagar</label><select id="a-forma"><option value="17">PIX</option><option value="01">Dinheiro</option></select></div>
-      <div class="campo" id="a-forma-desc-campo" style="display:none"><label>Como vai pagar</label><select id="a-forma-desc"></select></div>
       <div id="a-prazo-msg" class="vazio" style="padding:6px 2px 0"></div>
       <button class="btn" id="a-btn">Avisar o caixa</button>
       <div class="msg" id="a-msg"></div>
@@ -152,16 +152,28 @@ async function telaAcionar() {
     return l;
   };
   // DESCONTO DO APP NA BOMBA (16/10/2026): bico com desconto na tabela DESCONTO APP do posto ganha a escolha
-  // "Desconto agora" (o preço do bico baixa só para este cliente) × "Acumular" (cashback e pontos)
-  let _desc = null;
+  // "Desconto agora" (o preço do bico baixa só para este cliente) × "Acumular" (cashback e pontos).
+  // CARTÃO (20/10/2026, Ronan: "adicionar cartão de crédito/débito no app, mas com essa forma o cliente não tem o
+  // desconto"): a forma vem PRIMEIRO; a escolha do desconto só aparece se a forma está na tabela do posto.
+  let _desc = null, _formaTocada = false;
+  const formaDesc = () => {                 // a forma escolhida vale para o desconto? (a da tabela, com o id)
+    const cod = $("a-forma").value;
+    return _desc ? ((_desc.formas || []).find(f => String(f.cod || "") === cod) || null) : null;
+  };
+  const nomeForma = cod => { const o = $("a-forma").querySelector(`option[value="${cod}"]`); return o ? o.textContent : cod; };
   const modoAtual = () => {
     const x = document.querySelector('input[name="a-modo"]:checked');
-    return _desc && x ? x.value : "acumular";
+    return _desc && formaDesc() && x ? x.value : "acumular";
   };
   const modo = () => {
+    const vale = !!formaDesc();
+    const escolha = $("a-modo-escolha");
+    if (escolha) escolha.style.display = vale ? "" : "none";
+    $("a-desc-aviso").innerHTML = _desc && !vale
+      ? `💳 Pagando com <b>${esc(nomeForma($("a-forma").value))}</b>, este abastecimento não tem o desconto do app. O desconto vale só para <b>${
+          esc((_desc.formas || []).map(f => nomeForma(String(f.cod || ""))).join(" e "))}</b>. Você ganha os pontos normalmente.`
+      : "";
     const desc = modoAtual() === "desconto";
-    $("a-forma-campo").style.display = desc ? "none" : "";
-    $("a-forma-desc-campo").style.display = desc ? "" : "none";
     $("a-btn").textContent = desc ? "Aplicar o desconto na bomba" : "Avisar o caixa";
     $("a-rodape").innerHTML = desc
       ? "O preço baixa <b>só neste bico e só para você</b> e volta ao normal quando terminar. Com o desconto, este abastecimento não gera cashback."
@@ -174,12 +186,16 @@ async function telaAcionar() {
     const r = await api(`/cashback/api/desconto?posto=${encodeURIComponent(posto)}&bico=${b}`);
     if (!(r.ok && r.ativo) || lido().bico !== b || lido().posto !== posto) return;
     _desc = r;
-    $("a-modo").innerHTML = `<div class="campo"><label>O que você prefere?</label>
+    // primeira vez neste bico: começa numa forma com desconto (o cliente ainda pode trocar)
+    if (!_formaTocada && !formaDesc()) {
+      const cod = (r.formas || []).map(f => String(f.cod || "")).find(c => $("a-forma").querySelector(`option[value="${c}"]`));
+      if (cod) $("a-forma").value = cod;
+    }
+    $("a-modo").innerHTML = `<div class="campo" id="a-modo-escolha"><label>O que você prefere?</label>
       <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="desconto" checked>
         <span><b>Desconto agora</b> · ${brl(r.desconto_litro)} por litro: o bico fica em <b>${brl(r.preco_desconto)}</b> em vez de ${brl(r.preco_normal)}</span></label>
       <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="acumular">
         <span><b>Acumular</b> · cashback e pontos para resgatar depois</span></label></div>`;
-    $("a-forma-desc").innerHTML = r.formas.map(f => `<option value="${esc(f.id)}">${esc(f.nome)}</option>`).join("");
     document.querySelectorAll('input[name="a-modo"]').forEach(x => { x.onchange = modo; });
     modo();
   };
@@ -203,6 +219,7 @@ async function telaAcionar() {
     if (!r.prazo && op) op.remove();
     $("a-prazo-msg").textContent = r.prazo ? "" : (r.motivo ? "A prazo: " + r.motivo : "");
   };
+  $("a-forma").addEventListener("change", () => { _formaTocada = true; modo(); });
   $("a-posto").onchange = () => {
     S.posto = $("a-posto").value; LS.set("psn_posto", S.posto);
     const v = soDigitos($("a-bico").value);              // código de outro posto no campo: não vale para este
@@ -221,7 +238,7 @@ async function telaAcionar() {
     if (modoAtual() === "desconto") {
       m.className = "msg"; m.textContent = "Pedindo o desconto à bomba…";
       const rd = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value,
-                                                      modo: "desconto", forma_id: $("a-forma-desc").value });
+                                                      modo: "desconto", forma_id: formaDesc().id });
       if (!rd.ok) { m.className = "msg erro"; m.textContent = rd.erro || "Não consegui pedir o desconto."; return; }
       S.bico = "";
       acompanhar();

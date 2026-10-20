@@ -50,7 +50,7 @@ ACIONAMENTO_VALIDADE_MIN = 60      # acionamento vale 1h
 JANELA_2H_SEG = 2 * 3600
 
 COMBUSTIVEIS = ["GASOLINA COMUM", "GASOLINA ADITIVADA", "ETANOL", "DIESEL S10", "DIESEL S500"]
-FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("05", "A Prazo")]
+FORMAS = [("01", "Dinheiro"), ("17", "PIX"), ("03", "Cartão de crédito"), ("04", "Cartão de débito"), ("05", "A Prazo")]   # 03/04: 20/10/2026 (sem desconto do app)
 
 
 def _prazo_conta_confirmada(empresa_id, cli):
