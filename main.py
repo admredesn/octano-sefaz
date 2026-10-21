@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-20-app-prazo-suspenso",
+                    "build": "2026-10-21-site-google-verificacao",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -720,7 +720,8 @@ padding:14px 18px;border-radius:12px;font-weight:700;text-decoration:none}}.ios{
 #     apontar para cá, e para o app abrir os documentos).
 # No domínio da empresa só os caminhos do site são tomados: /app, /cashback etc. seguem normais.
 _SITE_HOSTS = {"redesn.com.br", "www.redesn.com.br"}
-_SITE_RAIZ = {"", "index.html", "privacidade.html", "termos.html", "excluir-conta.html", "site.css"}
+_SITE_RAIZ = {"", "index.html", "privacidade.html", "termos.html", "excluir-conta.html", "site.css",
+              "googlecf4a4fd08cacca60.html"}     # 21/10/2026: prova de propriedade do site no Search Console (Google Play) — NÃO remover
 
 
 def _site_arquivo(arq):
