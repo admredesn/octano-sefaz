@@ -7,9 +7,9 @@
 //  * dentro do app das lojas (Capacitor): a página vem do celular, então o servidor
 //    é o endereço completo.
 // ============================================================
-const SERVIDOR = "https://octano-sefaz-production-66d4.up.railway.app";
+const SERVIDOR = "https://www.redesn.com.br";   // 22/10/2026 (1.0.15): o domínio; o endereço do Railway saiu do ar
 const API = (location.protocol.indexOf("http") === 0 && /^\/app(\/|$)/.test(location.pathname)) ? "" : SERVIDOR;
-const VERSAO_APP = "1.0.14";
+const VERSAO_APP = "1.0.16";
 // Documentos públicos no site da Rede SN (www.redesn.com.br, no ar desde 10/10/2026; as mesmas páginas
 // também respondem em SERVIDOR + "/site/").
 const SITE = "https://www.redesn.com.br";
@@ -27,6 +27,25 @@ const LS = {
   set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sem armazenamento */ } lsGuardar(k, v); },
   del(k) { try { localStorage.removeItem(k); } catch (e) { /* sem armazenamento */ } lsGuardar(k, null); },
 };
+
+// "ACESSO DA EQUIPE" NO PERFIL (23/10/2026, Ronan: "toda pessoa que está cadastrada no perfil gerente fica com essa opção
+// disponível e clicando nela já vai direto para a área da equipe"). O servidor diz se a conta do app logada é de um gerente ou do
+// dono (CPF no cadastro do sistema, oct_perfis.cpf) e abre a equipe com a própria sessão do app, sem usuário e senha do sistema.
+async function equipeDoCliente() {
+  if (!EQUIPE_NO_AR || !tok()) return false;
+  if (!S.equipe || S.equipe.tok !== tok()) {
+    const r = await api("/app/equipe/api/cliente");
+    if (!r || !r.ok) return false;                       // servidor fora: não guarda, pergunta de novo na próxima vez
+    S.equipe = { tok: tok(), sim: !!r.equipe };
+  }
+  return S.equipe.sim;
+}
+async function entrarEquipe() {
+  if (typeof tokEq === "function" && tokEq()) { ir("#/eq-painel"); return; }
+  const r = await api("/app/equipe/api/entrar-cliente", {});
+  if (r && r.token) { LS.set("psn_equipe", r.token); if (typeof EQ !== "undefined") EQ.eu = null; ir("#/eq-painel"); return; }
+  toast((r && r.erro) || "Não consegui abrir a área da equipe. Tente de novo.");
+}
 function tok() { return LS.get("psn_token") || ""; }
 
 // estado da sessão (cache para as telas abrirem na hora)

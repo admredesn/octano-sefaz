@@ -80,7 +80,6 @@ function telaEntrar() {
     <button class="btn sec" onclick="ir('#/cadastro')">Criar minha conta</button>
     <div class="msg" id="e-msg"></div>
     <a class="link" href="#/esqueci" style="display:block;text-align:center;margin-top:12px">Esqueci minha senha</a>
-    ${EQUIPE_NO_AR ? '<div class="equipe-link">É da equipe de um posto? <a class="link" href="#/equipe">Acesso da equipe</a></div>' : ""}
   </div>`;
   mascaraCpf(document.getElementById("e-cpf"));
   const entrar = async () => {
@@ -415,6 +414,8 @@ async function telaPerfil() {
   if (!me) { sessaoCaiu(); return; }
   const hora = new Date().getHours();
   const item = (ic, txt, acao, extra) => `<button class="linha" onclick="${acao}"><span class="ic">${ICO[ic](20)}</span><div class="meio"><div class="t">${txt}</div></div>${extra || `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
+  const equipeGrupo = `<div class="grupo-tit">Equipe do posto</div>
+    <div class="secao" style="padding-top:0"><div class="card lista">${item("painel", "Acesso da equipe", "entrarEquipe()")}</div></div>`;
   el().innerHTML = `<div class="tela">
     <div class="perfil-topo"><div class="avatar">${esc(iniciais(me.nome))}</div>
       <div><div style="color:var(--mut)">${hora < 12 ? "Bom dia" : hora < 18 ? "Boa tarde" : "Boa noite"},</div>
@@ -447,10 +448,7 @@ async function telaPerfil() {
       ${item("escudo", "Sair de todos os aparelhos", "sairTodos()")}
       ${item("lixo", "Excluir minha conta", "excluirConta()")}
     </div></div>
-    ${EQUIPE_NO_AR ? `<div class="grupo-tit">Equipe do posto</div>
-    <div class="secao" style="padding-top:0"><div class="card lista">
-      ${item("painel", "Acesso da equipe", "ir('#/equipe')")}
-    </div></div>` : ""}
+    <div id="perfil-equipe">${S.equipe && S.equipe.tok === tok() && S.equipe.sim ? equipeGrupo : ""}</div>
     <div class="grupo-tit">Sobre</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${item("dados", "Termos de uso", "window.open(DOC_TERMOS, '_blank', 'noopener')")}
@@ -459,6 +457,10 @@ async function telaPerfil() {
     <div class="vazio" style="text-align:center">Postos SN · versão ${VERSAO_APP}</div>
   </div>`;
   if (typeof faturasPreencher === "function") faturasPreencher();
+  equipeDoCliente().then(sim => {                    // só gerente e dono veem "Acesso da equipe" (o servidor diz)
+    const d = document.getElementById("perfil-equipe");
+    if (d) d.innerHTML = sim ? equipeGrupo : "";
+  });
 }
 
 async function alternarMkt() {

@@ -491,6 +491,49 @@ def api_entrar():
     return jsonify({"ok": True, "token": _token_gerar(uid, _prefs(uid).get("token_versao") or 0)})
 
 
+# ------------------------------------------------------------------ gerente pela conta do app (23/10/2026)
+# Ronan: "toda pessoa que está cadastrada no perfil gerente fica com essa opção disponível [Acesso da equipe, no Perfil] e
+# clicando nela já vai direto para a área da equipe". A ligação é oct_perfis.cpf = CPF da conta do app (SQL-APP-EQUIPE-CPF.sql);
+# a conta do app tem de estar logada e confirmada (cp._cliente_do_token) e o cadastro tem de passar em _entra (gerente ou dono).
+def _perfil_do_cliente(cli):
+    cpf = re.sub(r"\D", "", str((cli or {}).get("cpf") or ""))
+    if len(cpf) != 11:
+        return None
+
+    def busca():
+        r = cp._sget(f"oct_perfis?cpf=eq.{cpf}&select=id&limit=2")
+        return str(r[0]["id"]) if len(r) == 1 else None     # dois cadastros com o mesmo CPF: ambíguo, ninguém entra
+    uid = _guardado("percpf|" + cpf, 60, busca)
+    p = _perfil(uid) if uid else None
+    return p if _entra(p) else None
+
+
+@bp_equipe.route("/app/equipe/api/cliente", methods=["GET"])
+def api_cliente_gerente():
+    """A conta do app logada é de um gerente (ou do dono)? O Perfil do app só mostra "Acesso da equipe" quando é."""
+    cli = cp._cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "sessão expirada"}), 401
+    return jsonify({"ok": True, "equipe": bool(_perfil_do_cliente(cli))})
+
+
+@bp_equipe.route("/app/equipe/api/entrar-cliente", methods=["POST"])
+def api_entrar_cliente():
+    """Entra na equipe com a sessão da conta do app (sem usuário e senha do sistema), se ela é de um gerente ou do dono."""
+    if not cp._limite_ok("eq-entrar-cli|" + cp._ip(), 20, 600):
+        return cp._muitas()
+    cli = cp._cliente_do_token()
+    if not cli:
+        return jsonify({"erro": "Entre de novo com o seu CPF."}), 401
+    p = _perfil_do_cliente(cli)
+    if not p:
+        return jsonify({"erro": "O acesso da equipe é exclusivo para gerentes."}), 403
+    uid = str(p["id"])
+    _esquecer("prefs|" + uid)
+    print(f"[app-equipe] entrou pela conta do app: {cp._nome_bonito(p.get('nome') or '')} ({uid})")
+    return jsonify({"ok": True, "token": _token_gerar(uid, _prefs(uid).get("token_versao") or 0)})
+
+
 @bp_equipe.route("/app/equipe/api/eu", methods=["GET"])
 def api_eu():
     p = _eu()
