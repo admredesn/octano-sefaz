@@ -352,7 +352,7 @@ function eqaDesenhar(lst, resolvidas) {
     const quando = !st && p.vence_em ? `<b data-vence="${esc(p.vence_em)}" style="color:#8A5A00"></b>` : esc(haQuanto(p.quando));
     const marcado = sel && EQA.marcados.has(p.id);
     return `<button class="linha ${marcado ? "marcada" : ""}" onclick="${sel ? `eqaMarcar('${esc(p.id)}')` : `ir('#/eq-pedido/${esc(p.id)}')`}"><span class="ic">${ICO[t.ico](20)}</span>
-      <div class="meio"><div class="t">${esc(p.titulo || t.nome)}</div><div class="s">${esc(p.posto)} · ${esc(primeiroNome(p.pediu))} · ${quando}</div></div>
+      <div class="meio"><div class="t">${esc((p.info && p.titulo_curto) || p.titulo || t.nome)}</div>${p.info ? `<div class="s" style="color:var(--txt);font-weight:600;font-variant-numeric:tabular-nums">${esc(p.info)}</div>` : ""}<div class="s">${esc(p.posto)} · ${esc(primeiroNome(p.pediu))} · ${quando}</div></div>
       ${sel ? `<span class="sel-marca ${marcado ? "on" : ""}">${marcado ? ICO.check(16) : ""}</span>` : st ? `<span class="tag ${st[1]}">${st[0]}</span>` : `<span class="seta">${ICO.seta(18)}</span>`}</button>`;
   };
   const n = EQA.marcados.size, todos = n === lst.length && n > 0;

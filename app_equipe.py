@@ -14,8 +14,9 @@ Decisões do Ronan (10/10/2026):
     de aprovação não aparecem. ETAPA 1 (12/10): aferição já chega ao app (ver TIPOS_NO_AR).
 
 Regras deste módulo:
-  * QUEM entra: cadastro ATIVO em oct_perfis e (dono OU perfil com alguma permissão do
-    app ligada). O servidor confere a senha no Supabase Auth e entrega uma sessão PRÓPRIA
+  * QUEM entra: cadastro ATIVO em oct_perfis e (dono OU perfil GERENTE com alguma permissão
+    do app ligada) — 23/10/2026, Ronan: "Acesso a equipe é exclusivo para gerentes, só pessoas
+    cadastradas no perfil gerente tem acesso". O servidor confere a senha no Supabase Auth e entrega uma sessão PRÓPRIA
     (30 dias, assinada com chave derivada da CHAVE_MESTRA); a sessão do Supabase criada
     na conferência é encerrada em seguida e nada dela é guardado.
   * O QUE cada um vê: só os postos dele (oct_perfis.empresa_id + empresas; o dono, todos
@@ -125,7 +126,7 @@ PERMISSOES = ("aprovar_desconto", "aprovar_prazo", "aprovar_afericao",
               "ver_comissao")                 # comissão dos vendedores (gestão, 17/10/2026)
 APROVAR = tuple(k for k in PERMISSOES if k.startswith("aprovar_"))
 VER_POSTO = ("ver_vendas", "ver_litros", "ver_tanques")
-PERFIS = (("gerente", "Gerente"), ("financeiro", "Financeiro"), ("contabilidade", "Contabilidade"))
+PERFIS = (("gerente", "Gerente"),)      # 23/10/2026: só o gerente entra (financeiro e contabilidade saíram da tela Permissões)
 PADRAO = {"gerente": True}          # perfil sem linha gravada: gerente liga tudo, os outros nada
 PREFIXO = "app."
 AVISOS = ("pedidos", "tanques", "turno")
@@ -344,8 +345,13 @@ def pode_de(p):
     return pode
 
 
+def _so_gerente(p):
+    """Dono ou perfil gerente: os únicos que podem estar no Acesso da equipe (exceção por pessoa não abre para outro perfil)."""
+    return _eh_dono(p) or (p or {}).get("papel") == "gerente"
+
+
 def _entra(p):
-    if not p or p.get("ativo") is False:
+    if not p or p.get("ativo") is False or not _so_gerente(p):
         return False
     return _eh_dono(p) or any(pode_de(p).values())
 
@@ -477,6 +483,8 @@ def api_entrar():
         return jsonify({"erro": "Não consegui ler o seu cadastro agora. Tente de novo."}), 502
     if not p or p.get("ativo") is False:
         return jsonify({"erro": "Seu cadastro está desativado no sistema."}), 403
+    if not _so_gerente(p):
+        return jsonify({"erro": "O acesso da equipe é exclusivo para gerentes."}), 403
     if not _entra(p):
         return jsonify({"erro": "Seu perfil ainda não tem acesso ao app da equipe. Peça ao dono para liberar em Permissões do app."}), 403
     _esquecer("prefs|" + uid)
@@ -1309,6 +1317,10 @@ def _hora_local_txt(d_utc):
     return (d_utc + FUSO).strftime("%d/%m %H:%M") if d_utc else "—"
 
 
+def _data_hora_local_txt(d_utc):
+    return (d_utc + FUSO).strftime("%d/%m/%Y %H:%M") if d_utc else "—"
+
+
 def _afe_operadores(rows):
     """{turno_id: (nome do operador, nº do turno)} — quem estava no caixa quando a aferição foi marcada
     (o campo `vendedor` da aferição é o crachá/ID da bomba, não um nome)."""
@@ -1331,15 +1343,22 @@ def _afe_pedido(r, nomes, detalhe=False, turnos=None):
     cracha = str(r.get("vendedor") or "").strip()
     pediu = op[0] if op else ("Caixa" if (not cracha or _RE_CRACHA.match(cracha)) else cp._nome_bonito(cracha))
     pendente = r.get("status") == "afericao_pendente"
-    out = {"id": "afe:" + str(r.get("id")), "tipo": "afericao", "titulo": f"Aferição · bico {r.get('bico') or '—'} · {comb}",
+    # valor_total fica guardado depois de autorizar (o "valor" vai a zero), por isso vem primeiro
+    valor = _num(r.get("valor_total")) or _num(r.get("valor")) or round(litros * _num(r.get("preco_litro")), 2)
+    volume = _virg(litros, 3 if litros < 1 else 2) + " L"
+    # 23/10/2026, Ronan: "As aferições precisam aparecer a data, volume e valor" — já na LISTA. O app até a 1.0.15 só mostra o
+    # título na lista, por isso o título leva os três; a lista nova (equipe.js) usa titulo_curto + info numa linha própria.
+    curto = f"Aferição · bico {r.get('bico') or '—'} · {comb}"
+    info = f"{_data_hora_local_txt(quando)} · {volume} · {_reais(valor)}"
+    out = {"id": "afe:" + str(r.get("id")), "tipo": "afericao", "titulo": f"{curto} · {info}", "titulo_curto": curto, "info": info,
            "posto": nomes.get(eid, "—"), "pediu": pediu, "quando": _iso_utc(quando), "vence_em": None,
            "situacao": "pendente" if pendente else "aprovado"}
     if detalhe:
-        valor = _num(r.get("valor_total")) or _num(r.get("valor")) or round(litros * _num(r.get("preco_litro")), 2)
         linhas = [["Posto", nomes.get(eid, "—")], ["Combustível", comb], ["Bico", str(r.get("bico") or "—")],
-                  ["Litros", _virg(litros, 3 if litros < 1 else 2) + " L", "alerta" if litros > AFERICAO_LITROS_NORMAL else ""],
-                  ["Valor se fosse venda", _reais(valor)], ["Horário", _hora_local_txt(quando)], ["Quem marcou", pediu]] + ([["Turno", str(int(op[1]))]] if op and op[1] is not None else [])
-        out.update({"destaque": _virg(litros, 3 if litros < 1 else 2) + " L",
+                  ["Data", _data_hora_local_txt(quando)],
+                  ["Volume", volume, "alerta" if litros > AFERICAO_LITROS_NORMAL else ""],
+                  ["Valor", _reais(valor)], ["Quem marcou", pediu]] + ([["Turno", str(int(op[1]))]] if op and op[1] is not None else [])
+        out.update({"destaque": volume, "valor_txt": _reais(valor),
                     "resumo": f"{comb} · bico {r.get('bico') or '—'} · {_hora_local_txt(quando)}",
                     "linhas": linhas, "motivo": "",
                     "resolvido": "" if pendente else (r.get("observacao") or "Aferição autorizada.")})
@@ -1755,7 +1774,7 @@ def texto_aviso(ped):
     """(título, texto) da notificação de um pedido montado por _apv_pedido/_afe_pedido(detalhe=True)."""
     posto = ped.get("posto") or "posto"
     if ped["tipo"] == "afericao":
-        corpo = " · ".join(x for x in (ped.get("resumo") or ped.get("titulo") or "", ped.get("destaque") or "") if x)
+        corpo = " · ".join(x for x in (ped.get("resumo") or ped.get("titulo") or "", ped.get("destaque") or "", ped.get("valor_txt") or "") if x)
         return f"Aferição para aprovar · {posto}", corpo + ". Toque para aprovar."
     partes = [ped.get("destaque") or "", ped.get("resumo") or "", ("pedido por " + ped["pediu"]) if ped.get("pediu") else ""]
     return f"{ped.get('titulo') or 'Pedido do caixa'} · {posto}", " · ".join(x for x in partes if x) + ". Responda em até 1 minuto."
