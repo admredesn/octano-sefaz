@@ -924,15 +924,20 @@ def somar_vendas(postos_dados):
                 pc[0] += L
                 pc[1] += V
                 m = _RE_ISO.match(str(a.get("data_abast") or ""))
-                if m:
-                    por_hora[int(m.group(2)[:2])] += L
+                hora = int(m.group(2)[:2]) if m else None
+                if hora is not None:
+                    por_hora[hora] += L
                 cr = str(a.get("vendedor") or "").strip().upper()
                 if cr:
-                    x = vend.setdefault(cr, {"litros": 0.0, "valor": 0.0, "abastecimentos": 0, "postos": {}})
+                    x = vend.setdefault(cr, {"litros": 0.0, "valor": 0.0, "abastecimentos": 0, "postos": {},
+                                             "valor_posto": {}, "hora": [0.0] * 24})
                     x["litros"] += L
                     x["valor"] += V
                     x["abastecimentos"] += 1
                     x["postos"][d.get("posto")] = x["postos"].get(d.get("posto"), 0) + 1
+                    x["valor_posto"][d.get("eid")] = x["valor_posto"].get(d.get("eid"), 0.0) + V     # comissão é por posto
+                    if hora is not None:
+                        x["hora"][hora] += L
                 else:
                     sem_cracha[0] += L
                     sem_cracha[1] += 1
@@ -991,7 +996,7 @@ def _coletar_periodo(postos, de, ate, com_fila=True):
     hoje = _agora_local().strftime("%Y-%m-%d")
 
     def um(eid, nome):
-        d = {"posto": nome}
+        d = {"posto": nome, "eid": eid}
         d["pista"], d["cupons"] = _pista(eid, de, ate), _cupons(eid, de, ate)
         d["fila"] = _fila_hoje(eid) if (com_fila and ate >= hoje) else []
         return d
@@ -1057,6 +1062,15 @@ def api_vendas():
     if not pode.get("ver_litros"):
         comb.update(litros=None, veiculos=None, ticket_litros=None, media_dia_litros=None, previsao_mes_litros=None,
                     media_mes_litros=None, por_hora=[], por_combustivel=[[n, None, V] for n, _, V in comb["por_combustivel"]])
+    else:
+        # 23/10/2026, Ronan: "um gráfico que mostra por horário e funcionário" — litros de cada vendedor (crachá) em cada hora
+        try:
+            nomes = _crachas()
+        except Exception:
+            nomes = {}
+        vh = sorted(((nomes.get(cr) or ("Crachá …" + cr[-4:]), x["hora"], x["litros"]) for cr, x in s["vendedores"].items() if x["litros"] > 0),
+                    key=lambda t: -t[2])
+        comb["por_vendedor_hora"] = [[n, [round(v, 1) for v in h], round(t, 1)] for n, h, t in vh]
     prod = None
     if pode.get("ver_vendas"):
         top = sorted(s["prods"].items(), key=lambda x: -x[1][1])[:5]
@@ -1311,6 +1325,13 @@ def _crachas():
     return _guardado("g-crachas", 600, busca)
 
 
+def _pct_comissao():
+    """{empresa_id: % de comissão do combustível} — o mesmo número da tela Comissões do retaguarda (oct_empresas.comissao_pct_comb)."""
+    def busca():
+        return {str(e.get("id")): _num(e.get("comissao_pct_comb")) for e in cp._sget("oct_empresas?select=id,comissao_pct_comb")}
+    return _guardado("g-comissao-pct", 120, busca)
+
+
 @bp_equipe.route("/app/equipe/api/comissao", methods=["GET"])
 def api_comissao():
     p = _eu()
@@ -1325,15 +1346,21 @@ def api_comissao():
     try:
         s = somar_vendas(_coletar_periodo(postos, de, ate, com_fila=False))
         nomes = _crachas()
+        pct = _pct_comissao()
     except Exception as e:
         print("[app-equipe] comissao:", str(e)[:160])
         return jsonify({"erro": "Não consegui ler as vendas agora. Tente de novo."}), 502
+    # 23/10/2026, Ronan: "a comissão é o mesmo valor vendido, essa informação está errada, tem que colocar conforme o percentual
+    # que vamos destinar a comissão" — comissão = venda de combustível do vendedor em cada posto × o % daquele posto (hoje 0%).
     vs = [{"nome": nomes.get(cr) or ("Crachá …" + cr[-4:]), "posto": max(x["postos"], key=x["postos"].get) if x["postos"] else "",
-           "litros": round(x["litros"], 1), "valor": _r2(x["valor"]), "abastecimentos": x["abastecimentos"], "comissao": None}
+           "litros": round(x["litros"], 1), "valor": _r2(x["valor"]), "abastecimentos": x["abastecimentos"],
+           "comissao": _r2(sum(v * pct.get(str(eid), 0.0) / 100 for eid, v in x["valor_posto"].items()))}
           for cr, x in s["vendedores"].items()]
     vs.sort(key=lambda v: -(v["valor"] or 0))
     sc = s["sem_cracha"]
-    return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "configurada": False, "total": None, "vendedores": vs,
+    return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "configurada": True,
+                    "pct": [[n, pct.get(str(i), 0.0)] for i, n in postos],
+                    "total": _r2(sum(v["comissao"] or 0 for v in vs)), "vendedores": vs,
                     "sem_cracha": {"litros": round(sc[0], 1), "abastecimentos": sc[1]} if sc[1] else None})
 
 

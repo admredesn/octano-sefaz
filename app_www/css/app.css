@@ -408,6 +408,30 @@ img { display: block; max-width: 100%; }
 .var.sobe { color: var(--verde); }
 .var.desce { color: #B42318; }
 .var.igual { color: var(--mut); }
+/* Comparar períodos lado a lado (23/10/2026): período escolhido | comparado | variação */
+.cmp3-cab, .cmp3-l .nums { display: grid; grid-template-columns: 1fr 1fr 70px; gap: 8px; align-items: baseline; text-align: right; }
+.cmp3-cab { padding: 12px 16px 8px; font-size: .72rem; font-weight: 650; color: var(--mut); text-transform: uppercase; letter-spacing: .04em; }
+.cmp3-cab span:first-child { color: var(--azul); }
+.cmp3-l { padding: 9px 16px 10px; border-top: 1px solid var(--borda); }
+.cmp3-l .rot { color: var(--mut); font-size: .8rem; margin-bottom: 2px; }
+.cmp3-l .nums { font-variant-numeric: tabular-nums; }
+.cmp3-l .nums b { font-weight: 700; }
+.cmp3-l .nums span:not(.var) { color: var(--mut); font-size: .9rem; }
+.cmp3-l .nums .var { font-size: .84rem; }
+/* Horário × funcionário (23/10/2026): mapa de calor, uma cor só (azul claro = pouco, escuro = muito) */
+.mapa { padding: 10px 12px 12px; }
+.mapa-l { display: grid; grid-template-columns: 84px repeat(var(--cols), 1fr) 38px; gap: 2px; align-items: center; width: 100%;
+          border: 0; background: none; padding: 1px 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.mapa-l .n { font-size: .74rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 4px; }
+.mapa-l .tot { font-size: .72rem; color: var(--mut); text-align: right; font-variant-numeric: tabular-nums; }
+.mapa-cab { cursor: default; }
+.mapa-cab .h { font-size: .62rem; color: var(--mut); white-space: nowrap; overflow: visible; }
+.mapa .q { display: block; height: 18px; border-radius: 3px; background: var(--fundo); }
+.mapa .q.t1 { background: #D3E0EC; } .mapa .q.t2 { background: #A9C1D8; } .mapa .q.t3 { background: #6F93B6; }
+.mapa .q.t4 { background: #335C86; } .mapa .q.t5 { background: #06253E; }
+.mapa-leg { display: flex; align-items: center; justify-content: flex-end; gap: 3px; margin-top: 8px; font-size: .7rem; color: var(--mut); }
+.mapa-leg .q { width: 14px; height: 10px; }
+.mapa-leg span { margin: 0 3px; }
 .est .difs { display: flex; justify-content: space-between; gap: 8px; font-size: .78rem; color: var(--mut); margin-top: 6px; }
 .est .difs b { color: var(--txt); font-weight: 650; font-variant-numeric: tabular-nums; }
 .est .difs .alerta b, .est .difs b.alerta { color: #B42318; }

@@ -113,6 +113,34 @@ function eqvColunas(pontos, fmt) {
   }).join("")}</div><div class="colunas-rot">${pontos.map(p => `<span>${esc(p[0])}</span>`).join("")}</div></div>`;
 }
 
+// horário × funcionário (23/10/2026, Ronan: "um gráfico que mostra por horário e funcionário"): uma linha por vendedor, uma
+// coluna por hora, do azul claro (pouco) ao escuro (muito). O quadrinho é pequeno para o dedo: tocar na LINHA abre as horas
+// daquele vendedor em colunas, com os números.
+function eqvMapa(vend, ini, fim) {
+  const horas = [];
+  for (let h = ini; h <= fim; h++) horas.push(h);
+  const max = Math.max(1, ...vend.flatMap(v => horas.map(h => v[1][h] || 0)));
+  const tom = x => (x > 0 ? Math.min(5, Math.ceil(x / max * 5)) : 0);
+  EQV.mapa = { vend, ini, fim };
+  return `<div class="card mapa" style="--cols:${horas.length}">
+    <div class="mapa-l mapa-cab"><span class="n"></span>${horas.map(h => `<span class="h">${h % 3 === 0 ? h + "h" : ""}</span>`).join("")}<span class="tot">L</span></div>
+    ${vend.map((v, i) => `<button class="mapa-l" onclick="eqvMapaVendedor(${i})"><span class="n">${esc(v[0])}</span>${horas.map(h => `<i class="q t${tom(v[1][h] || 0)}"></i>`).join("")}<span class="tot">${num(Math.round(v[2]))}</span></button>`).join("")}
+    <div class="mapa-leg"><span>menos</span>${[1, 2, 3, 4, 5].map(t => `<i class="q t${t}"></i>`).join("")}<span>mais litros</span></div></div>`;
+}
+function eqvMapaVendedor(i) {
+  const m = EQV.mapa, v = m && m.vend[i];
+  if (!v) return;
+  const pontos = [];
+  for (let h = m.ini; h <= m.fim; h++) pontos.push([h % 3 === 0 ? h + "h" : "", v[1][h] || 0]);
+  const com = pontos.map((p, k) => [m.ini + k, p[1]]).filter(p => p[1] > 0);
+  const pico = com.reduce((a, b) => (b[1] > a[1] ? b : a), com[0] || [0, 0]);
+  folha(`<h2 style="font-size:1.15rem">${esc(v[0])}</h2>
+    <div style="color:var(--mut);margin:4px 0 10px">${num(Math.round(v[2]))} L no período${com.length ? " · pico às " + pico[0] + "h (" + num(Math.round(pico[1])) + " L)" : ""}</div>
+    ${eqvColunas(pontos, x => num(Math.round(x)) + " L")}
+    <div class="card lista" style="margin-top:10px">${com.map(p => `<div class="par" style="padding:8px 14px"><span>${p[0]}h</span><b>${num(Math.round(p[1]))} L</b></div>`).join("")}</div>
+    <button class="btn sec" style="margin-top:12px" onclick="fecharFolha()">Fechar</button>`);
+}
+
 // ================================================================ VENDAS
 async function telaEqVendas() {
   const eu = await eqEu();
@@ -150,6 +178,12 @@ async function telaEqVendas() {
     const pico = comHora.reduce((m, h) => (h[1] > m[1] ? h : m), comHora[0]);
     colHoras = eqvColunas(faixa, v => num(Math.round(v)) + " L") + `<div class="vazio" style="padding:6px 2px 0">Pico às ${pico[0]}h. Litros abastecidos em cada hora${varios ? ", somando os dias do período" : ""}.</div>`;
   }
+  const vendHora = (c.por_vendedor_hora || []).filter(v => _n(v[2]));
+  let mapa = "";
+  if (vendHora.length && comHora.length) {
+    const ini = Math.max(0, Math.min(...comHora.map(h => +h[0])) - 1), fim = Math.min(23, Math.max(...comHora.map(h => +h[0])) + 1);
+    mapa = eqvMapa(vendHora, ini, fim) + `<div class="vazio" style="padding:6px 2px 0">Litros de cada vendedor (crachá na bomba) em cada hora${varios ? ", somando os dias do período" : ""}. Toque no nome para ver as horas.</div>`;
+  }
   const prodGrade = _grade([
     _n(pr.qtd) && _celula("Itens vendidos", num(pr.qtd)),
     _n(pr.valor) && _celula("Valor", brl(pr.valor)),
@@ -165,6 +199,7 @@ async function telaEqVendas() {
     ${sec("Combustível", combGrade)}
     ${sec("Por combustível", combBarras)}
     ${sec("Por horário", colHoras)}
+    ${sec("Por horário e funcionário", mapa)}
     ${sec("Loja", prodGrade + (top ? '<div style="height:10px"></div>' + top : ""), top ? '<span style="color:var(--mut);font-size:.8rem">mais vendidos</span>' : "")}
     ${sec("Formas de pagamento", formasB)}
     <div class="secao"><div class="blocos">
@@ -228,9 +263,10 @@ async function telaEqComparativo() {
     <div class="secao" style="padding-top:12px"><div class="secao-tit"><h2>Comparar com</h2></div>
       <div class="chips" style="padding-top:0">${CMP.map(x => `<button class="chip ${EQV.cmp === x[0] ? "on" : ""}" onclick="${x[0] === "custom" ? "eqvEscolherDatas('cmp')" : `EQV.cmp='${x[0]}';telaEqComparativo()`}">${x[1]}</button>`).join("")}</div>
       <div class="per-txt">${esc(eqvRotulo(b))}</div></div>
-    <div class="secao">${linhas.length ? `<div class="card"><div class="cmp-cab"><span>${esc(_dBr(a.de) + (a.de !== a.ate ? " a " + _dBr(a.ate) : ""))}</span><span>× ${esc(_dBr(b.de) + (b.de !== b.ate ? " a " + _dBr(b.ate) : ""))}</span></div>
-      ${linhas.map(l => `<div class="cmp-l"><span class="rot">${l[0]}</span><div class="dir"><div><b>${_n(A[l[1]]) ? l[2](A[l[1]]) : "—"}</b>${vari(A[l[1]], B[l[1]])}</div>
-        <div class="antes">${_n(B[l[1]]) ? l[2](B[l[1]]) : "—"}</div></div></div>`).join("")}</div>`
+    <div class="secao">${linhas.length ? `<div class="card cmp3">
+      <div class="cmp3-cab"><span>${esc(_dBr(a.de) + (a.de !== a.ate ? " a " + _dBr(a.ate) : ""))}</span><span>${esc(_dBr(b.de) + (b.de !== b.ate ? " a " + _dBr(b.ate) : ""))}</span><span>Variação</span></div>
+      ${linhas.map(l => `<div class="cmp3-l"><div class="rot">${l[0]}</div><div class="nums"><b>${_n(A[l[1]]) ? l[2](A[l[1]]) : "—"}</b><span>${_n(B[l[1]]) ? l[2](B[l[1]]) : "—"}</span>${vari(A[l[1]], B[l[1]])}</div></div>`).join("")}</div>
+      <div class="vazio" style="padding:6px 2px 0">Variação: quanto o período escolhido (1ª coluna) subiu ou caiu em relação ao comparado (2ª coluna).</div>`
       : '<div class="card vazio" style="padding:16px">Sem vendas nos dois períodos.</div>'}</div>
     ${eqPode("ver_litros") ? `<div class="secao" id="cmp-meses"><div class="secao-tit"><h2>Litros por mês</h2></div><div class="sk" style="height:150px"></div></div>` : ""}
   </div>`;
@@ -320,14 +356,19 @@ async function telaEqComissao() {
   if (!r.ok) { eqvErro("Comissão", true, r, telaEqComissao); return; }
   EQV.postos = r.postos || EQV.postos;
   const vs = Array.isArray(r.vendedores) ? r.vendedores : [];
-  const temRegra = !!r.configurada;
+  // 23/10/2026, Ronan: a comissão é o % da venda (tela Comissões do retaguarda, por posto), não o valor vendido. Hoje 0% = R$ 0,00.
+  const pcts = Array.isArray(r.pct) ? r.pct : [], difs = [...new Set(pcts.map(x => Number(x[1]) || 0))];
+  const pctTxt = !pcts.length ? "" : difs.length === 1 ? _pct(difs[0]) + " da venda de combustível"
+    : pcts.map(x => esc(String(x[0]).replace(/^Posto /i, "")) + " " + _pct(x[1])).join(" · ");
+  const zerada = difs.length === 1 && difs[0] === 0;
   el().innerHTML = `<div class="tela">${topoSimples("Comissão", true)}${eqvFiltros(telaEqComissao)}
-    ${temRegra ? "" : `<div class="secao" style="padding-top:12px"><div class="aviso-info"><span class="ic">${ICO.moeda(18)}</span><div>A regra de comissão ainda não foi definida. Por enquanto a tela mostra quanto cada vendedor vendeu; o valor da comissão aparece aqui quando a regra for cadastrada.</div></div></div>`}
-    ${temRegra && _n(r.total) ? `<div class="secao" style="padding-top:12px"><div class="card heroi"><div class="rot">Comissão no período</div><div class="val">${brl(r.total)}</div></div></div>` : ""}
+    <div class="secao" style="padding-top:12px"><div class="card heroi"><div class="rot">Comissão no período</div><div class="val">${brl(r.total || 0)}</div>
+      <div class="s">${pctTxt}</div></div></div>
+    ${zerada ? `<div class="secao"><div class="aviso-info"><span class="ic">${ICO.moeda(18)}</span><div>O percentual de comissão do combustível está em 0%, por isso a comissão sai zerada. Ele é definido no retaguarda, em Comissões.</div></div></div>` : ""}
     <div class="secao"><div class="secao-tit"><h2>Vendedores</h2><span style="color:var(--mut);font-size:.8rem">${num(vs.length)}</span></div>
       ${vs.length ? `<div class="card lista">${vs.map((v, i) => `<div class="linha"><span class="rank ${i === 0 ? "r1" : ""}">${i + 1}</span>
         <div class="meio"><div class="t">${esc(v.nome)}</div><div class="s">${[_n(v.litros) ? _l(v.litros) : "", _n(v.abastecimentos) ? num(v.abastecimentos) + " abastec." : "", v.posto ? esc(v.posto) : ""].filter(Boolean).join(" · ")}</div></div>
-        <div class="dir">${_n(v.valor) ? brl(v.valor) : ""}<div style="font-size:.76rem;font-weight:600;color:${temRegra ? "var(--verde)" : "var(--mut)"}">${temRegra && _n(v.comissao) ? "comissão " + brl(v.comissao) : "comissão —"}</div></div></div>`).join("")}</div>`
+        <div class="dir">${brl(v.comissao || 0)}<div style="font-size:.76rem;font-weight:500;color:var(--mut)">${_n(v.valor) ? "vendeu " + brl(v.valor) : ""}</div></div></div>`).join("")}</div>`
         : '<div class="card vazio" style="padding:16px">Nenhuma venda com vendedor identificado neste período.</div>'}
       <div class="vazio">O vendedor é quem estava com o crachá na bomba (identificador do frentista).${r.sem_cracha ? ` ${num(r.sem_cracha.abastecimentos)} abastecimento(s) (${_l(r.sem_cracha.litros)}) sem crachá não entram na lista.` : ""}</div></div>
   </div>`;
