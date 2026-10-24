@@ -1198,11 +1198,46 @@ def estoque_do_dia(tanques, primeiras, ultimas, entregas, pista, abertura_ontem)
     return out, _iso_utc(medido)
 
 
+DESCARGA_VIVO_JANELA_MIN = 25       # olha as leituras dos últimos 25 min de cada tanque
+DESCARGA_VIVO_MIN_L = 80            # subiu 80 L ou mais desde o mais baixo da janela (venda só desce; calor mexe poucos litros)
+DESCARGA_VIVO_SUBINDO_L = 8         # e continua subindo: +8 L ou mais nos últimos ~2 min (ou a sonda marcou entrega)
+
+
+def descarga_ao_vivo(ultimas, agora_utc):
+    """PURA. {tanque: {"desde": iso, "litros": int, "volume": int}} dos tanques que estão RECEBENDO combustível agora.
+    23/10/2026, Ronan: "quando descarrega combustível precisamos ver a variação em tempo real". O registro da descarga
+    (oct_sonda_entregas) só chega quando ela termina; aqui é a subida do volume nas leituras de cada minuto (oct_medicoes).
+    ultimas = leituras de hoje em ordem decrescente."""
+    por = {}
+    for m in ultimas:
+        try:
+            n = int(m.get("tanque_numero"))
+        except Exception:
+            continue
+        t, v = _instante(m.get("medido_em")), _num(m.get("volume"))
+        if t and v > 0:
+            por.setdefault(n, []).append((t, v, bool(m.get("entrega_em_progresso"))))
+    out = {}
+    for n, lst in por.items():
+        lst.sort(key=lambda x: x[0])
+        t_fim, v_fim, flag = lst[-1]
+        if (agora_utc - t_fim).total_seconds() > 300:                 # sonda parada há mais de 5 min: não afirma nada
+            continue
+        janela = [x for x in lst if (t_fim - x[0]).total_seconds() <= DESCARGA_VIVO_JANELA_MIN * 60]
+        v_min = min(x[1] for x in janela)
+        t_min = max(x[0] for x in janela if x[1] <= v_min + 5)        # a última leitura ainda "embaixo" = começo da subida
+        antes = [x for x in janela if (t_fim - x[0]).total_seconds() >= 100]
+        subindo = flag or (bool(antes) and v_fim - antes[-1][1] >= DESCARGA_VIVO_SUBINDO_L)
+        if subindo and v_fim - v_min >= DESCARGA_VIVO_MIN_L and t_min < t_fim:
+            out[n] = {"desde": _iso_utc(t_min), "litros": int(round(v_fim - v_min)), "volume": int(round(v_fim))}
+    return out
+
+
 def _estoque_posto(eid):
     def busca():
         hoje = _agora_local().strftime("%Y-%m-%d")
         meia_noite = _utc_do_dia(hoje)
-        base = f"oct_medicoes?select=tanque_numero,volume,altura,medido_em&empresa_id=eq.{eid}&volume=gt.0&altura=gt.0"
+        base = f"oct_medicoes?select=tanque_numero,volume,altura,medido_em,entrega_em_progresso&empresa_id=eq.{eid}&volume=gt.0&altura=gt.0"
         f = {"tanques": _POOL.submit(cp._sget, f"oct_tanques?select=id,numero,combustivel,capacidade&empresa_id=eq.{eid}&ativo=is.true&order=numero"),
              # ~4 leituras por minuto por posto: 200 linhas cobrem com folga a 1ª e a última de cada tanque
              "primeiras": _POOL.submit(cp._sget, f"{base}&medido_em=gte.{meia_noite}&order=medido_em&limit=200"),
@@ -1218,8 +1253,12 @@ def _estoque_posto(eid):
                 ab.setdefault(int(m.get("tanque_numero")), _num(m.get("volume")))
             except Exception:
                 pass
-        return estoque_do_dia(r["tanques"], r["primeiras"], r["ultimas"], _entregas_unicas(r["entregas"]), r["pista"], ab)
-    return _guardado("g-estoque|" + eid, 60, busca)
+        tq, medido = estoque_do_dia(r["tanques"], r["primeiras"], r["ultimas"], _entregas_unicas(r["entregas"]), r["pista"], ab)
+        vivo = descarga_ao_vivo(r["ultimas"], datetime.now(timezone.utc).replace(tzinfo=None))
+        for t in tq:
+            t["descarregando"] = vivo.get(t["numero"])
+        return tq, medido
+    return _guardado("g-estoque|" + eid, 15, busca)           # 15 s: o app atualiza a tela sozinho (descarga ao vivo)
 
 
 @bp_equipe.route("/app/equipe/api/estoque", methods=["GET"])
@@ -1279,7 +1318,7 @@ def _descargas_posto(eid, de, ate):
         r = {k: v.result(timeout=60) for k, v in f.items()}
         nome_tq = {int(_num(t.get("numero"))): _combustivel(t.get("combustivel")) for t in r["tanques"]}
         return _entregas_unicas(r["entregas"]), nome_tq, bool(r["algum"])
-    return _guardado(f"g-desc|{eid}|{de}|{ate}", 120 if ate >= hoje else 1800, busca)
+    return _guardado(f"g-desc|{eid}|{de}|{ate}", 15 if ate >= hoje else 1800, busca)
 
 
 @bp_equipe.route("/app/equipe/api/descargas", methods=["GET"])
@@ -1308,7 +1347,18 @@ def api_descargas():
         print("[app-equipe] descargas:", str(e)[:160])
         return jsonify({"erro": "Não consegui ler as descargas agora. Tente de novo."}), 502
     descargas.sort(key=lambda d: d["inicio"] or "", reverse=True)
-    return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "descargas": descargas, "sem_sonda": sem_sonda,
+    agora = []                                       # descarga acontecendo agora (subida do volume no medidor, ao vivo)
+    if ate >= _agora_local().strftime("%Y-%m-%d"):
+        for eid, nome in postos:
+            try:
+                tq, _ = _estoque_posto(eid)
+            except Exception as e:
+                print(f"[app-equipe] descarga ao vivo {eid}: {str(e)[:120]}")
+                continue
+            for t in tq:
+                if t.get("descarregando"):
+                    agora.append(dict(t["descarregando"], posto=nome, tanque=t["numero"], produto=t["produto"], capacidade=t["capacidade"]))
+    return jsonify({"ok": True, "postos": [[i, n] for i, n in meus], "descargas": descargas, "sem_sonda": sem_sonda, "agora": agora,
                     "resumo": {"descargas": len(descargas), "litros": sum(d["litros"] for d in descargas)}})
 
 

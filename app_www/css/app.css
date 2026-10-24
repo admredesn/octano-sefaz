@@ -418,6 +418,17 @@ img { display: block; max-width: 100%; }
 .cmp3-l .nums b { font-weight: 700; }
 .cmp3-l .nums span:not(.var) { color: var(--mut); font-size: .9rem; }
 .cmp3-l .nums .var { font-size: .84rem; }
+/* Ao vivo (23/10/2026): Estoque e Descargas se atualizam a cada 15 s; descarga em andamento pela subida do medidor */
+.vivo-txt { display: flex; align-items: center; gap: 6px; padding: 8px 18px 0; font-size: .74rem; color: var(--mut); }
+.vivo-txt i, .descarregando .cab i { width: 8px; height: 8px; border-radius: 50%; background: var(--verde); display: inline-block;
+  animation: vivo-pisca 1.6s ease-in-out infinite; }
+@keyframes vivo-pisca { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .vivo-txt i, .descarregando .cab i { animation: none; } }
+.descarregando { margin: 8px 0 4px; padding: 10px 12px; border-radius: 12px; background: var(--verde-fundo); }
+.descarregando .cab { display: flex; justify-content: space-between; align-items: center; gap: 8px; color: var(--verde); }
+.descarregando .cab b { display: flex; align-items: center; gap: 6px; font-size: .86rem; }
+.descarregando .cab span { font-weight: 800; font-variant-numeric: tabular-nums; }
+.descarregando .s { color: var(--txt); font-size: .78rem; margin-top: 2px; }
 /* Horário × funcionário (23/10/2026): tabela nome | horas | total, em litros; o nome fica parado e as horas rolam de lado */
 .tab-horas { padding: 0; overflow: hidden; }
 .tab-horas .rolar { overflow-x: auto; -webkit-overflow-scrolling: touch; }

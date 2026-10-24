@@ -276,6 +276,26 @@ async function eqvMeses() {
     <div class="vazio" style="padding:6px 2px 0">O mês atual vai até hoje.</div>`;
 }
 
+// AO VIVO (23/10/2026, Ronan: "quando descarrega combustível precisamos ver a variação em tempo real"): Estoque e Descargas
+// pedem de novo a cada 15 s enquanto a tela está aberta e o app na frente (a sonda lê a cada ~60 s; o servidor guarda 15 s).
+let EQV_VIVO = null;
+function eqvAoVivo(rota, fn) {
+  if (EQV_VIVO && EQV_VIVO.rota === rota) return;
+  if (EQV_VIVO) clearInterval(EQV_VIVO.t);
+  const vivo = { rota };
+  vivo.t = setInterval(() => {
+    if (location.hash.split("?")[0] !== "#/" + rota) { clearInterval(vivo.t); if (EQV_VIVO === vivo) EQV_VIVO = null; return; }
+    if (!document.hidden) fn();
+  }, 15000);
+  EQV_VIVO = vivo;
+}
+const eqvAoVivoTxt = '<div class="vivo-txt"><i></i>Atualiza sozinho a cada 15 s</div>';
+// "Descarga em andamento": subida do volume no medidor desde `desde` (o registro da descarga só chega quando ela termina)
+function eqvDescarregando(d, posto) {
+  return `<div class="descarregando"><div class="cab"><b><i></i>Descarga em andamento</b><span>+${_l(d.litros)}</span></div>
+    <div class="s">${posto ? esc(posto) + " · " : ""}desde ${horaBr(d.desde)} · tanque agora com ${_l(d.volume)}</div></div>`;
+}
+
 // ================================================================ ESTOQUE: sistema × medidor
 async function telaEqEstoque() {
   const eu = await eqEu();
@@ -292,9 +312,11 @@ async function telaEqEstoque() {
     return `<div class="tanque-linha est ${t.baixo ? "baixo" : ""}"><div class="cab"><span>${esc(t.produto)}${t.numero ? ` <small style="color:var(--mut);font-weight:500">· tanque ${esc(t.numero)}</small>` : ""}</span><span class="dir">${_n(t.medidor) ? _l(t.medidor) : "—"}</span></div>
       <div class="nivel"><i style="width:${pct}%"></i></div>
       <div class="difs"><span>Sistema <b>${_n(t.sistema) ? _l(t.sistema) : "—"}</b></span><span class="${forte ? "alerta" : ""}">Diferença <b>${dif == null ? "—" : (dif > 0 ? "+" : "") + num(Math.round(dif)) + " L"}</b></span><span>Cabe <b>${_n(t.cabe) ? _l(t.cabe) : "—"}</b></span></div>
-      ${_n(t.abertura) ? `<div class="difs" style="margin-top:2px"><span>Abriu com ${_l(t.abertura)} · vendeu ${_l(t.vendido)}${t.entrou ? ` · descarga +${_l(t.entrou)}` : ""}</span></div>` : ""}</div>`;
+      ${_n(t.abertura) ? `<div class="difs" style="margin-top:2px"><span>Abriu com ${_l(t.abertura)} · vendeu ${_l(t.vendido)}${t.entrou ? ` · descarga +${_l(t.entrou)}` : ""}</span></div>` : ""}
+      ${t.descarregando ? eqvDescarregando(t.descarregando) : ""}</div>`;
   };
-  el().innerHTML = `<div class="tela">${topoSimples("Estoque", true)}${eqvFiltros(telaEqEstoque, true)}
+  eqvAoVivo("eq-estoque", telaEqEstoque);
+  el().innerHTML = `<div class="tela">${topoSimples("Estoque", true)}${eqvFiltros(telaEqEstoque, true)}${eqvAoVivoTxt}
     ${postos.length ? postos.map(p => `<div class="secao"><div class="secao-tit"><h2>${esc(p.nome)}</h2><span style="color:var(--mut);font-size:.8rem">${esc(p.medido_em ? "medidor às " + horaBr(p.medido_em) : "sem leitura do medidor")}</span></div>
       <div class="card">${(p.tanques || []).map(tanque).join("") || '<div class="vazio" style="padding:14px 16px">Nenhum tanque cadastrado.</div>'}</div></div>`).join("")
       : '<div class="secao"><div class="card vazio" style="padding:16px">Nenhum posto liberado para o seu perfil.</div></div>'}
@@ -326,7 +348,11 @@ async function telaEqDescargas() {
     <div class="dir">+${_l(d.litros)}</div></div>`;
   const porDia = {};
   ds.forEach(d => { const k = new Date(d.inicio).toLocaleDateString("pt-BR"); (porDia[k] = porDia[k] || []).push(d); });
-  el().innerHTML = `<div class="tela">${topoSimples("Descargas", true)}${eqvFiltros(telaEqDescargas)}
+  const agora = Array.isArray(r.agora) ? r.agora : [];
+  eqvAoVivo("eq-descargas", telaEqDescargas);
+  el().innerHTML = `<div class="tela">${topoSimples("Descargas", true)}${eqvFiltros(telaEqDescargas)}${eqvAoVivoTxt}
+    ${agora.length ? `<div class="secao" style="padding-top:12px"><div class="secao-tit"><h2>Agora</h2></div>
+      <div class="card">${agora.map(a => `<div style="padding:12px 16px 4px"><div class="t" style="font-weight:700">${esc(a.produto)} · tanque ${esc(a.tanque)}</div>${eqvDescarregando(a, varios ? a.posto : "")}</div>`).join("")}</div></div>` : ""}
     <div class="secao" style="padding-top:12px"><div class="card heroi"><div class="rot">Combustível descarregado</div>
       <div class="val">${_l(rs.litros)}</div><div class="s">${num(rs.descargas || 0)} ${rs.descargas === 1 ? "descarga" : "descargas"} no período</div></div></div>
     ${Object.keys(porDia).length ? Object.keys(porDia).map(k => `<div class="secao"><div class="secao-tit"><h2 style="font-size:.95rem">${esc(_diaLongo(porDia[k][0].inicio))}</h2></div>
