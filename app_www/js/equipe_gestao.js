@@ -113,32 +113,22 @@ function eqvColunas(pontos, fmt) {
   }).join("")}</div><div class="colunas-rot">${pontos.map(p => `<span>${esc(p[0])}</span>`).join("")}</div></div>`;
 }
 
-// horário × funcionário (23/10/2026, Ronan: "um gráfico que mostra por horário e funcionário"): uma linha por vendedor, uma
-// coluna por hora, do azul claro (pouco) ao escuro (muito). O quadrinho é pequeno para o dedo: tocar na LINHA abre as horas
-// daquele vendedor em colunas, com os números.
-function eqvMapa(vend, ini, fim) {
+// horário × funcionário (23/10/2026, Ronan: "coloca em linha com o nome, horário e quantidade"): tabela com uma linha por
+// vendedor e uma coluna por hora, em litros. O nome fica parado à esquerda e as horas correm de lado; o maior número de cada
+// vendedor vai em negrito (o pico dele), e a última linha soma a hora.
+function eqvTabelaHoras(vend, ini, fim) {
   const horas = [];
   for (let h = ini; h <= fim; h++) horas.push(h);
-  const max = Math.max(1, ...vend.flatMap(v => horas.map(h => v[1][h] || 0)));
-  const tom = x => (x > 0 ? Math.min(5, Math.ceil(x / max * 5)) : 0);
-  EQV.mapa = { vend, ini, fim };
-  return `<div class="card mapa" style="--cols:${horas.length}">
-    <div class="mapa-l mapa-cab"><span class="n"></span>${horas.map(h => `<span class="h">${h % 3 === 0 ? h + "h" : ""}</span>`).join("")}<span class="tot">L</span></div>
-    ${vend.map((v, i) => `<button class="mapa-l" onclick="eqvMapaVendedor(${i})"><span class="n">${esc(v[0])}</span>${horas.map(h => `<i class="q t${tom(v[1][h] || 0)}"></i>`).join("")}<span class="tot">${num(Math.round(v[2]))}</span></button>`).join("")}
-    <div class="mapa-leg"><span>menos</span>${[1, 2, 3, 4, 5].map(t => `<i class="q t${t}"></i>`).join("")}<span>mais litros</span></div></div>`;
-}
-function eqvMapaVendedor(i) {
-  const m = EQV.mapa, v = m && m.vend[i];
-  if (!v) return;
-  const pontos = [];
-  for (let h = m.ini; h <= m.fim; h++) pontos.push([h % 3 === 0 ? h + "h" : "", v[1][h] || 0]);
-  const com = pontos.map((p, k) => [m.ini + k, p[1]]).filter(p => p[1] > 0);
-  const pico = com.reduce((a, b) => (b[1] > a[1] ? b : a), com[0] || [0, 0]);
-  folha(`<h2 style="font-size:1.15rem">${esc(v[0])}</h2>
-    <div style="color:var(--mut);margin:4px 0 10px">${num(Math.round(v[2]))} L no período${com.length ? " · pico às " + pico[0] + "h (" + num(Math.round(pico[1])) + " L)" : ""}</div>
-    ${eqvColunas(pontos, x => num(Math.round(x)) + " L")}
-    <div class="card lista" style="margin-top:10px">${com.map(p => `<div class="par" style="padding:8px 14px"><span>${p[0]}h</span><b>${num(Math.round(p[1]))} L</b></div>`).join("")}</div>
-    <button class="btn sec" style="margin-top:12px" onclick="fecharFolha()">Fechar</button>`);
+  const tot = horas.map(h => vend.reduce((s, v) => s + (v[1][h] || 0), 0));
+  const cel = (x, pico) => (x > 0 ? `<td class="${pico ? "pico" : ""}">${num(Math.round(x))}</td>` : '<td class="z">–</td>');
+  return `<div class="card tab-horas"><div class="rolar"><table>
+    <thead><tr><th class="n">Funcionário</th>${horas.map(h => `<th>${String(h).padStart(2, "0")}h</th>`).join("")}<th class="tot">Total</th></tr></thead>
+    <tbody>${vend.map(v => {
+      const pico = Math.max(...horas.map(h => v[1][h] || 0));
+      return `<tr><th class="n">${esc(v[0])}</th>${horas.map(h => cel(v[1][h] || 0, (v[1][h] || 0) === pico)).join("")}<td class="tot">${num(Math.round(v[2]))}</td></tr>`;
+    }).join("")}</tbody>
+    <tfoot><tr><th class="n">Total</th>${tot.map(x => `<td>${x > 0 ? num(Math.round(x)) : "–"}</td>`).join("")}<td class="tot">${num(Math.round(vend.reduce((s, v) => s + v[2], 0)))}</td></tr></tfoot>
+  </table></div></div>`;
 }
 
 // ================================================================ VENDAS
@@ -181,8 +171,8 @@ async function telaEqVendas() {
   const vendHora = (c.por_vendedor_hora || []).filter(v => _n(v[2]));
   let mapa = "";
   if (vendHora.length && comHora.length) {
-    const ini = Math.max(0, Math.min(...comHora.map(h => +h[0])) - 1), fim = Math.min(23, Math.max(...comHora.map(h => +h[0])) + 1);
-    mapa = eqvMapa(vendHora, ini, fim) + `<div class="vazio" style="padding:6px 2px 0">Litros de cada vendedor (crachá na bomba) em cada hora${varios ? ", somando os dias do período" : ""}. Toque no nome para ver as horas.</div>`;
+    const ini = Math.min(...comHora.map(h => +h[0])), fim = Math.max(...comHora.map(h => +h[0]));
+    mapa = eqvTabelaHoras(vendHora, ini, fim) + `<div class="vazio" style="padding:6px 2px 0">Litros de cada funcionário (crachá na bomba) em cada hora${varios ? ", somando os dias do período" : ""}. Arraste a tabela para o lado para ver todas as horas; em negrito, a hora em que cada um mais vendeu.</div>`;
   }
   const prodGrade = _grade([
     _n(pr.qtd) && _celula("Itens vendidos", num(pr.qtd)),
