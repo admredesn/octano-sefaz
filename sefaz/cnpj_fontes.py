@@ -269,6 +269,25 @@ def _corrida(c, prazo, exige_ibge):
     return None, any(st == 404 for st, _d in res.values())
 
 
+# 29/10/2026: a BrasilAPI (1a fonte, a que quase sempre responde) NAO traz a inscricao estadual; so' a cnpj.ws
+# traz. A IE so' vinha quando a BrasilAPI caia -- o cadastro do cliente (Pessoas, PDV, NF-e de cupons) ficava sem
+# IE (Ronan: TOP GESTAO 08.913.064/0001-95, a cnpj.ws tem 0023358550010 MG). Achado sem IE: pergunta a IE a' cnpj.ws.
+def _completa_ie(c, dados):
+    if not dados or dados.get("inscricao_estadual") or dados.get("_ie_conferida") or dados.get("_fonte") == "cnpj.ws":
+        return dados
+    url, tmo = next((u, t) for n, u, t, _l in FONTES if n == "cnpj.ws")
+    st, bruto = _get(url.format(c=c), tmo)
+    if st not in (200, 404):
+        return dados                    # cnpj.ws fora ou no limite (3/min): tenta de novo na proxima consulta
+    ws = _de_cnpjws(bruto) if st == 200 else None
+    dados = dict(dados, _ie_conferida=True)
+    if ws and ws.get("inscricao_estadual"):
+        dados["inscricao_estadual"] = ws["inscricao_estadual"]
+        dados["_fonte_ie"] = "cnpj.ws"
+    _guardar(c, dados)
+    return dados
+
+
 def consultar_cnpj(cnpj, prazo=None, validade=None, exige_ibge=False):
     """Devolve (status, dados). status: 200 achou; 404 nenhuma fonte conhece o
     CNPJ (e pelo menos uma respondeu 404); 502 nenhuma fonte respondeu.
@@ -285,7 +304,7 @@ def consultar_cnpj(cnpj, prazo=None, validade=None, exige_ibge=False):
     _ler_disco()
     hit = _CACHE.get(c)
     if hit and time.time() - hit[0] < (validade or _CACHE_SEG) and _serve(hit[1], exige_ibge):
-        return 200, hit[1]
+        return 200, (hit[1] if prazo else _completa_ie(c, hit[1]))   # com prazo (emissao) nao espera pela IE
     viu_404 = False
     if prazo:
         dados, viu_404 = _corrida(c, prazo, exige_ibge)
@@ -301,7 +320,7 @@ def consultar_cnpj(cnpj, prazo=None, validade=None, exige_ibge=False):
             if _serve(dados, exige_ibge):
                 dados["_fonte"] = nome
                 _guardar(c, dados)
-                return 200, dados
+                return 200, _completa_ie(c, dados)
     # ninguem respondeu: o que ja' se sabia desse CNPJ vale mais que nada
     hit = _CACHE.get(c)
     if hit and _serve(hit[1], exige_ibge):
