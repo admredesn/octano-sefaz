@@ -12,14 +12,17 @@
 const PG = { alvo: null, cfg: null, forma: null, planos: null, parcelas: 1, bin: "", pagando: false, timer: null, res: null, carteira: null };
 const PG_SDK = "https://assets.pagseguro.com.br/checkout-sdk-js/rc/dist/browser/pagseguro.min.js";
 
-// chamado pelo botão Pagar (faturas.js): cartão ligado no posto = escolher a forma; senão o Pix de sempre
+// chamado pelo botão Pagar (faturas.js): cartão ligado no posto = escolher a forma; senão o Pix de sempre.
+// ABASTECIMENTO (29/10/2026, bomba.js): tipo "abastecimento" com o id do acionamento; só cartão (o Pix do app baixa título).
 async function pagarEscolher(tipo, id, titulo, valor, posto) {
   let cfg = null;
+  const abast = tipo === "abastecimento";
   if (posto) {
     toast("Abrindo o pagamento…", 1200);
     const r = await api("/cashback/api/cartao/config?posto=" + encodeURIComponent(posto));
-    if (r.ok && r.ativo) cfg = r;
+    if (r.ok && r.ativo && (!abast || r.abastecimento)) cfg = r;
   }
+  if (!cfg && abast) { toast("O pagamento pelo app não está disponível agora. Pague no caixa.", 4500); ir("#/vivo"); return; }
   if (!cfg) return pagarAlvo(tipo === "nota" ? { nota_id: id } : { fatura_id: id }, tipo === "nota" ? "esta compra" : "a fatura");
   pgParar();
   PG.alvo = { tipo, id, titulo, valor: Number(valor || 0), posto };
@@ -46,7 +49,11 @@ function pgGoogleMetodo(g, comToken) {
 // celular com a carteira e um cartão aceito -> {tipo, nome}; senão null (a opção não aparece)
 async function pgCarteiraDisponivel(cfg) {
   const C = pgPluginPay(), cart = (cfg && cfg.carteiras) || {};
-  if (!C) return null;
+  // Google Pay no ambiente de TESTE (só a conta de teste): o motivo de a opção não aparecer vai numa linha da tela (29/10/2026)
+  const teste = !!(cart.google && cart.google.ambiente === "test" && window.Capacitor && window.Capacitor.getPlatform() === "android");
+  const diag = t => { if (teste) PG.carteiraDiag = `Google Pay (teste): ${t} · ${(Intl.DateTimeFormat().resolvedOptions() || {}).timeZone || "?"} · ${navigator.language || "?"}`; };
+  PG.carteiraDiag = "";
+  if (!C) { diag("plugin Pay ausente no app"); return null; }
   try {
     const plat = C.getPlatform();
     if (plat === "ios" && cart.apple) {
@@ -56,9 +63,12 @@ async function pgCarteiraDisponivel(cfg) {
     if (plat === "android" && cart.google) {
       const r = await C.nativePromise("Pay", "isPayAvailable", { google: { environment: cart.google.ambiente,
         isReadyToPayRequest: { apiVersion: 2, apiVersionMinor: 0, allowedPaymentMethods: [pgGoogleMetodo(cart.google, false)] } } });
-      return r && r.available ? { tipo: "GOOGLE_PAY", nome: "Google Pay" } : null;
+      if (r && r.available) return { tipo: "GOOGLE_PAY", nome: "Google Pay" };
+      diag("o Android respondeu " + JSON.stringify(r));
     }
-  } catch (e) { /* sem carteira: segue com cartão e Pix */ }
+  } catch (e) {     /* sem carteira: segue com cartão e Pix */
+    diag("erro " + String((e && e.code) || "") + " " + String((e && e.message) || e));
+  }
   return null;
 }
 
@@ -96,7 +106,7 @@ async function pgPagarCarteira() {
   try {
     res = await C.nativePromise("Pay", "requestPayment", pgCarteiraPedido(valor));
   } catch (e) {
-    return falhou(pgCancelou(e) ? "" : `Não consegui abrir o ${c.nome}. Use o cartão ou o Pix.`);
+    return falhou(pgCancelou(e) ? "" : `Não consegui abrir o ${c.nome}. ${pgAbast() ? "Use o cartão." : "Use o cartão ou o Pix."}`);
   }
   const token = c.tipo === "APPLE_PAY" ? ((res && res.apple) || {}).paymentString || ((res && res.apple) || {}).paymentData
     : (((((res && res.google) || {}).paymentData || {}).paymentMethodData || {}).tokenizationData || {}).token;
@@ -117,7 +127,12 @@ async function pgPagarCarteira() {
 }
 
 function pgParar() { if (PG.timer) { clearInterval(PG.timer); PG.timer = null; } PG.pagando = false; }
-function pgCorpo() { return PG.alvo && PG.alvo.tipo === "nota" ? { nota_id: PG.alvo.id } : { fatura_id: PG.alvo.id }; }
+function pgCorpo() {
+  const t = PG.alvo && PG.alvo.tipo;
+  return t === "nota" ? { nota_id: PG.alvo.id } : t === "abastecimento" ? { acionamento_id: PG.alvo.id } : { fatura_id: PG.alvo.id };
+}
+function pgAbast() { return !!(PG.alvo && PG.alvo.tipo === "abastecimento"); }
+function pgOutraForma() { return pgAbast() ? "pague no caixa" : "use o Pix"; }     // no abastecimento não há Pix aqui
 function pgSalvo() { return PG.forma && PG.forma.indexOf("salvo:") === 0 ? (PG.cfg.salvos || []).find(s => "salvo:" + s.id === PG.forma) : null; }
 function pgBandeira(b) { const s = String(b || "").toLowerCase(); return s === "mastercard" ? "Mastercard" : s === "visa" ? "Visa" : s === "elo" ? "Elo" : s === "amex" ? "Amex" : s === "hipercard" ? "Hipercard" : (s ? s.charAt(0).toUpperCase() + s.slice(1) : "Cartão"); }
 function pgPassos(i) { return `<div class="pg-passos">${[1, 2, 3].map(k => `<i class="${k <= i ? "on" : ""}"></i>`).join("")}</div>`; }
@@ -150,13 +165,14 @@ function pgTelaFormas() {
     ${salvos.map(s => op("salvo:" + s.id, "💳", `${esc(pgBandeira(s.bandeira))} •••• ${esc(s.final)}`,
         `Cartão salvo · só o código de segurança${s.validade ? " · vence " + esc(s.validade) : ""}`)).join("")}
     ${op("novo", "➕", "Outro cartão de crédito", "Digitar os dados · pode salvar para a próxima")}
-    ${op("pix", '<span style="color:var(--verde,#12804A);font-weight:800;font-size:.8rem">PIX</span>', "Pix", "À vista · baixa na hora")}
+    ${pgAbast() ? "" : op("pix", '<span style="color:var(--verde,#12804A);font-weight:800;font-size:.8rem">PIX</span>', "Pix", "À vista · baixa na hora")}
     ${salvos.length && pgSalvo() ? `<button class="link pg-remover" onclick="pgRemoverSalvo(${Number(pgSalvo().id)})">Remover este cartão salvo</button>` : ""}
     <button class="btn${naCarteira ? " pg-btn-carteira" : ""}" id="pg-btn" style="margin-top:14px" onclick="pgContinuar()">${naCarteira
       ? `Pagar ${brl(PG.alvo.valor)} com ${esc(cart.nome)}` : "Continuar"}</button>
     <div class="msg erro" id="pg-msg"></div>
     <p class="pg-nota">${naCarteira ? `Abre o ${esc(cart.nome)} do celular para você confirmar com a digital, o rosto ou a senha. À vista, sem juros.`
       : `Parcelado em até ${Number(PG.cfg.max_parcelas || 6)}x com os juros do cartão por conta de quem paga (parcela mínima ${brl(PG.cfg.parcela_min || 50)}).`}</p>
+    ${PG.carteiraDiag ? `<p class="pg-nota" style="opacity:.75;word-break:break-word">${esc(PG.carteiraDiag)}</p>` : ""}
   </div></div>`;
 }
 
@@ -379,10 +395,10 @@ async function pgPagar() {
 
 function pgResultado(r, falhou) {
   if (r && r.status === "paga") { PG.res = r; PG.pagando = false; ir("#/pagar/ok"); return; }
-  if (r && r.status === "recusada") return falhou(r.erro || "O banco recusou o pagamento. Tente outro cartão ou o Pix.");
+  if (r && r.status === "recusada") return falhou(r.erro || `O banco recusou o pagamento. Tente outro cartão ou ${pgOutraForma()}.`);
   if (r && (r.status === "analise" || (r.http === 409 && r.id))) return pgAcompanhar(r.id, r.aviso || r.erro);
   if (r && r.http === 502) return falhou("Não tivemos resposta do PagBank. Antes de tentar de novo, confira no app do seu banco se a compra não foi aprovada.");
-  return falhou((r && r.erro) || "Não consegui pagar agora. Tente de novo ou use o Pix.");
+  return falhou((r && r.erro) || `Não consegui pagar agora. Tente de novo ou ${pgOutraForma()}.`);
 }
 
 // em análise (ou pagamento já em andamento): acompanha a cada 5 s, por até 3 min
@@ -400,7 +416,7 @@ function pgAcompanhar(id, aviso) {
       pgParar();
       if (btn) { btn.disabled = false; btn.textContent = "Tentar de novo"; }
       if (msg) { msg.className = "msg erro"; msg.textContent = r && r.status === "recusada" ? (r.erro || "O banco recusou o pagamento.")
-        : "O banco ainda não confirmou. Veja o resultado em Faturas daqui a pouco."; }
+        : `O banco ainda não confirmou. Veja o resultado em ${pgAbast() ? "Seu abastecimento" : "Faturas"} daqui a pouco.`; }
     }
   }, 5000);
 }
@@ -414,7 +430,7 @@ function pgTelaOk() {
   el().innerHTML = `<div class="tela">${topoSimples("Pago", false)}<div class="secao" style="padding-top:2px">
     <div class="card" style="text-align:center;padding:18px 16px"><div class="pg-ok">✓</div>
       <div style="font-size:1.15rem;font-weight:800">Pagamento aprovado</div>
-      <div class="s" style="color:var(--mut);margin-top:4px">A baixa já foi feita no sistema.</div></div>
+      <div class="s" style="color:var(--mut);margin-top:4px">${pgAbast() ? "O posto já recebeu. Bom trajeto!" : "A baixa já foi feita no sistema."}</div></div>
     <div class="card pg-linhas">
       <div><span>${esc(PG.alvo.titulo)}</span><b>${brl(r.valor != null ? r.valor : PG.alvo.valor)}</b></div>
       <div><span>Forma</span><span>${esc(pgBandeira(r.bandeira))}${r.final ? " •••• " + esc(r.final) : ""}</span></div>
@@ -423,6 +439,7 @@ function pgTelaOk() {
       ${r.autorizacao ? `<div><span>Autorização</span><span>${esc(r.autorizacao)}</span></div>` : ""}
       <div><span>Data</span><span>${esc(new Date().toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }))}</span></div>
     </div>
-    <button class="btn" style="margin-top:12px" onclick="PG.alvo=null;PG.res=null;ir('#/faturas${posto ? "/" + esc(posto) : ""}')">Voltar às faturas</button>
+    ${pgAbast() ? `<button class="btn" style="margin-top:12px" onclick="PG.alvo=null;PG.res=null;ir('#/vivo')">Ver o abastecimento</button>`
+      : `<button class="btn" style="margin-top:12px" onclick="PG.alvo=null;PG.res=null;ir('#/faturas${posto ? "/" + esc(posto) : ""}')">Voltar às faturas</button>`}
   </div></div>`;
 }

@@ -268,6 +268,8 @@ def _st_assinar(caminho, seg=600):
     if r.status_code >= 400:
         return None
     u = (r.json() or {}).get("signedURL") or (r.json() or {}).get("signedUrl") or ""
+    # link vai para o cliente: endereco publico (ver SUPABASE_URL_PUBLICA, 22/10/2026)
+    url = (os.environ.get("SUPABASE_URL_PUBLICA") or "").strip().rstrip("/") or url
     return (f"{url}/storage/v1{u}" if u.startswith("/") else u) or None
 
 
@@ -1146,6 +1148,19 @@ def api_acionar():
         forma = str(forma_sel.get("cod") or "99")
     elif forma not in [f[0] for f in FORMAS]:
         return jsonify({"erro": "forma de pagamento inválida"}), 400
+    # CARTÃO PELO APP (29/10/2026): o cliente abastece e paga no próprio app quando a bomba termina (cliente_cartao.py);
+    # o núcleo do posto fecha a venda sozinho. Forma fiscal = crédito (03), sem o desconto do app.
+    pagar_app = None
+    if str(d.get("pagar_app") or "") == "cartao":
+        if modo == "desconto" or forma != "03":
+            return jsonify({"erro": "O pagamento pelo app vale com a forma Cartão de crédito."}), 400
+        if not bico:
+            return jsonify({"erro": "Informe o código do bico para pagar pelo app."}), 400
+        import cliente_cartao                 # aqui dentro: cliente_cartao importa este módulo
+        cliente_cartao._marcar_teste(cli)
+        if not cliente_cartao._abast_ligado(empresa):
+            return jsonify({"erro": "O pagamento pelo app ainda não está habilitado neste posto. Escolha outra forma."}), 503
+        pagar_app = "cartao"
     # CHAVE GERAL do cashback. 05/10/2026 (app Postos SN): o acionamento também IDENTIFICA
     # o cliente na venda, e é isso que dá os PONTOS (1 por R$ 1). Posto com cashback
     # desligado agora aceita o acionamento — só não gera cashback (o PDV já não gera:
@@ -1211,6 +1226,8 @@ def api_acionar():
             reg["cliente_nome"] = f"{conta_prazo['nome']} (por {cli['nome'].split(' ')[0]})"
         if bico:
             reg["bico"] = bico
+        if pagar_app:
+            reg["pagar_app"] = pagar_app
         itens = _sanear_itens(d.get("itens"))
         if itens:
             reg["itens"] = itens
@@ -1263,6 +1280,8 @@ def api_acionar():
         except RuntimeError as e:
             if desc_info and "Could not find the" in str(e):
                 return jsonify({"erro": "Desconto do app indisponível neste momento (falta atualizar o banco)."}), 503
+            if pagar_app and "Could not find the" in str(e):
+                return jsonify({"erro": "Pagamento pelo app indisponível neste momento (falta atualizar o banco)."}), 503
             if "Could not find the" not in str(e) or selfie or desc_info:
                 raise                                    # com selfie/desconto as colunas novas são obrigatórias
             for c in ("bico", "itens", "placa", "km"):   # tabela sem alguma coluna nova
@@ -1518,7 +1537,7 @@ def api_acionamento_live():
     resp = {"ok": True, "acionamento": {k: ac.get(k) for k in
             ("id", "status", "bico", "combustivel", "forma", "criado_em", "venda_numero", "itens", "placa", "km",
              "auth_codigo", "selfie_em", "empresa_id", "modo", "bomba_status", "preco_normal", "preco_desconto",
-             "desconto_litro")}}
+             "desconto_litro", "pagar_app", "pago_app")}}
     bico = ac.get("bico")
 
     # DESCONTO DO APP NA BOMBA: enquanto o núcleo troca o preço, o app NÃO manda abastecer

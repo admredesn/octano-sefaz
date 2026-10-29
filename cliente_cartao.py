@@ -12,9 +12,9 @@ nunca vê o número. Cartão salvo = token do PagBank (card.id); aqui só o id e
 Rotas (login do cliente do app no header Authorization, como o resto do portal):
   GET    /cashback/api/cartao/config?posto=<empresa_id>  -> {ativo, ambiente, env_sdk, public_key, max_parcelas,
                                                             parcela_min, salvos:[{id, bandeira, final, validade}]}
-  POST   /cashback/api/cartao/parcelas {nota_id|fatura_id, bin} -> planos com os juros reais do PagBank
+  POST   /cashback/api/cartao/parcelas {nota_id|fatura_id|acionamento_id, bin} -> planos com os juros reais do PagBank
   POST   /cashback/api/cartao/sessao3ds                  -> {session, env} para o SDK fazer o 3DS no celular
-  POST   /cashback/api/cartao/pagar {nota_id|fatura_id, parcelas, encrypted, bin, titular, salvar,
+  POST   /cashback/api/cartao/pagar {nota_id|fatura_id|acionamento_id, parcelas, encrypted, bin, titular, salvar,
                                      | cartao_salvo_id, cvv,   auth3ds_id
                                      | carteira:{tipo: GOOGLE_PAY|APPLE_PAY, token}}  -> {id, status, ...}
   GET    /cashback/api/cartao/<id>                       -> estado (reconsulta o PagBank se ficou "em análise")
@@ -39,6 +39,17 @@ CONTA DE TESTE NO SANDBOX com o servidor em produção (28/10/2026, Ronan: "o de
   CARTAO_SANDBOX_CPFS    = CPFs (só dígitos, vírgula) cuja conta do app usa o PagBank SANDBOX no cartão e na carteira
   CARTAO_SANDBOX_TITULOS = ids das compras/faturas DE TESTE que essas contas podem pagar no sandbox. Qualquer outro título
                            é recusado: pagar uma nota de verdade no sandbox daria baixa sem dinheiro.
+
+ABASTECIMENTO (29/10/2026, Ronan: "colocar a opção de pagamento via cartão nos abastecimentos também, igual funciona no
+pagamento de fatura"; decidiu: paga DEPOIS de abastecer e a venda FECHA SOZINHA no PDV). No "Vou abastecer" o cliente
+escolhe "Cartão pelo app" (acionamento com pagar_app='cartao'); quando a bomba termina, paga aqui com {acionamento_id}:
+o valor é o do abastecimento que a bomba gravou (oct_pdv_abastecimentos), e a cobrança guarda acionamento_id e
+abastecimento_id. Aprovado = oct_cartao_lancar_baixa marca o acionamento como pago; quem fecha a venda é o NÚCLEO do posto
+(pdv2/app_pago.py), que lê esta tabela e casa o pagamento com o abastecimento. Sem Pix aqui (o Pix do app só baixa título).
+Liga à parte do título, porque o cliente abastece ANTES de pagar:
+  CARTAO_ABASTECIMENTO_ATIVO   = lista de empresa_id ou all (vazio = ninguém vê a opção)
+  CARTAO_SANDBOX_ABASTECIMENTO = 1 deixa a conta de teste pagar abastecimento no sandbox (abastecimento DE VERDADE pago
+                                 sem dinheiro: só num teste combinado com o posto)
 """
 import json
 import os
@@ -108,6 +119,16 @@ def _ligado(empresa_id):
     if not v or not _token():
         return False
     return v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",")]
+
+
+def _abast_ligado(empresa_id):
+    """Cartão pelo app no ABASTECIMENTO neste posto, para esta conta (a conta de teste só com CARTAO_SANDBOX_ABASTECIMENTO)."""
+    if not _ligado(empresa_id):
+        return False
+    if has_request_context() and getattr(g, "cartao_teste", False):
+        return os.environ.get("CARTAO_SANDBOX_ABASTECIMENTO", "").strip().lower() in ("1", "true", "sim")
+    v = os.environ.get("CARTAO_ABASTECIMENTO_ATIVO", "").strip().lower()
+    return v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",") if x.strip()]
 
 
 def _carteiras():
@@ -201,9 +222,13 @@ def _planos(valor, bin6):
 
 # ------------------------------------------------------------------ o que vai ser pago
 def _alvo(corpo, cli):
-    """(emp, cliente_id, valor, {nota_prazo_id|fatura_id}, filtro, descricao) ou (None, ..., erro_resposta)."""
+    """(emp, cliente_id, valor, {nota_prazo_id|fatura_id|acionamento_id+abastecimento_id}, filtro, descricao) ou
+    (None, erro_resposta)."""
     nid = cp._uuid_ok(corpo.get("nota_id"))
     fid = cp._uuid_ok(corpo.get("fatura_id"))
+    aid = cp._uuid_ok(corpo.get("acionamento_id"))
+    if aid and not nid and not fid:
+        return _alvo_abastecimento(aid, cli)
     if bool(nid) == bool(fid):
         return None, (jsonify({"erro": "Informe a compra ou a fatura a pagar."}), 400)
     if getattr(g, "cartao_teste", False) and str(nid or fid).lower() not in _lista_env("CARTAO_SANDBOX_TITULOS"):
@@ -226,6 +251,41 @@ def _alvo(corpo, cli):
         return None, (jsonify({"erro": "Esta fatura não está em aberto."}), 409)
     return dict(emp=f["empresa_id"], cliente=f["cliente_id"], valor=_saldo_fatura(f), campo={"fatura_id": fid},
                 filtro=f"fatura_id=eq.{fid}", desc=f"Fatura {f.get('numero') or ''}".strip()), None
+
+
+def abastecimento_do_acionamento(ac):
+    """O abastecimento do bico acionado, gravado DEPOIS do acionamento (a mesma busca do espelho ao vivo do app)."""
+    if not ac.get("bico"):
+        return None
+    rows = cp._sget(f"oct_pdv_abastecimentos?empresa_id=eq.{ac['empresa_id']}&bico=eq.{ac['bico']}"
+                    f"&data_abast=gte.{rq.utils.quote(cp._hora_do_posto(ac['criado_em']), safe='')}"
+                    "&select=id,litros,valor,status,data_abast&order=data_abast.desc&limit=1")
+    return rows[0] if rows else None
+
+
+def _alvo_abastecimento(aid, cli):
+    """Abastecimento acionado no app com "Cartão pelo app": só o dono, só uma vez e só enquanto o caixa não fechou."""
+    rows = cp._sget(f"oct_cashback_acionamentos?id=eq.{aid}&cliente_cpf=eq.{cli['cpf']}&limit=1"
+                    "&select=id,empresa_id,status,bico,criado_em,pagar_app,pago_app,pessoa_id")
+    ac = rows[0] if rows else None
+    if not ac:
+        return None, (jsonify({"erro": "Abastecimento não encontrado."}), 404)
+    if ac.get("pagar_app") != "cartao":
+        return None, (jsonify({"erro": "Este abastecimento não foi marcado para pagar no app. Pague no caixa."}), 409)
+    if ac.get("pago_app"):
+        return None, (jsonify({"erro": "Este abastecimento já foi pago."}), 409)
+    if ac.get("status") != "aguardando":
+        return None, (jsonify({"erro": "Este abastecimento já foi fechado no caixa."}), 409)
+    if not _abast_ligado(ac["empresa_id"]):
+        return None, (jsonify({"erro": "O cartão pelo app ainda não está habilitado neste posto. Pague no caixa."}), 503)
+    ab = abastecimento_do_acionamento(ac)
+    if not ab:
+        return None, (jsonify({"erro": "O abastecimento ainda não chegou ao sistema. Espere uns segundos e tente de novo."}), 409)
+    if (ab.get("status") or "pendente") != "pendente":
+        return None, (jsonify({"erro": "Este abastecimento já foi fechado no caixa."}), 409)
+    return dict(emp=ac["empresa_id"], cliente=ac.get("pessoa_id"), valor=round(float(ab.get("valor") or 0), 2),
+                campo={"acionamento_id": aid, "abastecimento_id": ab["id"]}, filtro=f"acionamento_id=eq.{aid}",
+                desc=f"Abastecimento bico {ac.get('bico')}"), None
 
 
 def _so_digitos(s):
@@ -253,7 +313,8 @@ def api_config():
                       "&select=id,bandeira,final,validade&order=usado_em.desc.nullslast,id.desc&limit=5")
     return jsonify({"ok": True, "ativo": True, "ambiente": _ambiente(), "env_sdk": "PROD" if _ambiente() == "producao" else "SANDBOX",
                     "sdk_url": SDK_URL, "public_key": _public_key(), "max_parcelas": _max_parcelas(),
-                    "parcela_min": _parcela_min(), "salvos": salvos or [], "carteiras": _carteiras()}), 200, SEM_CACHE
+                    "parcela_min": _parcela_min(), "salvos": salvos or [], "carteiras": _carteiras(),
+                    "abastecimento": _abast_ligado(emp)}), 200, SEM_CACHE
 
 
 @bp_cartao.route("/cashback/api/cartao/parcelas", methods=["POST"])

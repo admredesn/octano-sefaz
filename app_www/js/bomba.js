@@ -147,7 +147,7 @@ async function telaAcionar() {
   const aplicarCodigo = () => {           // código válido: o posto da lista acompanha
     const l = lido();
     if (l.posto && l.posto !== $("a-posto").value) {
-      $("a-posto").value = l.posto; S.posto = l.posto; LS.set("psn_posto", S.posto); prazo();
+      $("a-posto").value = l.posto; S.posto = l.posto; LS.set("psn_posto", S.posto); prazo(); cartaoApp();
     }
     return l;
   };
@@ -177,7 +177,9 @@ async function telaAcionar() {
     $("a-btn").textContent = desc ? "Aplicar o desconto na bomba" : "Avisar o caixa";
     $("a-rodape").innerHTML = desc
       ? "O preço baixa <b>só neste bico e só para você</b> e volta ao normal quando terminar. Com o desconto, este abastecimento não gera cashback."
-      : "O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.";
+      : $("a-forma").value === "app"
+        ? "Quando a bomba terminar, você paga <b>aqui no app</b> com o cartão (dá para parcelar) e o posto já recebe. A compra vale <b>1 ponto a cada R$ 1</b>."
+        : "O caixa recebe o seu nome na hora. A compra vale <b>1 ponto a cada R$ 1</b>.";
   };
   const descontoBico = async () => {
     const { bico: b, posto } = lido();
@@ -219,16 +221,28 @@ async function telaAcionar() {
     if (!r.prazo && op) op.remove();
     $("a-prazo-msg").textContent = r.prazo ? "" : (r.motivo ? "A prazo: " + r.motivo : "");
   };
+  // CARTÃO PELO APP (29/10/2026, Ronan: "colocar a opção de pagamento via cartão nos abastecimentos também, igual
+  // funciona no pagamento de fatura"): posto com o cartão pelo app ganha a forma "Cartão pelo app". O cliente abastece e
+  // paga aqui quando a bomba termina (a tela de pagar da fatura, sem Pix); o PDV do posto fecha a venda sozinho.
+  const cartaoApp = async () => {
+    const posto = $("a-posto").value, sel = $("a-forma");
+    if (!posto) return;
+    const r = await api("/cashback/api/cartao/config?posto=" + encodeURIComponent(posto));
+    if (!$("a-posto") || $("a-posto").value !== posto) return;          // trocou de posto (ou de tela) no meio
+    const op = sel.querySelector('option[value="app"]'), vale = !!(r.ok && r.ativo && r.abastecimento);
+    if (vale && !op) sel.querySelector('option[value="04"]').insertAdjacentHTML("afterend", '<option value="app">Cartão pelo app (paga aqui)</option>');
+    if (!vale && op) { if (sel.value === "app") sel.value = "17"; op.remove(); modo(); }
+  };
   $("a-forma").addEventListener("change", () => { _formaTocada = true; modo(); });
   $("a-posto").onchange = () => {
     S.posto = $("a-posto").value; LS.set("psn_posto", S.posto);
     const v = soDigitos($("a-bico").value);              // código de outro posto no campo: não vale para este
     if (v.length === 4 && lido().posto !== S.posto) $("a-bico").value = "";
-    infoBico(); prazo();
+    infoBico(); prazo(); cartaoApp();
   };
   let t = null;
   $("a-bico").addEventListener("input", () => { clearTimeout(t); t = setTimeout(infoBico, 400); });
-  infoBico(); prazo();
+  infoBico(); prazo(); cartaoApp();
   $("a-btn").onclick = async () => {
     const l = aplicarCodigo(), m = $("a-msg"), posto = $("a-posto").value, forma = $("a-forma").value, bico = l.bico;
     m.className = "msg erro";
@@ -241,7 +255,7 @@ async function telaAcionar() {
                                                       modo: "desconto", forma_id: formaDesc().id });
       if (!rd.ok) { m.className = "msg erro"; m.textContent = rd.erro || "Não consegui pedir o desconto."; return; }
       S.bico = "";
-      acompanhar();
+      ir("#/vivo");
       return;
     }
     let selfie = null;
@@ -258,15 +272,23 @@ async function telaAcionar() {
       if (!selfie) { m.textContent = "Sem a foto, a compra a prazo não é autorizada pelo app."; return; }
     }
     m.className = "msg"; m.textContent = "Avisando o caixa…";
-    const r = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value, forma, selfie });
+    const app = forma === "app";                    // cartão pelo app: forma fiscal crédito + paga no app depois
+    const r = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value, forma: app ? "03" : forma,
+                                                   pagar_app: app ? "cartao" : undefined, selfie });
     if (!r.ok) { m.className = "msg erro"; m.textContent = r.erro || "Não consegui avisar o caixa."; return; }
     S.bico = "";
     if (r.aviso) toast(r.aviso, 4500);
-    acompanhar();
+    ir("#/vivo");
   };
 }
 
 // ---------------------------------------------------------------- ao vivo
+// #/vivo (29/10/2026): a tela ganhou endereço próprio para o cartão pelo app voltar a ela depois de pagar
+TELAS.vivo = () => acompanhar();
+function pagoAppTxt(p) {
+  return `${pgBandeira(p.bandeira)}${p.final ? " •••• " + p.final : ""}${Number(p.parcelas || 1) > 1 ? " em " + Number(p.parcelas) + "x" : ""}`;
+}
+
 function acompanhar() {
   el().innerHTML = `<div class="tela">${topoSimples("Seu abastecimento", false)}
     <div class="secao"><div class="card vivo">
@@ -301,7 +323,8 @@ function acompanhar() {
         ir("#/acionar");
       };
     };
-    if (acoes && !String(r.fase || "").startsWith("desconto_")) acoes.innerHTML = "";
+    const aPagar = r.fase === "concluido" && ac.pagar_app && !ac.pago_app;     // cartão pelo app: botão Pagar fica
+    if (acoes && !String(r.fase || "").startsWith("desconto_") && !aPagar) acoes.innerHTML = "";
     if (r.fase === "desconto_aplicando") {
       fase.textContent = "⏳ Aplicando o desconto no bico " + (ac.bico || "?"); n.textContent = brl(ac.preco_desconto) + "/L";
       d.textContent = "Aguarde uns segundos — ainda não tire o bico.";
@@ -336,11 +359,26 @@ function acompanhar() {
       d.textContent = (lv.valor != null ? brl(lv.valor) + " · " : "") + (lv.combustivel || "");
     } else if (r.fase === "concluido") {
       const a = r.abastecimento || {};
-      const litros = Number(a.litros || 0);
+      const litros = Number(a.litros || 0), valor = Number(a.valor || a.valor_total || 0);
+      const lt = litros.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " L";
       fase.textContent = "✅ Abastecimento concluído";
-      n.textContent = brl(a.valor || a.valor_total);
-      d.textContent = litros.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " L · pague no caixa. "
-        + (desc ? "Você economizou " + brl(litros * Number(ac.desconto_litro || 0)) + "." : "Você ganha " + num(Math.floor(a.valor || a.valor_total || 0)) + " pontos.");
+      n.textContent = brl(valor);
+      if (ac.pagar_app && ac.pago_app) {
+        fase.textContent = "✅ Pago no app";
+        d.textContent = `${lt} · ${pagoAppTxt(ac.pago_app)}. O posto já recebeu. Bom trajeto!`;
+      } else if (ac.pagar_app) {
+        d.textContent = `${lt} · pague aqui no app. Você ganha ${num(Math.floor(valor))} pontos.`;
+        if (acoes && !document.getElementById("v-pagar")) {
+          acoes.innerHTML = `<button class="btn" id="v-pagar">Pagar ${esc(brl(valor))} no app</button>`;
+          document.getElementById("v-pagar").onclick = () => {
+            pararVivo();
+            pagarEscolher("abastecimento", ac.id, "Abastecimento · bico " + (ac.bico || "?"), valor, ac.empresa_id);
+          };
+        }
+      } else {
+        d.textContent = lt + " · pague no caixa. "
+          + (desc ? "Você economizou " + brl(litros * Number(ac.desconto_litro || 0)) + "." : "Você ganha " + num(Math.floor(valor)) + " pontos.");
+      }
     } else if (r.fase === "cashback") {
       const c = r.cashback || {};
       fase.textContent = c.status === "pago" ? "🎉 Cashback pago no seu Pix" : "🕐 Cashback a caminho";
@@ -348,8 +386,9 @@ function acompanhar() {
       d.textContent = "Obrigado pela preferência!";
       if (c.status === "pago") pararVivo();
     } else if (r.fase === "usado") {
-      fase.textContent = "🧾 Compra registrada"; n.textContent = ac.venda_numero ? "cupom " + ac.venda_numero : "✓";
-      d.textContent = "Os pontos entram em alguns minutos. Bom trajeto!";
+      fase.textContent = ac.pago_app ? "✅ Pago no app" : "🧾 Compra registrada";
+      n.textContent = ac.venda_numero ? "cupom " + ac.venda_numero : ac.pago_app ? brl(ac.pago_app.valor) : "✓";
+      d.textContent = (ac.pago_app ? pagoAppTxt(ac.pago_app) + ". " : "") + "Os pontos entram em alguns minutos. Bom trajeto!";
       pararVivo();
     } else { fase.textContent = "Acionamento " + r.fase; pararVivo(); }
   };
