@@ -15,7 +15,8 @@ Rotas (login do cliente do app no header Authorization, como o resto do portal):
   POST   /cashback/api/cartao/parcelas {nota_id|fatura_id, bin} -> planos com os juros reais do PagBank
   POST   /cashback/api/cartao/sessao3ds                  -> {session, env} para o SDK fazer o 3DS no celular
   POST   /cashback/api/cartao/pagar {nota_id|fatura_id, parcelas, encrypted, bin, titular, salvar,
-                                     | cartao_salvo_id, cvv,   auth3ds_id}  -> {id, status, ...}
+                                     | cartao_salvo_id, cvv,   auth3ds_id
+                                     | carteira:{tipo: GOOGLE_PAY|APPLE_PAY, token}}  -> {id, status, ...}
   GET    /cashback/api/cartao/<id>                       -> estado (reconsulta o PagBank se ficou "em análise")
   DELETE /cashback/api/cartao/salvos/<id>                -> tira o cartão salvo do app
 
@@ -25,6 +26,19 @@ LIGA/DESLIGA (Railway, octano-sefaz):
   PAGBANK_TOKEN_SANDBOX / PAGBANK_TOKEN  = token do PagBank de cada ambiente (conta única do grupo)
   CARTAO_MAX_PARCELAS (6) · CARTAO_PARCELA_MIN (50,00)
 Juros: o servidor RECALCULA no PagBank na hora de pagar (o valor que o app mostrou não é confiado).
+
+CARTEIRA DO CELULAR (28/10/2026, Ronan: "puxar o cartão cadastrado no celular"): Google Pay e Apple Pay pelo próprio
+PagBank, À VISTA (a carteira não mostra o BIN antes de pagar, e o PagBank só documenta carteira em 1x). O app nativo
+(plugin @capgo/capacitor-pay) devolve o token da carteira, que vai inteiro em card.wallet.key — quem abre é o PagBank.
+Cada carteira liga sozinha quando a variável dela existe (sufixo _SANDBOX no sandbox):
+  GOOGLE_PAY_GATEWAY_MERCHANT_ID[_SANDBOX] = ID da conta no PagBank (ACCO_…, o PagBank informa)
+  GOOGLE_PAY_MERCHANT_ID                   = ID do Google Pay & Wallet Console (só produção; sem ele o Google Pay fica fora)
+  APPLE_PAY_MERCHANT_ID[_SANDBOX]          = merchant.br.com.redesn.postossn[.sandbox] (certificado do CSR do PagBank)
+
+CONTA DE TESTE NO SANDBOX com o servidor em produção (28/10/2026, Ronan: "o desvio só da conta de teste para o sandbox"):
+  CARTAO_SANDBOX_CPFS    = CPFs (só dígitos, vírgula) cuja conta do app usa o PagBank SANDBOX no cartão e na carteira
+  CARTAO_SANDBOX_TITULOS = ids das compras/faturas DE TESTE que essas contas podem pagar no sandbox. Qualquer outro título
+                           é recusado: pagar uma nota de verdade no sandbox daria baixa sem dinheiro.
 """
 import json
 import os
@@ -33,7 +47,7 @@ import time
 import uuid
 
 import requests as rq
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, g, has_request_context, jsonify, request
 
 import cashback_portal as cp
 from cliente_faturas import (SEM_CACHE, _cliente_ou_401, _contas, _fatura_do_cliente, _log,
@@ -46,7 +60,19 @@ SDK_URL = "https://assets.pagseguro.com.br/checkout-sdk-js/rc/dist/browser/pagse
 
 
 # ------------------------------------------------------------------ configuração
+def _lista_env(nome):
+    return {x.strip().lower() for x in os.environ.get(nome, "").split(",") if x.strip()}
+
+
+def _marcar_teste(cli):
+    """Conta de teste (CARTAO_SANDBOX_CPFS): nesta requisição o cartão e a carteira vão para o sandbox."""
+    cpf = _so_digitos((cli or {}).get("cpf"))
+    g.cartao_teste = bool(cpf) and cpf in {_so_digitos(x) for x in _lista_env("CARTAO_SANDBOX_CPFS")}
+
+
 def _ambiente():
+    if has_request_context() and getattr(g, "cartao_teste", False):
+        return "sandbox"
     return "producao" if os.environ.get("PAGBANK_AMBIENTE", "").strip().lower() in ("producao", "prod", "production") else "sandbox"
 
 
@@ -82,6 +108,39 @@ def _ligado(empresa_id):
     if not v or not _token():
         return False
     return v in ("all", "todos", "1", "true") or str(empresa_id or "").lower() in [x.strip() for x in v.split(",")]
+
+
+def _carteiras():
+    """Google Pay / Apple Pay ligados neste ambiente: {"google": {...}, "apple": {...}} (o app monta o pedido da carteira)."""
+    prod = _ambiente() == "producao"
+    suf = "" if prod else "_SANDBOX"
+    out = {}
+    gw = os.environ.get("GOOGLE_PAY_GATEWAY_MERCHANT_ID" + suf, "").strip()
+    mid = os.environ.get("GOOGLE_PAY_MERCHANT_ID", "").strip()
+    if gw and (mid or not prod):
+        out["google"] = {"ambiente": "production" if prod else "test", "gateway": "pagbank", "gateway_merchant_id": gw,
+                         "merchant_id": mid, "merchant_name": "Rede SN", "bandeiras": ["VISA", "MASTERCARD", "ELO"]}
+    am = os.environ.get("APPLE_PAY_MERCHANT_ID" + suf, "").strip()
+    if am:
+        out["apple"] = {"merchant_id": am, "bandeiras": ["visa", "masterCard"]}   # PagBank: Apple Pay só Visa e Mastercard
+    return out
+
+
+_CARTEIRA_TIPOS = {"GOOGLE_PAY": "google", "APPLE_PAY": "apple"}
+
+
+def _carteira_do_pedido(corpo):
+    """(None, None) sem carteira; ({tipo, token}, None) válida; (None, resposta_de_erro) se veio errada ou desligada."""
+    c = corpo.get("carteira")
+    if not c:
+        return None, None
+    tipo = str((c or {}).get("tipo") or "").upper() if isinstance(c, dict) else ""
+    token = (c or {}).get("token") if isinstance(c, dict) else None
+    if tipo not in _CARTEIRA_TIPOS or not isinstance(token, str) or not token.strip() or len(token) > 20000:
+        return None, (jsonify({"erro": "Pagamento pela carteira do celular inválido. Tente de novo."}), 400)
+    if _CARTEIRA_TIPOS[tipo] not in _carteiras():
+        return None, (jsonify({"erro": "Esta carteira ainda não está habilitada. Use o cartão ou o Pix."}), 503)
+    return {"tipo": tipo, "token": token.strip()}, None
 
 
 # ------------------------------------------------------------------ PagBank
@@ -147,6 +206,8 @@ def _alvo(corpo, cli):
     fid = cp._uuid_ok(corpo.get("fatura_id"))
     if bool(nid) == bool(fid):
         return None, (jsonify({"erro": "Informe a compra ou a fatura a pagar."}), 400)
+    if getattr(g, "cartao_teste", False) and str(nid or fid).lower() not in _lista_env("CARTAO_SANDBOX_TITULOS"):
+        return None, (jsonify({"erro": "Conta de teste: no cartão só a compra de teste pode ser paga. Use o Pix."}), 409)
     if nid:
         rows = cp._sget(f"oct_pdv_notas_prazo?id=eq.{nid}&select=id,empresa_id,cliente_id,valor,status,fatura_id,numero_nfe&limit=1")
         n = rows[0] if rows else None
@@ -184,6 +245,7 @@ def api_config():
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     emp = cp._uuid_ok(request.args.get("posto"))
     if not emp or not _ligado(emp):
         return jsonify({"ok": True, "ativo": False}), 200, SEM_CACHE
@@ -191,7 +253,7 @@ def api_config():
                       "&select=id,bandeira,final,validade&order=usado_em.desc.nullslast,id.desc&limit=5")
     return jsonify({"ok": True, "ativo": True, "ambiente": _ambiente(), "env_sdk": "PROD" if _ambiente() == "producao" else "SANDBOX",
                     "sdk_url": SDK_URL, "public_key": _public_key(), "max_parcelas": _max_parcelas(),
-                    "parcela_min": _parcela_min(), "salvos": salvos or []}), 200, SEM_CACHE
+                    "parcela_min": _parcela_min(), "salvos": salvos or [], "carteiras": _carteiras()}), 200, SEM_CACHE
 
 
 @bp_cartao.route("/cashback/api/cartao/parcelas", methods=["POST"])
@@ -199,6 +261,7 @@ def api_parcelas():
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     corpo = request.get_json(silent=True) or {}
     a, err = _alvo(corpo, cli)
     if err:
@@ -223,6 +286,7 @@ def api_sessao3ds():
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     if not cp._limite_ok("3ds:" + cli["cpf"], 30, 3600):
         return cp._muitas()
     st, j = _pb("POST", "/checkout-sdk/sessions", {}, base=_base_sdk(), timeout=20)
@@ -282,6 +346,7 @@ def api_pagar_cartao():
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     corpo = request.get_json(silent=True) or {}
     a, err = _alvo(corpo, cli)
     if err:
@@ -300,25 +365,41 @@ def api_pagar_cartao():
     if ja:
         return jsonify({"erro": "Este título já tem um pagamento em andamento.", "id": ja[0]["id"], "status": ja[0]["status"]}), 409
 
-    try:
-        n_parc = int(corpo.get("parcelas") or 1)
-    except (TypeError, ValueError):
-        n_parc = 1
-    salvo = _cartao_salvo(corpo.get("cartao_salvo_id"), cli) if corpo.get("cartao_salvo_id") else None
-    encrypted = str(corpo.get("encrypted") or "").strip()
-    if not salvo and not encrypted:
-        return jsonify({"erro": "Informe o cartão."}), 400
-    bin6 = (salvo or {}).get("primeiros") or _so_digitos(corpo.get("bin"))[:6]
-    planos, _m = _planos(a["valor"], bin6) if len(bin6 or "") == 6 else (None, None)
-    plano = next((p for p in planos or [] if p["parcelas"] == n_parc), None)
-    if not plano:
-        return jsonify({"erro": "Parcelamento indisponível para este valor/cartão. Escolha outra opção."}), 422
+    carteira, err = _carteira_do_pedido(corpo)
+    if err:
+        return err
+    if carteira:                                   # Google Pay / Apple Pay: à vista, sem juros
+        # o cliente aprovou na carteira o valor que o app mostrava: se o título mudou, não cobra outro valor
+        try:
+            v_app = round(float(corpo.get("valor")), 2) if corpo.get("valor") is not None else a["valor"]
+        except (TypeError, ValueError):
+            v_app = None
+        if v_app is None or abs(v_app - a["valor"]) > 0.005:
+            v = f"{a['valor']:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return jsonify({"erro": f"O valor deste título agora é R$ {v}. Confira e pague de novo.", "valor": a["valor"]}), 409
+        n_parc, salvo, encrypted = 1, None, ""
+        plano = {"parcelas": 1, "valor_parcela": a["valor"], "total": a["valor"], "juros": 0, "juros_parcelas": 0}
+    else:
+        try:
+            n_parc = int(corpo.get("parcelas") or 1)
+        except (TypeError, ValueError):
+            n_parc = 1
+        salvo = _cartao_salvo(corpo.get("cartao_salvo_id"), cli) if corpo.get("cartao_salvo_id") else None
+        encrypted = str(corpo.get("encrypted") or "").strip()
+        if not salvo and not encrypted:
+            return jsonify({"erro": "Informe o cartão."}), 400
+        bin6 = (salvo or {}).get("primeiros") or _so_digitos(corpo.get("bin"))[:6]
+        planos, _m = _planos(a["valor"], bin6) if len(bin6 or "") == 6 else (None, None)
+        plano = next((p for p in planos or [] if p["parcelas"] == n_parc), None)
+        if not plano:
+            return jsonify({"erro": "Parcelamento indisponível para este valor/cartão. Escolha outra opção."}), 422
 
     # 1) registra ANTES de cobrar (se a resposta do PagBank se perder, a linha fica e dá para conferir)
+    origem = "app-" + carteira["tipo"].lower().replace("_", "-") if carteira else "app"     # app-google-pay | app-apple-pay
     nova = cp._spost("oct_cartao_cobrancas", dict(a["campo"], empresa_id=a["emp"], cliente_id=a["cliente"], cpf_app=cli["cpf"],
                                                   valor=a["valor"], parcelas=n_parc, juros_cliente=plano["juros"],
                                                   valor_cobrado=plano["total"], status="pedido", ambiente=_ambiente(),
-                                                  cartao_salvo_id=(salvo or {}).get("id"), origem="app"))
+                                                  cartao_salvo_id=(salvo or {}).get("id"), origem=origem))
     cid = (nova or [{}])[0].get("id")
 
     # 2) pedido no PagBank
@@ -326,11 +407,16 @@ def api_pagar_cartao():
     amount = {"value": int(round(plano["total"] * 100)), "currency": "BRL"}
     if plano["juros"] > 0:
         amount["fees"] = {"buyer": {"interest": {"total": int(round(plano["juros"] * 100)), "installments": plano["juros_parcelas"] or n_parc}}}
-    card = ({"id": salvo["pagbank_card_id"], "security_code": _so_digitos(corpo.get("cvv"))[:4]} if salvo
-            else {"encrypted": encrypted, "store": bool(corpo.get("salvar"))})
+    if carteira:                                   # o token da carteira vai inteiro; o PagBank abre (card.wallet)
+        card = {"wallet": {"type": carteira["tipo"], "key": carteira["token"]}}
+    elif salvo:
+        card = {"id": salvo["pagbank_card_id"], "security_code": _so_digitos(corpo.get("cvv"))[:4]}
+    else:
+        card = {"encrypted": encrypted, "store": bool(corpo.get("salvar"))}
     titular = (str(corpo.get("titular") or cli.get("nome") or "").strip().upper()[:60]) or "TITULAR"
-    pm = {"type": "CREDIT_CARD", "installments": n_parc, "capture": True, "soft_descriptor": "REDE SN",
-          "card": card, "holder": {"name": titular, "tax_id": cli["cpf"]}}
+    pm = {"type": "CREDIT_CARD", "installments": n_parc, "capture": True, "soft_descriptor": "REDE SN", "card": card}
+    if not carteira:                               # na carteira o titular vem do próprio cartão do celular
+        pm["holder"] = {"name": titular, "tax_id": cli["cpf"]}
     if corpo.get("auth3ds_id"):
         pm["authentication_method"] = {"type": "THREEDS", "id": str(corpo["auth3ds_id"])[:80]}
     cliente = {"name": (cli.get("nome") or titular)[:60], "email": cli.get("email") or "cliente@redesn.com.br", "tax_id": cli["cpf"]}
@@ -357,7 +443,8 @@ def api_pagar_cartao():
     status, upd, baixa = _gravar_resultado(cid, j["charges"][0], j.get("id"), cli, bool(corpo.get("salvar")) and not salvo)
     if salvo:
         cp._spatch(f"oct_cartoes_salvos?id=eq.{salvo['id']}", {"usado_em": upd["atualizado_em"]})
-    _log(cli, f"cartao {cid} {status} R$ {a['valor']:.2f} {n_parc}x ({a['emp'][:8]}) {upd.get('mensagem') or ''}")
+    _log(cli, f"cartao {cid} {status} R$ {a['valor']:.2f} {n_parc}x{' ' + carteira['tipo'] if carteira else ''} "
+              f"({a['emp'][:8]}) {upd.get('mensagem') or ''}")
     out = {"ok": status == "paga", "id": cid, "status": status, "valor": a["valor"], "parcelas": n_parc,
            "valor_parcela": plano["valor_parcela"], "total": plano["total"], "bandeira": upd.get("bandeira"),
            "final": upd.get("cartao_final"), "autorizacao": upd.get("autorizacao"), "baixa": baixa}
@@ -373,10 +460,13 @@ def api_cartao_status(cid):
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     rows = cp._sget(f"oct_cartao_cobrancas?id=eq.{cid}&cpf_app=eq.{cli['cpf']}&limit=1")
     if not rows:
         return jsonify({"erro": "Pagamento não encontrado."}), 404
     c = rows[0]
+    if c.get("ambiente") == "sandbox":              # reconsulta no ambiente em que a cobrança foi feita
+        g.cartao_teste = True
     if c["status"] == "analise" and c.get("pagbank_order_id"):
         st, j = _pb("GET", f"/orders/{c['pagbank_order_id']}", timeout=20)
         if st < 400 and j.get("charges"):
@@ -392,5 +482,6 @@ def api_cartao_remover(sid):
     cli, erro = _cliente_ou_401()
     if erro:
         return erro
+    _marcar_teste(cli)
     cp._spatch(f"oct_cartoes_salvos?id=eq.{sid}&cpf_app=eq.{cli['cpf']}", {"ativo": False})
     return jsonify({"ok": True}), 200, SEM_CACHE

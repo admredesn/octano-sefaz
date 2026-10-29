@@ -6,7 +6,10 @@
 // Segurança: o número do cartão é criptografado AQUI pelo SDK do PagBank (chave pública que o servidor manda) e só o
 // `encrypted` sai do celular; cada encrypted é gerado na hora de pagar. O servidor recalcula os juros no PagBank (o app
 // só manda o número de parcelas) e dá a baixa sozinho. Rotas: cliente_cartao.py.
-const PG = { alvo: null, cfg: null, forma: null, planos: null, parcelas: 1, bin: "", pagando: false, timer: null, res: null };
+// Carteira do celular (28/10/2026): Google Pay / Apple Pay pelo PagBank, À VISTA, só no app das lojas com o plugin
+// nativo "Pay" (@capgo/capacitor-pay). Aparece quando o /config manda `carteiras` e o celular tem cartão na carteira;
+// o token da carteira vai inteiro para o servidor (o PagBank abre). App antigo ou versão web: a opção nem aparece.
+const PG = { alvo: null, cfg: null, forma: null, planos: null, parcelas: 1, bin: "", pagando: false, timer: null, res: null, carteira: null };
 const PG_SDK = "https://assets.pagseguro.com.br/checkout-sdk-js/rc/dist/browser/pagseguro.min.js";
 
 // chamado pelo botão Pagar (faturas.js): cartão ligado no posto = escolher a forma; senão o Pix de sempre
@@ -21,9 +24,96 @@ async function pagarEscolher(tipo, id, titulo, valor, posto) {
   pgParar();
   PG.alvo = { tipo, id, titulo, valor: Number(valor || 0), posto };
   PG.cfg = cfg;
-  PG.forma = (cfg.salvos || []).length ? "salvo:" + cfg.salvos[0].id : "novo";
+  PG.carteira = await pgCarteiraDisponivel(cfg);
+  PG.forma = PG.carteira ? "carteira" : (cfg.salvos || []).length ? "salvo:" + cfg.salvos[0].id : "novo";
   PG.planos = null; PG.parcelas = 1; PG.bin = ""; PG.res = null;
   ir("#/pagar/formas");
+}
+
+// ---------------------------------------------------------------- carteira do celular (Google Pay / Apple Pay)
+function pgPluginPay() {
+  const C = window.Capacitor;
+  return NATIVO && C && (C.PluginHeaders || []).some(p => p.name === "Pay") ? C : null;
+}
+
+function pgGoogleMetodo(g, comToken) {
+  const m = { type: "CARD", parameters: { allowedAuthMethods: ["PAN_ONLY", "CRYPTOGRAM_3DS"],
+    allowedCardNetworks: g.bandeiras || ["VISA", "MASTERCARD", "ELO"], allowPrepaidCards: false } };
+  if (comToken) m.tokenizationSpecification = { type: "PAYMENT_GATEWAY", parameters: { gateway: g.gateway || "pagbank", gatewayMerchantId: g.gateway_merchant_id } };
+  return m;
+}
+
+// celular com a carteira e um cartão aceito -> {tipo, nome}; senão null (a opção não aparece)
+async function pgCarteiraDisponivel(cfg) {
+  const C = pgPluginPay(), cart = (cfg && cfg.carteiras) || {};
+  if (!C) return null;
+  try {
+    const plat = C.getPlatform();
+    if (plat === "ios" && cart.apple) {
+      const r = await C.nativePromise("Pay", "isPayAvailable", { apple: { supportedNetworks: cart.apple.bandeiras } });
+      return r && r.available ? { tipo: "APPLE_PAY", nome: "Apple Pay" } : null;
+    }
+    if (plat === "android" && cart.google) {
+      const r = await C.nativePromise("Pay", "isPayAvailable", { google: { environment: cart.google.ambiente,
+        isReadyToPayRequest: { apiVersion: 2, apiVersionMinor: 0, allowedPaymentMethods: [pgGoogleMetodo(cart.google, false)] } } });
+      return r && r.available ? { tipo: "GOOGLE_PAY", nome: "Google Pay" } : null;
+    }
+  } catch (e) { /* sem carteira: segue com cartão e Pix */ }
+  return null;
+}
+
+function pgCarteiraPedido(valor) {
+  const cart = PG.cfg.carteiras || {}, v = Number(valor).toFixed(2);
+  if (PG.carteira.tipo === "APPLE_PAY") {
+    return { apple: { merchantIdentifier: cart.apple.merchant_id, countryCode: "BR", currencyCode: "BRL",
+      supportedNetworks: cart.apple.bandeiras, merchantCapabilities: ["3DS", "credit"],
+      paymentSummaryItems: [{ label: PG.alvo.titulo, amount: v }, { label: "REDE SN", amount: v }] } };
+  }
+  const g = cart.google, info = { merchantName: g.merchant_name || "Rede SN" };
+  if (g.merchant_id) info.merchantId = g.merchant_id;
+  return { google: { environment: g.ambiente, paymentDataRequest: { apiVersion: 2, apiVersionMinor: 0,
+    allowedPaymentMethods: [pgGoogleMetodo(g, true)], merchantInfo: info,
+    transactionInfo: { totalPriceStatus: "FINAL", totalPrice: v, currencyCode: "BRL", countryCode: "BR", checkoutOption: "COMPLETE_IMMEDIATE_PURCHASE" } } } };
+}
+
+function pgCancelou(e) {
+  const d = (e && e.data) || {};
+  return /cancel/i.test(String((e && e.message) || "")) || (e && e.code === "CANCELED") || d.statusCode === "CANCELED";
+}
+
+async function pgPagarCarteira() {
+  if (PG.pagando) return;
+  const msg = document.getElementById("pg-msg"), btn = document.getElementById("pg-btn"), c = PG.carteira;
+  const C = pgPluginPay();
+  if (!C || !c) return;
+  msg.className = "msg erro"; msg.textContent = "";
+  PG.pagando = true;
+  const txtBtn = btn.textContent;
+  btn.disabled = true;
+  const falhou = t => { PG.pagando = false; btn.disabled = false; btn.textContent = txtBtn; msg.className = "msg erro"; msg.textContent = t || ""; };
+  const valor = Number(PG.alvo.valor || 0);
+  let res;
+  try {
+    res = await C.nativePromise("Pay", "requestPayment", pgCarteiraPedido(valor));
+  } catch (e) {
+    return falhou(pgCancelou(e) ? "" : `Não consegui abrir o ${c.nome}. Use o cartão ou o Pix.`);
+  }
+  const token = c.tipo === "APPLE_PAY" ? ((res && res.apple) || {}).paymentString || ((res && res.apple) || {}).paymentData
+    : (((((res && res.google) || {}).paymentData || {}).paymentMethodData || {}).tokenizationData || {}).token;
+  if (!token) return falhou(`O ${c.nome} não devolveu o cartão. Tente de novo.`);
+  btn.textContent = "Pagando…";
+  try {
+    const r = await api("/cashback/api/cartao/pagar", Object.assign(pgCorpo(), { parcelas: 1, valor, carteira: { tipo: c.tipo, token } }));
+    if (r && r.http === 409 && r.valor != null && !r.id) {             // o título mudou de valor: mostra o novo e pede de novo
+      PG.alvo.valor = Number(r.valor); PG.pagando = false;
+      pgTelaFormas();
+      const m = document.getElementById("pg-msg"); if (m) m.textContent = r.erro;
+      return;
+    }
+    pgResultado(r, falhou);
+  } catch (e) {
+    falhou(e.message || "Não deu certo agora. Tente de novo.");
+  }
 }
 
 function pgParar() { if (PG.timer) { clearInterval(PG.timer); PG.timer = null; } PG.pagando = false; }
@@ -51,20 +141,27 @@ function pgTelaFormas() {
   const salvos = PG.cfg.salvos || [];
   const op = (chave, ic, titulo, desc, extra) => `<button class="pg-op ${PG.forma === chave ? "sel" : ""}" onclick="PG.forma='${chave}';pgTelaFormas()">
       <span class="ic">${ic}</span><span class="txt"><b>${titulo}</b><span class="d">${desc}</span></span>${extra || ""}</button>`;
+  const cart = PG.carteira, naCarteira = PG.forma === "carteira" && cart;
+  const icCart = cart && cart.tipo === "APPLE_PAY" ? '<span class="pg-marca"> Pay</span>' : '<span class="pg-marca">G Pay</span>';
   el().innerHTML = `<div class="tela">${topoSimples("Pagar", true)}<div class="secao" style="padding-top:2px">
     ${pgPassos(1)}${pgResumo()}
     <div class="pg-rot">Como você quer pagar?</div>
+    ${cart ? op("carteira", icCart, cart.nome, "À vista · usa o cartão que já está no celular") : ""}
     ${salvos.map(s => op("salvo:" + s.id, "💳", `${esc(pgBandeira(s.bandeira))} •••• ${esc(s.final)}`,
         `Cartão salvo · só o código de segurança${s.validade ? " · vence " + esc(s.validade) : ""}`)).join("")}
     ${op("novo", "➕", "Outro cartão de crédito", "Digitar os dados · pode salvar para a próxima")}
     ${op("pix", '<span style="color:var(--verde,#12804A);font-weight:800;font-size:.8rem">PIX</span>', "Pix", "À vista · baixa na hora")}
     ${salvos.length && pgSalvo() ? `<button class="link pg-remover" onclick="pgRemoverSalvo(${Number(pgSalvo().id)})">Remover este cartão salvo</button>` : ""}
-    <button class="btn" style="margin-top:14px" onclick="pgContinuar()">Continuar</button>
-    <p class="pg-nota">Parcelado em até ${Number(PG.cfg.max_parcelas || 6)}x com os juros do cartão por conta de quem paga (parcela mínima ${brl(PG.cfg.parcela_min || 50)}).</p>
+    <button class="btn${naCarteira ? " pg-btn-carteira" : ""}" id="pg-btn" style="margin-top:14px" onclick="pgContinuar()">${naCarteira
+      ? `Pagar ${brl(PG.alvo.valor)} com ${esc(cart.nome)}` : "Continuar"}</button>
+    <div class="msg erro" id="pg-msg"></div>
+    <p class="pg-nota">${naCarteira ? `Abre o ${esc(cart.nome)} do celular para você confirmar com a digital, o rosto ou a senha. À vista, sem juros.`
+      : `Parcelado em até ${Number(PG.cfg.max_parcelas || 6)}x com os juros do cartão por conta de quem paga (parcela mínima ${brl(PG.cfg.parcela_min || 50)}).`}</p>
   </div></div>`;
 }
 
 function pgContinuar() {
+  if (PG.forma === "carteira") { pgPagarCarteira(); return; }
   if (PG.forma === "pix") { pagarAlvo(pgCorpo(), PG.alvo.tipo === "nota" ? "esta compra" : "a fatura"); return; }
   PG.planos = null; PG.parcelas = 1; PG.bin = "";
   ir(PG.forma === "novo" ? "#/pagar/cartao" : "#/pagar/parcelas");
