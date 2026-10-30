@@ -63,6 +63,9 @@ pagbank_order_id e o do pagamento em pagbank_charge_id. Sem carteira do celular 
   MP_ACCESS_TOKEN / MP_PUBLIC_KEY                  = credenciais de produção do MP (conta PJ que recebe)
   MP_ACCESS_TOKEN_SANDBOX / MP_PUBLIC_KEY_SANDBOX  = credenciais de teste
   O ambiente (sandbox/producao) é o mesmo do PagBank (PAGBANK_AMBIENTE + desvio da conta de teste).
+  CARTAO_TESTE_REAL        = 1: a conta de teste usa a PRODUÇÃO (cartão e dinheiro de verdade), ainda só nos títulos de
+                             CARTAO_SANDBOX_TITULOS (30/10/2026, Ronan: "nos conseguimos fazer um teste real?" — R$ 5,00
+                             pela conta PF dele, credenciais de produção da PF em MP_ACCESS_TOKEN/MP_PUBLIC_KEY só no teste)
 """
 import json
 import os
@@ -96,7 +99,8 @@ def _marcar_teste(cli):
 
 def _ambiente():
     if has_request_context() and getattr(g, "cartao_teste", False):
-        return "sandbox"
+        # CARTAO_TESTE_REAL=1: a conta de teste paga DE VERDADE (produção), mas só os títulos de CARTAO_SANDBOX_TITULOS
+        return "producao" if os.environ.get("CARTAO_TESTE_REAL", "").strip().lower() in ("1", "true", "sim") else "sandbox"
     return "producao" if os.environ.get("PAGBANK_AMBIENTE", "").strip().lower() in ("producao", "prod", "production") else "sandbox"
 
 
