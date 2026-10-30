@@ -440,7 +440,8 @@ async function pgPagar() {
     }
     if (pgMP()) {                                                  // Mercado Pago: só o token (e o final, para o recibo)
       const token = await pgTokenMP(salvo, novo, cvv);
-      Object.assign(corpo, { token, device_id: window.MP_DEVICE_SESSION_ID || "" }, salvo ? { cartao_salvo_id: salvo.id }
+      for (let i = 0; i < 12 && !window.MP_DEVICE_SESSION_ID && PG.mp; i++) await new Promise(ok => setTimeout(ok, 250));   // id do aparelho (antifraude)
+      Object.assign(corpo, { token, device_id: window.MP_DEVICE_SESSION_ID || "", nativo: !!NATIVO }, salvo ? { cartao_salvo_id: salvo.id }
         : { bin: novo.num.slice(0, 6), final: novo.num.slice(-4), titular: novo.nome, salvar: novo.salvar });
     } else if (salvo) {
       Object.assign(corpo, { cartao_salvo_id: salvo.id, cvv });       // cartão salvo: o servidor usa o token do PagBank
@@ -465,6 +466,7 @@ async function pgPagar() {
 
 function pgResultado(r, falhou) {
   if (r && r.status === "paga") { PG.res = r; PG.pagando = false; ir("#/pagar/ok"); return; }
+  if (r && r.desafio && r.id) { PG.pagando = false; return pgDesafio(r.id, r.desafio); }
   if (r && r.status === "recusada") return falhou(r.erro || `O banco recusou o pagamento. Tente outro cartão ou ${pgOutraForma()}.`);
   if (r && (r.status === "analise" || (r.http === 409 && r.id))) return pgAcompanhar(r.id, r.aviso || r.erro);
   if (r && r.http === 502) return falhou(`Não tivemos resposta do ${pgNomeProv()}. Antes de tentar de novo, confira no app do seu banco se a compra não foi aprovada.`);
@@ -482,6 +484,7 @@ function pgAcompanhar(id, aviso) {
     n++;
     const r = await api("/cashback/api/cartao/" + encodeURIComponent(id));
     if (r && r.status === "paga") { pgParar(); PG.res = r; ir("#/pagar/ok"); return; }
+    if (r && r.desafio) { pgDesafio(id, r.desafio); return; }
     if ((r && r.status === "recusada") || n >= 36) {
       pgParar();
       if (btn) { btn.disabled = false; btn.textContent = "Tentar de novo"; }
@@ -489,6 +492,50 @@ function pgAcompanhar(id, aviso) {
         : `O banco ainda não confirmou. Veja o resultado em ${pgAbast() ? "Seu abastecimento" : "Faturas"} daqui a pouco.`; }
     }
   }, 5000);
+}
+
+// ---------------------------------------------------------------- confirmação do banco (3DS do Mercado Pago, 30/10/2026)
+// Em vez de recusar o que achar arriscado, o MP pede ao cliente para confirmar no banco (código por SMS / app do banco).
+// A tela do MP vai num iframe; se não carregar, abre em outra janela. O app acompanha o resultado pelo servidor.
+function pgDesafio(id, url) {
+  pgParar();
+  PG.desafio = { id, url, n: 0 };
+  el().innerHTML = `<div class="tela">${topoSimples("Confirmação do banco", true)}<div class="secao" style="padding-top:2px">
+    <p class="pg-nota" style="margin-top:0">Seu banco pediu para confirmar esta compra. Siga as instruções abaixo — pode ser um código por SMS ou uma confirmação no app do banco.</p>
+    <div class="card" style="padding:0;overflow:hidden"><iframe id="pg-3ds" src="${esc(url)}" title="Confirmação do banco"
+      style="width:100%;height:540px;border:0;display:block"></iframe></div>
+    <button class="link" style="margin-top:8px" onclick="pgDesafioFora()">Não apareceu? Abrir a confirmação em outra janela</button>
+    <div class="msg" id="pg-msg">Aguardando a confirmação do banco…</div>
+  </div></div>`;
+  window.removeEventListener("message", pgDesafioMsg);
+  window.addEventListener("message", pgDesafioMsg);
+  PG.timer = setInterval(pgDesafioConferir, 4000);
+}
+
+function pgDesafioMsg(e) {
+  const d = e && e.data;
+  if (d && (d.status === "COMPLETE" || (typeof d === "string" && d.indexOf("COMPLETE") >= 0))) pgDesafioConferir();
+}
+
+function pgDesafioFora() { if (PG.desafio) window.open(PG.desafio.url, "_blank"); }
+
+async function pgDesafioConferir() {
+  const d = PG.desafio;
+  if (!d || d.conferindo) return;
+  d.conferindo = true;
+  try {
+    d.n++;
+    const r = await api("/cashback/api/cartao/" + encodeURIComponent(d.id));
+    const msg = document.getElementById("pg-msg");
+    if (r && r.status === "paga") {
+      pgParar(); window.removeEventListener("message", pgDesafioMsg); PG.desafio = null; PG.res = r; ir("#/pagar/ok"); return;
+    }
+    if (r && (r.status === "recusada" || r.status === "cancelada" || r.status === "erro") || d.n >= 300) {   // ~20 min
+      pgParar(); window.removeEventListener("message", pgDesafioMsg); PG.desafio = null;
+      if (msg) { msg.className = "msg erro"; msg.innerHTML = `${esc((r && r.erro) || "A confirmação do banco não foi concluída.")} `
+        + `<button class="link" onclick="ir('#/pagar/formas')">Tentar de novo</button>`; }
+    }
+  } finally { d.conferindo = false; }
 }
 
 // ---------------------------------------------------------------- aprovado

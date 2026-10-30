@@ -369,27 +369,91 @@ def _mp_gravar(cid, order, cli, salvar_token=None, final=None):
     return status, upd, baixa
 
 
+def _mp_3ds():
+    """Confirmação do banco (3DS) no MP: on_fraud_risk (padrão) = em vez de RECUSAR o que achar arriscado, o MP pede ao
+    cliente para confirmar no banco (30/10/2026: o teste real de R$ 5,00 voltou "high_risk"). never = desliga."""
+    v = os.environ.get("MP_3DS", "on_fraud_risk").strip().lower()
+    return v if v in ("on_fraud_risk", "always") else None
+
+
+def _mp_pagador(cli, corpo):
+    """Tudo o que o MP recomenda mandar do comprador (o antifraude recusa menos com dados completos)."""
+    nome = str(cli.get("nome") or corpo.get("titular") or "").split()
+    email = str(cli.get("email") or "").strip().lower()
+    p = {"email": _mp_email(cli) if _ambiente() != "producao" or "@" not in email else email,
+         "first_name": (nome[0] if nome else "")[:40].title(), "last_name": " ".join(nome[1:])[:60].title(),
+         "identification": {"type": "CPF", "number": _so_digitos(cli.get("cpf"))}}
+    tel = _telefone(cli)
+    if tel:
+        p["phone"] = {"area_code": tel["area"], "number": tel["number"]}
+    cep = _so_digitos(cli.get("cep"))
+    if len(cep) == 8 and cli.get("endereco"):
+        p["address"] = {k: v for k, v in {"zip_code": cep, "street_name": str(cli.get("endereco"))[:80],
+                                          "street_number": str(cli.get("numero") or "S/N")[:10],
+                                          "neighborhood": str(cli.get("bairro") or "")[:60], "city": str(cli.get("cidade") or "")[:60],
+                                          "state": str(cli.get("uf") or "")[:2].upper()}.items() if v}
+    return p
+
+
+def _mp_info_extra(cli, corpo):
+    """additional_info: canal, data de cadastro no app e histórico de compras pagas com cartão no app."""
+    info = {"payer.authentication_type": "MOBILE" if corpo.get("nativo") else "WEB", "payer.is_prime_user": False}
+    if cli.get("criado_em"):
+        info["payer.registration_date"] = str(cli["criado_em"])
+    try:
+        ult = cp._sget(f"oct_cartao_cobrancas?cpf_app=eq.{cli['cpf']}&status=eq.paga&ambiente=eq.{_ambiente()}"
+                       "&select=pago_em&order=pago_em.desc.nullslast&limit=1")
+    except Exception:
+        ult = None
+    info["payer.is_first_purchase_online"] = not ult
+    if ult and ult[0].get("pago_em"):
+        info["payer.last_purchase"] = str(ult[0]["pago_em"])
+    return info
+
+
 def _mp_pedido(cid, a, cli, corpo, plano, n_parc, salvo, token):
     """Pedido no Mercado Pago (Orders API). Recusa vem com HTTP 402 e o pedido em "data"."""
     v = f"{a['valor']:.2f}"
     desc = (a["desc"] or "Rede SN")[:60]
-    if salvo:
-        payer = {"customer_id": salvo["pagbank_card_id"].split(":")[1]}
-    else:
-        nome = str(cli.get("nome") or corpo.get("titular") or "").split()
-        payer = {"email": _mp_email(cli) if _ambiente() != "producao" else (cli.get("email") or _mp_email(cli)),
-                 "first_name": (nome[0] if nome else "")[:40], "last_name": " ".join(nome[1:])[:60],
-                 "identification": {"type": "CPF", "number": _so_digitos(cli.get("cpf"))}}
+    payer = _mp_pagador(cli, corpo)
+    if salvo:                                      # cartão salvo: o customer dono do cartão (o e-mail é o dele)
+        payer.pop("email", None)
+        payer["customer_id"] = salvo["pagbank_card_id"].split(":")[1]
     pedido = {"type": "online", "processing_mode": "automatic", "total_amount": v, "external_reference": f"oct-cartao-{cid}",
-              "description": desc, "payer": payer, "items": [{"title": desc, "unit_price": v, "quantity": 1}],
+              "description": desc, "payer": payer,
+              "items": [{"title": desc, "description": "Posto de combustível - Rede SN", "unit_price": v, "quantity": 1,
+                         "category_id": "others", "external_code": str(cid)}],
+              "additional_info": _mp_info_extra(cli, corpo),
               "transactions": {"payments": [{"amount": v, "payment_method": {
                   "id": plano.get("bandeira"), "type": "credit_card", "token": token, "installments": n_parc,
                   "statement_descriptor": "REDE SN"}}]}}
-    st, j = _mp("POST", "/v1/orders", pedido, idem=f"oct-cartao-{cid}-{uuid.uuid4().hex[:16]}",
-                device=str(corpo.get("device_id") or "").strip()[:300] or None)
+    tres = _mp_3ds()
+    if tres:
+        pedido["config"] = {"online": {"transaction_security": {"validation": tres, "liability_shift": "required"}}}
+    device = str(corpo.get("device_id") or "").strip()[:300] or None
+    st, j = _mp("POST", "/v1/orders", pedido, idem=f"oct-cartao-{cid}-{uuid.uuid4().hex[:16]}", device=device)
     if st == 402 and isinstance(j.get("data"), dict):
-        return st, j["data"]
+        st, j = st, j["data"]
+    j["_device"] = bool(device)
     return st, j
+
+
+def _mp_atualizar(c, cli):
+    """Reconsulta no MP uma cobrança "analise" (atualiza c) e devolve a URL do desafio se ainda estiver pendente."""
+    st, j = _mp("GET", f"/v1/orders/{c['pagbank_order_id']}", timeout=20)
+    if st >= 400 or not j.get("id"):
+        return None
+    status, _upd, baixa = _mp_gravar(c["id"], j, cli)
+    c.update(status=status, baixa=baixa or c.get("baixa"))
+    return _mp_desafio(j)
+
+
+def _mp_desafio(order):
+    """URL da confirmação do banco (3DS) quando o MP pediu o desafio; None se não pediu."""
+    pay = (((order or {}).get("transactions") or {}).get("payments") or [{}])[0]
+    if (order or {}).get("status") != "action_required":
+        return None
+    return ((pay.get("payment_method") or {}).get("transaction_security") or {}).get("url")
 
 
 # ------------------------------------------------------------------ o que vai ser pago
@@ -606,9 +670,15 @@ def api_pagar_cartao():
     # ("pedido" só segura por 10 min: uma cobrança que travou no meio não bloqueia o cliente para sempre)
     dez_min = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 600))
     ja = cp._sget(f"oct_cartao_cobrancas?{a['filtro']}&or=(status.in.(paga,analise),and(status.eq.pedido,criado_em.gte.{dez_min}))"
-                  "&order=id.desc&limit=1&select=id,status")
-    if ja:
-        return jsonify({"erro": "Este título já tem um pagamento em andamento.", "id": ja[0]["id"], "status": ja[0]["status"]}), 409
+                  "&order=id.desc&limit=1&select=id,status,origem,pagbank_order_id")
+    desafio = None
+    if ja and ja[0]["status"] == "analise" and ja[0].get("origem") == MP_ORIGEM and ja[0].get("pagbank_order_id"):
+        desafio = _mp_atualizar(ja[0], cli)        # MP: desafio abandonado expira em 40 min e não pode travar o título
+    if ja and ja[0]["status"] in ("paga", "analise", "pedido"):
+        out = {"erro": "Este título já tem um pagamento em andamento.", "id": ja[0]["id"], "status": ja[0]["status"]}
+        if desafio:
+            out["desafio"] = desafio
+        return jsonify(out), 409
 
     prov = _provedor(a["emp"])
     if prov == "mercadopago" and corpo.get("carteira"):
@@ -727,13 +797,19 @@ def _mp_pagar(cid, a, cli, corpo, plano, n_parc, salvo, token):
     status, upd, baixa = _mp_gravar(cid, j, cli, salvar, final)
     if salvo:
         cp._spatch(f"oct_cartoes_salvos?id=eq.{salvo['id']}", {"usado_em": upd["atualizado_em"]})
-    _log(cli, f"cartao {cid} MP {status} R$ {a['valor']:.2f} {n_parc}x ({a['emp'][:8]}) {upd.get('mensagem') or ''}")
+    desafio = _mp_desafio(j)
+    _log(cli, f"cartao {cid} MP {status} R$ {a['valor']:.2f} {n_parc}x ({a['emp'][:8]}) {upd.get('mensagem') or ''}"
+              f"{' 3DS' if desafio else ''} aparelho={'sim' if j.get('_device') else 'nao'}")
     out = {"ok": status == "paga", "id": cid, "status": status, "valor": a["valor"], "parcelas": n_parc,
            "valor_parcela": plano["valor_parcela"], "total": plano["total"], "bandeira": upd.get("bandeira"),
            "final": final, "autorizacao": upd.get("autorizacao"), "baixa": baixa}
     if status == "recusada":
         out["erro"] = ("Pagamento recusado pelo antifraude. Tente outro cartão ou outra forma." if "high_risk" in str(upd.get("mensagem"))
+                       else "Pagamento não autorizado na confirmação do banco." if "3ds" in str(upd.get("mensagem"))
                        else "Pagamento recusado pelo banco do cartão. Tente outro cartão ou outra forma.")
+    elif desafio:                                  # 3DS: o cliente confirma no banco (tela do MP) e o app acompanha
+        out["desafio"] = desafio
+        out["aviso"] = "Seu banco pediu uma confirmação."
     elif status == "analise":
         out["aviso"] = "Pagamento em análise. Avisamos aqui assim que o Mercado Pago confirmar."
     return jsonify(out), 200, SEM_CACHE
@@ -751,19 +827,22 @@ def api_cartao_status(cid):
     c = rows[0]
     if c.get("ambiente") == "sandbox":              # reconsulta no ambiente em que a cobrança foi feita
         g.cartao_teste = True
+    desafio = None
     if c["status"] == "analise" and c.get("pagbank_order_id") and c.get("origem") == MP_ORIGEM:
-        st, j = _mp("GET", f"/v1/orders/{c['pagbank_order_id']}", timeout=20)
-        if st < 400 and j.get("id"):
-            status, _upd, baixa = _mp_gravar(cid, j, cli)
-            c.update(status=status, baixa=baixa or c.get("baixa"))
+        desafio = _mp_atualizar(c, cli)
     elif c["status"] == "analise" and c.get("pagbank_order_id"):
         st, j = _pb("GET", f"/orders/{c['pagbank_order_id']}", timeout=20)
         if st < 400 and j.get("charges"):
             status, _upd, baixa = _gravar_resultado(cid, j["charges"][0], c["pagbank_order_id"], cli, False)
             c.update(status=status, baixa=baixa or c.get("baixa"))
-    return jsonify({"ok": True, "id": c["id"], "status": c["status"], "valor": float(c["valor"]), "parcelas": c["parcelas"],
-                    "total": float(c.get("valor_cobrado") or c["valor"]), "bandeira": c.get("bandeira"),
-                    "final": c.get("cartao_final"), "baixa": c.get("baixa")}), 200, SEM_CACHE
+    out = {"ok": True, "id": c["id"], "status": c["status"], "valor": float(c["valor"]), "parcelas": c["parcelas"],
+           "total": float(c.get("valor_cobrado") or c["valor"]), "bandeira": c.get("bandeira"),
+           "final": c.get("cartao_final"), "baixa": c.get("baixa")}
+    if desafio:
+        out["desafio"] = desafio
+    if c["status"] == "recusada":
+        out["erro"] = "O pagamento não foi autorizado. Tente outro cartão ou outra forma."
+    return jsonify(out), 200, SEM_CACHE
 
 
 @bp_cartao.route("/cashback/api/cartao/salvos/<int:sid>", methods=["DELETE"])
