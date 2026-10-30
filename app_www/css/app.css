@@ -265,13 +265,28 @@ img { display: block; max-width: 100%; }
 .kpis { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 8px; margin-top: 10px; }
 .kpi .rot { font-size: .68rem; color: var(--mut); text-transform: uppercase; letter-spacing: .06em; }
 .kpi .val { font-weight: 750; font-variant-numeric: tabular-nums; }
-.tanques { display: flex; gap: 8px; margin-top: 12px; }
-.tq { flex: 1; min-width: 0; }
+.tanques { display: grid; gap: 10px 8px; margin-top: 14px; }
+/* cores por combustível = as das bolinhas do rodapé do PDV (tanques_pdv.js) */
+.tq { min-width: 0; text-align: center; --tq-fundo: #E1F5EE; --tq-nivel: #9FE1CB; --tq-borda: #1D9E75; --tq-texto: #04342C; }
+.tq.c-gasolina  { --tq-fundo: #FAEEDA; --tq-nivel: #FAC775; --tq-borda: #BA7517; --tq-texto: #412402; }
+.tq.c-aditivada { --tq-fundo: #FAECE7; --tq-nivel: #F5C4B3; --tq-borda: #D85A30; --tq-texto: #4A1B0C; }
+.tq.c-etanol    { --tq-fundo: #EAF3DE; --tq-nivel: #C0DD97; --tq-borda: #639922; --tq-texto: #173404; }
+.tq.c-s10       { --tq-fundo: #E6F1FB; --tq-nivel: #B5D4F4; --tq-borda: #378ADD; --tq-texto: #042C53; }
+.tq.c-diesel    { --tq-fundo: #EEEDFE; --tq-nivel: #CECBF6; --tq-borda: #7F77DD; --tq-texto: #26215C; }
+.tq.baixo       { --tq-fundo: #FCEBEB; --tq-nivel: #F09595; --tq-borda: #E24B4A; --tq-texto: #501313; }
+.tq-bola { display: block; width: 54px; height: 54px; margin: 0 auto 5px; }
+.tq-bola .vazio { fill: var(--tq-fundo); }
+.tq-bola .liq { fill: var(--tq-nivel); }
+.tq-bola .sup { stroke: var(--tq-borda); stroke-width: 1.5; }
+.tq-bola .aro { fill: none; stroke: var(--tq-borda); stroke-width: 1.5; }
+.tq-bola text { font-size: 13px; font-weight: 750; font-variant-numeric: tabular-nums; fill: var(--tq-texto); }
+.baixo .tq-bola .aro { stroke-width: 3; }
+.tq .vol { font-size: .8rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .nivel { height: 6px; border-radius: 99px; background: #E8ECF1; overflow: hidden; }
 .nivel i { display: block; height: 100%; border-radius: 99px; background: var(--azul-2); }
-.tq .rot { font-size: .68rem; color: var(--mut); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tq .rot { font-size: .7rem; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .baixo .nivel i { background: var(--verm); }
-.baixo .rot, .baixo .dir { color: var(--verm); font-weight: 700; }
+.baixo .rot, .baixo .dir, .baixo .vol { color: var(--verm); font-weight: 700; }
 .tanque-linha { padding: 12px 16px; border-bottom: 1px solid var(--borda); }
 .tanque-linha:last-child { border-bottom: none; }
 .tanque-linha .cab { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; font-weight: 600; }

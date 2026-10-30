@@ -258,13 +258,49 @@ function telaEquipe() {
 }
 
 // ================================================================ PAINEL
+// BOLINHAS (29/10/2026, Ronan: "colocar as bolinhas representando o tanque e mostrando também o volume disponível para
+// venda"): cada tanque é o corte do tanque deitado (um círculo) cheio até o nível; a ÁREA pintada é a fração do volume
+// (num cilindro deitado a altura não é proporcional ao volume). Embaixo, os litros que a sonda mede no tanque.
+// Cor de cada combustível (Ronan: "colocar nas cores de cada combustível") = a mesma das bolinhas do rodapé do PDV
+// (tanques_pdv.js); tanque baixo fica todo vermelho, como lá.
+function eqCorTanque(nome) {
+  const n = String(nome || "").toUpperCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+  if (/ETANOL|ALCOOL/.test(n)) return "etanol";
+  if (/ADIT|ADT|PREMIUM|PODIUM|GRID|V-?POWER/.test(n)) return "aditivada";
+  if (/GASOLINA/.test(n)) return "gasolina";
+  if (/S-?\s?10\b/.test(n)) return "s10";
+  if (/DIESEL|S-?\s?500\b/.test(n)) return "diesel";
+  return "outro";
+}
+function eqAlturaTanque(f) {
+  f = Math.max(0, Math.min(1, f));
+  let a = 0, b = 1;
+  for (let i = 0; i < 30; i++) {
+    const x = (a + b) / 2, th = 2 * Math.acos(1 - 2 * x);
+    if ((th - Math.sin(th)) / (2 * Math.PI) < f) a = x; else b = x;
+  }
+  return (a + b) / 2;
+}
+let eqTqN = 0;
+function eqBolaTanque(pct) {
+  const k = ++eqTqN, y = 54 - 52 * eqAlturaTanque(pct / 100);       // círculo de raio 26 no centro (28, 28); y = linha do líquido
+  const ty = y <= 28 ? (y + 54) / 2 : (2 + y) / 2;                  // o número vai na parte maior, longe da linha
+  const yy = y.toFixed(2);
+  return `<svg class="tq-bola" viewBox="0 0 56 56" aria-hidden="true"><defs><clipPath id="tqc${k}"><circle cx="28" cy="28" r="26"/></clipPath></defs>
+    <circle class="vazio" cx="28" cy="28" r="26"/><g clip-path="url(#tqc${k})"><rect class="liq" y="${yy}" width="56" height="56"/>
+    ${pct > 0 && pct < 100 ? `<line class="sup" x1="0" x2="56" y1="${yy}" y2="${yy}"/>` : ""}</g>
+    <circle class="aro" cx="28" cy="28" r="26"/>
+    <text x="28" y="${ty.toFixed(2)}" dy=".36em" text-anchor="middle">${pct}%</text></svg>`;
+}
 function eqTanques(tanques) {
   const ts = Array.isArray(tanques) ? tanques : [];
   if (!ts.length || !eqPode("ver_tanques")) return "";
-  return `<div class="tanques">${ts.map(t => {
+  return `<div class="tanques" style="grid-template-columns:repeat(${Math.min(ts.length, 4)},1fr)">${ts.map(t => {
     const pct = Math.max(0, Math.min(100, Math.round(t.pct || 0)));
-    const curto = String(t.produto || "").replace(/^diesel\s+/i, "");     // no cartão cabe "S500 55%", não "Diesel S500 55%"
-    return `<div class="tq ${t.baixo ? "baixo" : ""}"><div class="nivel"><i style="width:${pct}%"></i></div><div class="rot">${esc(curto)} ${pct}%</div></div>`;
+    const curto = String(t.produto || "").replace(/^diesel\s+/i, "");     // no cartão cabe "S500", não "Diesel S500"
+    const litros = num(Math.round(t.litros || 0)) + " L";
+    return `<div class="tq c-${eqCorTanque(t.produto)} ${t.baixo ? "baixo" : ""}" role="img" aria-label="${esc(curto)}: ${pct}%, ${litros}">${eqBolaTanque(pct)}
+      <div class="rot">${esc(curto)}</div><div class="vol">${litros}</div></div>`;
   }).join("")}</div>`;
 }
 function eqNumeros(p) {
