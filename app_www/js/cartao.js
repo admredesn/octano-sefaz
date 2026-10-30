@@ -9,7 +9,10 @@
 // Carteira do celular (28/10/2026): Google Pay / Apple Pay pelo PagBank, À VISTA, só no app das lojas com o plugin
 // nativo "Pay" (@capgo/capacitor-pay). Aparece quando o /config manda `carteiras` e o celular tem cartão na carteira;
 // o token da carteira vai inteiro para o servidor (o PagBank abre). App antigo ou versão web: a opção nem aparece.
-const PG = { alvo: null, cfg: null, forma: null, planos: null, parcelas: 1, bin: "", pagando: false, timer: null, res: null, carteira: null };
+// MERCADO PAGO (30/10/2026): quando o /config manda provedor "mercadopago", o SDK do MP (sdk_url) vira o cartão em
+// TOKEN aqui no celular — cartão novo pelos dados, cartão salvo pelo id do cartão (ref) + CVV — e só o token sai;
+// o MP soma os juros do parcelamento sozinho. Sem carteira do celular no MP por enquanto.
+const PG = { alvo: null, cfg: null, forma: null, planos: null, parcelas: 1, bin: "", pagando: false, timer: null, res: null, carteira: null, mp: null };
 const PG_SDK = "https://assets.pagseguro.com.br/checkout-sdk-js/rc/dist/browser/pagseguro.min.js";
 
 // chamado pelo botão Pagar (faturas.js): cartão ligado no posto = escolher a forma; senão o Pix de sempre.
@@ -132,6 +135,8 @@ function pgCorpo() {
   return t === "nota" ? { nota_id: PG.alvo.id } : t === "abastecimento" ? { acionamento_id: PG.alvo.id } : { fatura_id: PG.alvo.id };
 }
 function pgAbast() { return !!(PG.alvo && PG.alvo.tipo === "abastecimento"); }
+function pgMP() { return !!(PG.cfg && PG.cfg.provedor === "mercadopago"); }
+function pgNomeProv() { return pgMP() ? "Mercado Pago" : "PagBank"; }
 function pgOutraForma() { return pgAbast() ? "pague no caixa" : "use o Pix"; }     // no abastecimento não há Pix aqui
 function pgSalvo() { return PG.forma && PG.forma.indexOf("salvo:") === 0 ? (PG.cfg.salvos || []).find(s => "salvo:" + s.id === PG.forma) : null; }
 function pgBandeira(b) { const s = String(b || "").toLowerCase(); return s === "mastercard" ? "Mastercard" : s === "visa" ? "Visa" : s === "elo" ? "Elo" : s === "amex" ? "Amex" : s === "hipercard" ? "Hipercard" : (s ? s.charAt(0).toUpperCase() + s.slice(1) : "Cartão"); }
@@ -244,6 +249,7 @@ function pgTelaCvv() {
   const c = document.getElementById("pg-cvv");
   c.addEventListener("input", () => { c.value = soDigitos(c.value).slice(0, 4); });
   c.focus();
+  if (pgMP()) pgSdk().catch(() => {});      // MP: o SDK já vai identificando o aparelho (o antifraude recusa menos)
 }
 
 // ---------------------------------------------------------------- 3b. cartão novo: dados + parcelas
@@ -262,8 +268,9 @@ function pgTelaCartao() {
     <div id="pg-planos"></div>
     <button class="btn" id="pg-btn" style="margin-top:12px" disabled onclick="pgPagar()">Digite o número do cartão</button>
     <div class="msg erro" id="pg-msg"></div>
-    <p class="pg-nota">🔒 Os dados vão criptografados direto para o PagBank. O Posto SN nunca vê o número do cartão.</p>
+    <p class="pg-nota">🔒 Os dados vão criptografados direto para o ${pgNomeProv()}. O Posto SN nunca vê o número do cartão.</p>
   </div></div>`;
+  if (pgMP()) pgSdk().catch(() => {});
   const num = document.getElementById("pg-num"), val = document.getElementById("pg-val"), cvv = document.getElementById("pg-cvv");
   num.addEventListener("input", () => {
     const d = soDigitos(num.value).slice(0, 19);
@@ -299,19 +306,64 @@ function pgDesenharPlanosNovo() {
   btn.textContent = p ? `Pagar ${p.parcelas}x de ${brl(p.valor_parcela)}` : "Digite o número do cartão";
 }
 
-// ---------------------------------------------------------------- SDK do PagBank (só quando vai pagar com cartão)
+// ---------------------------------------------------------------- SDK do PagBank / Mercado Pago (só quando vai pagar com cartão)
 function pgSdk() {
-  if (window.PagSeguro) return Promise.resolve(window.PagSeguro);
-  if (pgSdk._p) return pgSdk._p;
+  const glob = pgMP() ? () => window.MercadoPago : () => window.PagSeguro;
+  const url = (PG.cfg && PG.cfg.sdk_url) || PG_SDK;
+  if (glob()) return Promise.resolve(glob());
+  if (pgSdk._p && pgSdk._url === url) return pgSdk._p;
+  pgSdk._url = url;
   pgSdk._p = new Promise((ok, falha) => {
     const s = document.createElement("script");
-    s.src = (PG.cfg && PG.cfg.sdk_url) || PG_SDK;
+    s.src = url;
     const t = setTimeout(() => falha(new Error("tempo")), 20000);
-    s.onload = () => { clearTimeout(t); window.PagSeguro ? ok(window.PagSeguro) : falha(new Error("sdk")); };
+    s.onload = () => { clearTimeout(t); glob() ? ok(glob()) : falha(new Error("sdk")); };
     s.onerror = () => { clearTimeout(t); falha(new Error("rede")); };
     document.head.appendChild(s);
   }).catch(e => { pgSdk._p = null; throw e; });
   return pgSdk._p;
+}
+
+// erros do createCardToken do Mercado Pago (vêm como [{code, message}])
+const PG_ERROS_MP = {
+  "205": "Digite o número do cartão.", E301: "Número do cartão inválido.", "208": "Confira o mês da validade.",
+  "325": "Confira o mês da validade.", "209": "Confira o ano da validade.", "326": "Confira o ano da validade.",
+  "221": "Digite o nome impresso no cartão.", "316": "Confira o nome impresso no cartão.", "224": "Digite o código de segurança (CVV).",
+  E302: "Código de segurança (CVV) inválido.", E203: "Código de segurança (CVV) inválido.",
+};
+
+// Mercado Pago: o cartão novo (dados) ou o salvo (id do cartão + CVV) vira TOKEN aqui; só o token vai para o servidor.
+// O SDK só gera token em página https (Android: https://localhost; web). No iPhone o app roda em capacitor://, e o SDK
+// recusa: lá o token sai direto da API de tokens do MP (a mesma que o SDK chama, com a chave pública; aceita o app).
+async function pgTokenMP(salvo, novo, cvv) {
+  const https = location.protocol === "https:";
+  let MP = null;
+  try { MP = await pgSdk(); } catch (e) {        // fora do https o SDK só serve para identificar o aparelho
+    if (https) throw new Error("Não consegui abrir o pagamento seguro do Mercado Pago. Confira a internet e tente de novo.");
+  }
+  if (MP && (!PG.mp || PG.mp.chave !== PG.cfg.public_key)) PG.mp = { chave: PG.cfg.public_key, sdk: new MP(PG.cfg.public_key, { locale: "pt-BR" }) };
+  const dados = salvo ? { cardId: String(salvo.ref || ""), securityCode: cvv }
+    : { cardNumber: novo.num, cardholderName: novo.nome, cardExpirationMonth: novo.mm, cardExpirationYear: "20" + novo.aa, securityCode: cvv };
+  let t;
+  try {
+    t = https && PG.mp ? await PG.mp.sdk.createCardToken(dados) : await pgTokenMPDireto(dados);
+  } catch (e) {
+    const c = (Array.isArray(e) ? e[0] : e) || {};
+    throw new Error(PG_ERROS_MP[String(c.code || "")] || "Confira os dados do cartão.");
+  }
+  if (!t || !t.id) throw new Error("Confira os dados do cartão.");
+  return t.id;
+}
+
+async function pgTokenMPDireto(d) {
+  const corpo = d.cardId ? { card_id: d.cardId, security_code: d.securityCode }
+    : { card_number: d.cardNumber, expiration_month: Number(d.cardExpirationMonth), expiration_year: Number(d.cardExpirationYear),
+        security_code: d.securityCode, cardholder: { name: d.cardholderName } };
+  const r = await fetch("https://api.mercadopago.com/v1/card_tokens?public_key=" + encodeURIComponent(PG.cfg.public_key),
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(corpo) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw (j.cause && j.cause.length ? j.cause : [{ code: "" }]);
+  return j;
 }
 
 const PG_ERROS_SDK = {
@@ -365,24 +417,31 @@ async function pgPagar() {
   btn.disabled = true; btn.textContent = "Pagando…";
   const falhou = t => { PG.pagando = false; btn.disabled = false; btn.textContent = txtBtn; msg.textContent = t; };
   try {
-    if (salvo) {
-      Object.assign(corpo, { cartao_salvo_id: salvo.id, cvv });       // cartão salvo: o servidor usa o token do PagBank
-    } else {
+    let novo = null;
+    if (!salvo) {
       const num = soDigitos(document.getElementById("pg-num").value);
       const [mm, aa] = (document.getElementById("pg-val").value || "").split("/");
       const nome = String(document.getElementById("pg-nome").value || "").trim().toUpperCase();
       if (num.length < 13) return falhou("Confira o número do cartão.");
       if (!/^\d{2}$/.test(mm || "") || !/^\d{2}$/.test(aa || "") || Number(mm) < 1 || Number(mm) > 12) return falhou("Confira a validade (MM/AA).");
       if (nome.split(/\s+/).length < 2) return falhou("Digite o nome como está impresso no cartão.");
+      novo = { num, mm, aa, nome, salvar: !!(document.getElementById("pg-salvar") || {}).checked };
+    }
+    if (pgMP()) {                                                  // Mercado Pago: só o token (e o final, para o recibo)
+      const token = await pgTokenMP(salvo, novo, cvv);
+      Object.assign(corpo, { token, device_id: window.MP_DEVICE_SESSION_ID || "" }, salvo ? { cartao_salvo_id: salvo.id }
+        : { bin: novo.num.slice(0, 6), final: novo.num.slice(-4), titular: novo.nome, salvar: novo.salvar });
+    } else if (salvo) {
+      Object.assign(corpo, { cartao_salvo_id: salvo.id, cvv });       // cartão salvo: o servidor usa o token do PagBank
+    } else {
       let PS;
       try { PS = await pgSdk(); } catch (e) { return falhou("Não consegui abrir o pagamento seguro do PagBank. Confira a internet e tente de novo."); }
-      const enc = PS.encryptCard({ publicKey: PG.cfg.public_key, holder: nome, number: num, expMonth: mm, expYear: "20" + aa, securityCode: cvv });
+      const enc = PS.encryptCard({ publicKey: PG.cfg.public_key, holder: novo.nome, number: novo.num, expMonth: novo.mm, expYear: "20" + novo.aa, securityCode: cvv });
       if (!enc || enc.hasErrors) {
         const e = (enc && enc.errors && enc.errors[0]) || {};
         return falhou(PG_ERROS_SDK[e.code] || e.message || "Confira os dados do cartão.");
       }
-      Object.assign(corpo, { encrypted: enc.encryptedCard, bin: num.slice(0, 6), titular: nome,
-                             salvar: !!(document.getElementById("pg-salvar") || {}).checked });
+      Object.assign(corpo, { encrypted: enc.encryptedCard, bin: novo.num.slice(0, 6), titular: novo.nome, salvar: novo.salvar });
       const auth = await pgTresDS(PS, plano, { encrypted: enc.encryptedCard });
       if (auth) corpo.auth3ds_id = auth;
     }
@@ -397,7 +456,7 @@ function pgResultado(r, falhou) {
   if (r && r.status === "paga") { PG.res = r; PG.pagando = false; ir("#/pagar/ok"); return; }
   if (r && r.status === "recusada") return falhou(r.erro || `O banco recusou o pagamento. Tente outro cartão ou ${pgOutraForma()}.`);
   if (r && (r.status === "analise" || (r.http === 409 && r.id))) return pgAcompanhar(r.id, r.aviso || r.erro);
-  if (r && r.http === 502) return falhou("Não tivemos resposta do PagBank. Antes de tentar de novo, confira no app do seu banco se a compra não foi aprovada.");
+  if (r && r.http === 502) return falhou(`Não tivemos resposta do ${pgNomeProv()}. Antes de tentar de novo, confira no app do seu banco se a compra não foi aprovada.`);
   return falhou((r && r.erro) || `Não consegui pagar agora. Tente de novo ou ${pgOutraForma()}.`);
 }
 
