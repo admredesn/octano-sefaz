@@ -344,12 +344,23 @@ async function pgTokenMP(salvo, novo, cvv) {
   if (MP && (!PG.mp || PG.mp.chave !== PG.cfg.public_key)) PG.mp = { chave: PG.cfg.public_key, sdk: new MP(PG.cfg.public_key, { locale: "pt-BR" }) };
   const dados = salvo ? { cardId: String(salvo.ref || ""), securityCode: cvv }
     : { cardNumber: novo.num, cardholderName: novo.nome, cardExpirationMonth: novo.mm, cardExpirationYear: "20" + novo.aa, securityCode: cvv };
-  let t;
+  const cod = e => String(((Array.isArray(e) ? e[0] : e) || {}).code || "");
+  const txt = e => { try { return typeof e === "string" ? e : (e && e.message) || JSON.stringify(e); } catch (x) { return String(e); } };
+  let t, erroSdk = "";
   try {
-    t = https && PG.mp ? await PG.mp.sdk.createCardToken(dados) : await pgTokenMPDireto(dados);
+    if (https && PG.mp) {
+      try { t = await PG.mp.sdk.createCardToken(dados); }
+      catch (e) {                    // dado do cartão errado: avisa; qualquer outra falha do SDK: tenta a API de tokens direto
+        if (PG_ERROS_MP[cod(e)]) throw e;
+        erroSdk = txt(e);
+        t = await pgTokenMPDireto(dados);
+      }
+    } else {
+      t = await pgTokenMPDireto(dados);
+    }
   } catch (e) {
-    const c = (Array.isArray(e) ? e[0] : e) || {};
-    throw new Error(PG_ERROS_MP[String(c.code || "")] || "Confira os dados do cartão.");
+    const diag = PG.cfg.ambiente === "sandbox" ? ` [teste: ${(erroSdk ? "SDK " + erroSdk + " / " : "") + txt(e)}]`.slice(0, 300) : "";
+    throw new Error((PG_ERROS_MP[cod(e)] || "Confira os dados do cartão.") + diag);
   }
   if (!t || !t.id) throw new Error("Confira os dados do cartão.");
   return t.id;
