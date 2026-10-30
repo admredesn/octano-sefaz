@@ -299,8 +299,10 @@ def _mp_planos(valor, bin6):
             continue
         total = round(float(p["total_amount"]), 2)
         juros = round(max(0.0, total - valor), 2)
+        # tipo: credit_card | prepaid_card | debit_card — vai no pedido (30/10/2026: o Visa do Ronan, BIN 402669, é
+        # pré-pago: o MP só oferece 1x e o pedido tem de dizer prepaid_card)
         out.append({"parcelas": n, "valor_parcela": parc, "total": total, "juros": juros, "juros_parcelas": n if juros else 0,
-                    "sem_juros": not juros, "bandeira": m.get("payment_method_id")})
+                    "sem_juros": not juros, "bandeira": m.get("payment_method_id"), "tipo": m.get("payment_type_id") or "credit_card"})
     return sorted(out, key=lambda x: x["parcelas"]), None
 
 
@@ -431,7 +433,7 @@ def _mp_pedido(cid, a, cli, corpo, plano, n_parc, salvo, token):
                          "category_id": "others", "external_code": str(cid)}],
               "additional_info": _mp_info_extra(cli, corpo),
               "transactions": {"payments": [{"amount": v, "payment_method": {
-                  "id": plano.get("bandeira"), "type": "credit_card", "token": token, "installments": n_parc,
+                  "id": plano.get("bandeira"), "type": plano.get("tipo") or "credit_card", "token": token, "installments": n_parc,
                   "statement_descriptor": "REDE SN"}}]}}
     tres = _mp_3ds()
     if tres:
