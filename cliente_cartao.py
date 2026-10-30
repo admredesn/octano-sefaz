@@ -125,8 +125,11 @@ def _max_parcelas():
 
 
 def _parcela_min():
+    # CARTAO_TESTE_PARCELA_MIN (30/10/2026, Ronan: "agora preciso testar o parcelamento"): só nas contas de teste, para
+    # testar o parcelado com valor pequeno de verdade (os clientes seguem com CARTAO_PARCELA_MIN)
+    teste = os.environ.get("CARTAO_TESTE_PARCELA_MIN", "").strip() if has_request_context() and getattr(g, "cartao_teste", False) else ""
     try:
-        return float(os.environ.get("CARTAO_PARCELA_MIN", "50").replace(",", "."))
+        return float((teste or os.environ.get("CARTAO_PARCELA_MIN", "50")).replace(",", "."))
     except ValueError:
         return 50.0
 
