@@ -302,9 +302,12 @@ def _mp_planos(valor, bin6):
 
 
 def _status_do_mp(order):
+    # in_review/pending (30/10/2026, cobrança 16: "pending_review_manual"): o antifraude do MP pôs em revisão MANUAL e decide
+    # depois — tem de ficar "analise" (o app e o /cartao/<id> acompanham); "erro" largava um pagamento que podia aprovar
     return {"processed": "paga", "failed": "recusada", "canceled": "cancelada", "expired": "cancelada", "refunded": "cancelada",
-            "charged_back": "cancelada", "processing": "analise", "action_required": "analise", "created": "analise"
-            }.get((order or {}).get("status"), "erro")
+            "charged_back": "cancelada", "processing": "analise", "action_required": "analise", "created": "analise",
+            "in_review": "analise", "pending": "analise"
+            }.get((order or {}).get("status")) or ("analise" if "pending" in str((order or {}).get("status_detail") or "") else "erro")
 
 
 def _mp_email(cli):
