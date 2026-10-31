@@ -515,3 +515,24 @@ img { display: block; max-width: 100%; }
   background: #fff; border: 1px solid #d0d5dd; border-radius: 7px; padding: 3px 6px; white-space: nowrap; }
 .pg-btn-carteira { background: #000; color: #fff; }
 .pg-btn-carteira:disabled { background: #444; }
+
+/* indique um amigo (31/10/2026): card do Início, tela do código e o bônus no bico */
+.ind-card { display: flex; align-items: flex-start; gap: 12px; width: 100%; padding: 14px 16px; text-align: left; }
+.ind-card .ic { width: 42px; height: 42px; border-radius: 12px; background: var(--azul-claro); color: var(--azul);
+  display: flex; align-items: center; justify-content: center; flex: none; font-size: 1.3rem; }
+.ind-card.ouro { background: var(--ouro-fundo); box-shadow: none; border: 1.5px solid var(--ouro); }
+.ind-card.ouro .ic { background: #fff; }
+.ind-card .meio { flex: 1; min-width: 0; }
+.ind-card .t { font-weight: 750; }
+.ind-card .s { color: var(--mut); font-size: .86rem; margin-top: 2px; }
+.ind-desc { font-size: .86rem; margin-top: 6px; }
+.ind-desc s { color: var(--mut); }
+.ind-topo { padding: 18px 16px; text-align: center; }
+.ind-topo .s { color: var(--mut); font-size: .88rem; margin-top: 6px; }
+.ind-topo .ind-desc { text-align: center; }
+.ind-gde { font-size: 1.25rem; font-weight: 800; letter-spacing: -.01em; color: var(--azul); }
+.ind-cod-rot { margin-top: 16px; font-size: .74rem; color: var(--mut); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
+.ind-cod { margin: 6px auto 14px; display: inline-block; padding: 10px 20px; border: 2px dashed var(--ouro); border-radius: 14px;
+  font-size: 1.7rem; font-weight: 800; letter-spacing: .12em; color: var(--azul); background: var(--ouro-fundo); }
+.ind-zap { background: #1FA855; }
+.ind-bico span { font-size: .86rem; }

@@ -25,7 +25,7 @@ function barra(nome) {
   document.querySelector(".app").classList.toggle("sem-barra", !mostra);
   const ativo = { premios: "resgatar", postos: "resgatar", historico: "perfil", extrato: "inicio", parceiros: "perfil",
     favorito: "perfil", dados: "perfil", notificacoes: "inicio", oferta: "inicio", acionar: "",
-    faturas: "perfil", fatura: "perfil" }[nome] || nome;
+    faturas: "perfil", fatura: "perfil", indicar: "perfil" }[nome] || nome;
   // faturas usam a coluna larga no PC (extrato em tabela); no celular nada muda
   document.querySelector(".app").classList.toggle("larga", nome === "faturas" || nome === "fatura");
   b.querySelectorAll("[data-aba]").forEach(x => x.classList.toggle("on", x.dataset.aba === ativo));
@@ -107,6 +107,7 @@ function telaCadastro() {
         <div class="campo"><label>Senha</label><input id="c-senha" type="password" autocomplete="new-password" placeholder="mín. 6"></div>
         <div class="campo"><label>Repita a senha</label><input id="c-senha2" type="password" autocomplete="new-password"></div>
       </div>
+      <div id="c-convite-campo"></div>
       <label class="check"><input type="checkbox" id="c-termos"> <span>Li e aceito os <a class="link" href="${DOC_TERMOS}" target="_blank" rel="noopener">termos de uso</a> e a <a class="link" href="${DOC_PRIVACIDADE}" target="_blank" rel="noopener">política de privacidade</a> da Rede SN.</span></label>
       <label class="check"><input type="checkbox" id="c-mkt"> <span>Quero receber ofertas e promoções dos Postos SN (dá para mudar depois no Perfil).</span></label>
       <button class="btn" id="c-btn">Criar conta</button>
@@ -115,6 +116,7 @@ function telaCadastro() {
     </div></div>`;
   mascaraCpf(document.getElementById("c-cpf"));
   mascaraFone(document.getElementById("c-tel"));
+  if (typeof indCampoCadastro === "function") indCampoCadastro();     // indique um amigo: só com a campanha valendo
   document.getElementById("c-btn").onclick = async () => {
     const m = document.getElementById("c-msg"), v = id => document.getElementById(id).value;
     m.className = "msg erro";
@@ -123,10 +125,11 @@ function telaCadastro() {
     m.className = "msg"; m.textContent = "Criando a conta…";
     const r = await api("/cashback/api/cadastro", {
       nome: v("c-nome"), cpf: v("c-cpf"), telefone: v("c-tel"), email: v("c-email"), chave_pix: v("c-pix"),
-      senha: v("c-senha"), posto: S.posto || null,
+      senha: v("c-senha"), posto: S.posto || null, convite: (document.getElementById("c-convite") || {}).value || "",
     });
     if (r.verificar) { S.conf = { cpf: v("c-cpf"), novo: true, mkt: document.getElementById("c-mkt").checked, r }; ir("#/confirmar"); return; }
     m.className = "msg erro"; m.textContent = r.erro || "Não consegui criar a conta.";
+    if (r.campo === "convite" && document.getElementById("c-convite")) document.getElementById("c-convite").focus();
   };
 }
 
@@ -226,6 +229,7 @@ async function telaInicio() {
     </div>
     ${S.pontos && S.pontos.a_vencer_30d > 0 ? `<div class="secao"><div class="card" style="padding:12px 14px;background:var(--ouro-fundo);box-shadow:none;font-size:.86rem">⏳ <b>${num(S.pontos.a_vencer_30d)} ponto(s)</b> vencem nos próximos 30 dias. <a class="link" href="#/resgatar">Trocar agora</a></div></div>` : ""}
     <div id="fat-card"></div>
+    <div id="ind-card"></div>
     <div class="secao"><div class="secao-tit"><h2>Categorias</h2></div>
       <div class="categorias">${CATEGORIAS.map(c => `<button class="cat" onclick="S.cat='${c[0]}';ir('#/resgatar')"><span class="ic">${ICO[c[2]](22)}</span>${c[1]}</button>`).join("")}</div>
     </div>
@@ -245,6 +249,7 @@ async function telaInicio() {
     </div>
   </div>`;
   if (typeof faturasPreencher === "function") faturasPreencher();
+  if (typeof indicacaoPreencher === "function") indicacaoPreencher();
   const car = document.getElementById("carrossel"), pon = document.getElementById("pontinhos");
   if (car && pon) car.addEventListener("scroll", () => {
     const i = Math.round(car.scrollLeft / (car.scrollWidth / banners.length));
@@ -437,7 +442,7 @@ async function telaPerfil() {
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${item("aperto", "Clube de vantagens", "ir('#/parceiros')")}
       ${item("presente", "Trocar pontos", "ir('#/resgatar')")}
-    </div></div>
+    </div><div id="ind-perfil"></div></div>
     <div class="grupo-tit">Preferências</div>
     <div class="secao" style="padding-top:0"><div class="card lista">
       ${item("megafone", "Receber ofertas e promoções", "alternarMkt()", `<span class="chave ${me.aceita_marketing ? "on" : ""}" id="mkt-chave"></span>`)}
@@ -457,6 +462,7 @@ async function telaPerfil() {
     <div class="vazio" style="text-align:center">Postos SN · versão ${VERSAO_APP}</div>
   </div>`;
   if (typeof faturasPreencher === "function") faturasPreencher();
+  if (typeof indicacaoPreencher === "function") indicacaoPreencher();
   equipeDoCliente().then(sim => {                    // só gerente e dono veem "Acesso da equipe" (o servidor diz)
     const d = document.getElementById("perfil-equipe");
     if (d) d.innerHTML = sim ? equipeGrupo : "";

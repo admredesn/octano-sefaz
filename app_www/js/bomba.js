@@ -174,6 +174,8 @@ async function telaAcionar() {
           esc((_desc.formas || []).map(f => nomeForma(String(f.cod || ""))).join(" e "))}</b>. Você ganha os pontos normalmente.`
       : "";
     const desc = modoAtual() === "desconto";
+    const ib = document.querySelector(".ind-bico");           // bônus da indicação só faz sentido no "Desconto agora"
+    if (ib) ib.style.display = desc ? "" : "none";
     $("a-btn").textContent = desc ? "Aplicar o desconto na bomba" : "Avisar o caixa";
     $("a-rodape").innerHTML = desc
       ? "O preço baixa <b>só neste bico e só para você</b> e volta ao normal quando terminar. Com o desconto, este abastecimento não gera cashback."
@@ -193,12 +195,18 @@ async function telaAcionar() {
       const cod = (r.formas || []).map(f => String(f.cod || "")).find(c => $("a-forma").querySelector(`option[value="${c}"]`));
       if (cod) $("a-forma").value = cod;
     }
+    // INDIQUE UM AMIGO (31/10/2026): com bônus da indicação, o "Desconto agora" sai multiplicado (o servidor manda
+    // r.bonus); o cliente pode desmarcar e guardar o bônus para um abastecimento maior
+    const bo = r.bonus, txtDesc = usa => `<b>Desconto agora</b> · ${brl(usa ? bo.desconto_litro : r.desconto_litro)} por litro${usa ? ' <b style="color:var(--verde)">(em dobro)</b>' : ""}: o bico fica em <b>${brl(usa ? bo.preco_desconto : r.preco_desconto)}</b> em vez de ${brl(r.preco_normal)}`;
     $("a-modo").innerHTML = `<div class="campo" id="a-modo-escolha"><label>O que você prefere?</label>
       <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="desconto" checked>
-        <span><b>Desconto agora</b> · ${brl(r.desconto_litro)} por litro: o bico fica em <b>${brl(r.preco_desconto)}</b> em vez de ${brl(r.preco_normal)}</span></label>
+        <span id="a-desc-txt">${txtDesc(!!bo)}</span></label>
+      ${bo ? `<label class="check ind-bico" style="margin:2px 0 8px 28px;align-items:flex-start"><input type="checkbox" id="a-bonus" checked>
+        <span>🎁 <b>Usar o desconto em dobro da indicação</b>${bo.quantos > 1 ? ` (você tem ${bo.quantos})` : ""}. Desmarque para guardar para outro abastecimento.</span></label>` : ""}
       <label class="check" style="margin:6px 0;align-items:flex-start"><input type="radio" name="a-modo" value="acumular">
         <span><b>Acumular</b> · cashback e pontos para resgatar depois</span></label></div>`;
     document.querySelectorAll('input[name="a-modo"]').forEach(x => { x.onchange = modo; });
+    if (bo) $("a-bonus").onchange = () => { $("a-desc-txt").innerHTML = txtDesc($("a-bonus").checked); };
     modo();
   };
   const infoBico = async () => {
@@ -252,7 +260,8 @@ async function telaAcionar() {
     if (modoAtual() === "desconto") {
       m.className = "msg"; m.textContent = "Pedindo o desconto à bomba…";
       const rd = await api("/cashback/api/acionar", { posto, bico, combustivel: $("a-comb").value,
-                                                      modo: "desconto", forma_id: formaDesc().id });
+                                                      modo: "desconto", forma_id: formaDesc().id,
+                                                      ...($("a-bonus") ? { usar_bonus: $("a-bonus").checked } : {}) });
       if (!rd.ok) { m.className = "msg erro"; m.textContent = rd.erro || "Não consegui pedir o desconto."; return; }
       S.bico = "";
       ir("#/vivo");

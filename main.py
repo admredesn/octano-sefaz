@@ -24,7 +24,7 @@ registrar_rotas_operadores(app)
 def health():
     # 'build' = marcador p/ confirmar QUAL versao o Railway esta rodando (verificacao de deploy)
     return jsonify({"status": "ok", "servico": "Octano SEFAZ", "versao": "1.0.0",
-                    "build": "2026-10-21-site-google-verificacao",
+                    "build": "2026-10-31-indicacao-1",
                     "dfe_auto": os.environ.get("DFE_AUTO", "").strip().lower() in ("1", "true", "sim", "on")})
 
 @app.route("/cnpj/<cnpj>", methods=["GET"])
@@ -615,6 +615,16 @@ try:
     _pontos_iniciar()
 except Exception as _e:
     print("[app-pontos] nao iniciou:", _e)
+
+# ── App Postos SN: indique um amigo (31/10/2026) — bônus de desconto dobrado no bico ──
+# Rotas /cashback/api/indicacao*; a rotina (1 min) libera o bônus no 1º abastecimento do amigo e fecha os
+# reservados. Campanha desligada em oct_app_indicacao_config (SQL-APP-INDICACAO.sql). APP_INDICACAO=0 para a rotina.
+try:
+    from app_indicacao import bp_indicacao, iniciar as _indicacao_iniciar
+    app.register_blueprint(bp_indicacao)
+    _indicacao_iniciar()
+except Exception as _e:
+    print("[app-indicacao] nao carregou:", _e)
 
 
 # ── App Postos SN: versão web do app (o mesmo código que vai para as lojas) ─────

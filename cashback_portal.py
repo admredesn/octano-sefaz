@@ -726,6 +726,12 @@ def api_cadastro_confirmar():
     posto = cli.get("empresa_origem")
     if posto and _cashback_ligado(posto):
         _garantir_pessoa(posto, cli, cli)
+    if cli.get("convite_usado"):                        # INDIQUE UM AMIGO: o código do cadastro vira indicação
+        try:
+            import app_indicacao
+            app_indicacao.registrar(cli)
+        except Exception as e:
+            print(f"[app-indicacao] convite na confirmação falhou: {e!r}", flush=True)
     return jsonify({"ok": True, "token": _token_do_cliente(cli), "nome": cli.get("nome")})
 
 
@@ -777,6 +783,11 @@ def api_conta_excluir():
         _checa(rq.delete(f"{url}/rest/v1/oct_cashback_clientes?cpf=eq.{cpf}", headers=_sh(), timeout=20))
     except Exception as e:
         return jsonify({"erro": "não consegui excluir agora: " + str(e)[:120]}), 500
+    try:
+        import app_indicacao
+        app_indicacao.ao_excluir(cpf)
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
@@ -857,6 +868,16 @@ def api_cadastro():
     posto = _uuid_ok(d.get("posto"))
     if not _limite_ok("cadastro:" + _ip(), 10, 3600):
         return _muitas()
+    # INDIQUE UM AMIGO (31/10/2026): código de convite digitado no cadastro; vira indicação quando a conta confirmar
+    convite = None
+    if str(d.get("convite") or "").strip():
+        import app_indicacao
+        try:
+            convite, erro_conv = app_indicacao.conferir_no_cadastro(d.get("convite"), cpf, tel, chave_pix)
+        except Exception:
+            convite, erro_conv = None, None             # banco sem as tabelas da indicação: o cadastro segue sem o convite
+        if erro_conv:
+            return jsonify({"erro": erro_conv, "campo": "convite"}), 400
     etapa, t_ini = "consultar o CPF", time.time()
     try:
         existe = _cliente_por_cpf(cpf)
@@ -887,6 +908,8 @@ def api_cadastro():
             "chave_pix": chave_pix[:120], "senha_hash": _hash_senha(senha),
             "empresa_origem": posto,
         }
+        if convite:
+            reg["convite_usado"] = convite
         reg["verificado_em"] = None
         etapa = "gravar o cadastro"
         if existe:
@@ -1275,9 +1298,22 @@ def api_acionar():
                 "auth_codigo": _auth_codigo(ac_id, cli["cpf"], hash_s), "assinante_nome": cli["nome"][:120],
                 "auth_ip": ip[:60], "auth_aparelho": (request.headers.get("User-Agent") or "")[:200],
             })
+        # INDIQUE UM AMIGO (31/10/2026): bônus disponível = este "Desconto agora" sai com o desconto multiplicado. O
+        # núcleo e o PDV usam o R$/L do acionamento; o bônus só é gasto quando o abastecimento acontece (app_indicacao)
+        bonus = None
+        if desc_info and d.get("usar_bonus") is not False:
+            import app_indicacao
+            reg.setdefault("id", str(uuid.uuid4()))
+            bonus = app_indicacao.reservar(cli["cpf"], desc_info, reg["id"])
+            if bonus:
+                reg.update({"desconto_litro": bonus["desconto_litro"], "preco_desconto": bonus["preco_desconto"]})
+                desc_info = dict(desc_info, desconto_litro=bonus["desconto_litro"], preco_desconto=bonus["preco_desconto"],
+                                 bonus=True, desconto_normal=bonus["desconto_normal"])
         try:
             novo = _spost("oct_cashback_acionamentos", reg)
         except RuntimeError as e:
+            if bonus:
+                app_indicacao.devolver(bonus["bonus_id"])
             if desc_info and "Could not find the" in str(e):
                 return jsonify({"erro": "Desconto do app indisponível neste momento (falta atualizar o banco)."}), 503
             if pagar_app and "Could not find the" in str(e):
@@ -1471,7 +1507,16 @@ def api_desconto():
         bico = 0
     if not posto or not bico:
         return jsonify({"ok": False, "ativo": False}), 400
-    return jsonify(dict(_desconto_do_bico(posto, bico), ok=True))
+    info = _desconto_do_bico(posto, bico)
+    # INDIQUE UM AMIGO (31/10/2026): o cliente logado com bônus vê também o desconto multiplicado (sem reservar)
+    if info.get("ativo") and (request.headers.get("Authorization") or "").replace("Bearer", "").strip():
+        cli = _cliente_do_token()
+        if cli:
+            import app_indicacao
+            b = app_indicacao.para_o_bico(cli["cpf"], info)
+            if b:
+                info["bonus"] = b
+    return jsonify(dict(info, ok=True))
 
 
 @bp_cashback.route("/cashback/api/bico", methods=["GET"])
