@@ -16,7 +16,8 @@ dobrado no próximo abastecimento ... depois de usar esse desconto volta ao desc
   * travas: o amigo nunca abasteceu pelo app, CPF/celular/chave Pix diferentes de quem indicou e não pode ser o
     mesmo celular (token de notificação) dos dois.
 Tabelas: repo/sql/SQL-APP-INDICACAO.sql. Sem a tabela de config (SQL não rodou) ou com ela desligada, nada
-aparece no app e o cadastro segue igual.
+aparece no app e o cadastro segue igual — menos para os CPFs de config.testadores (SQL-APP-INDICACAO-TESTE.sql), que
+já veem e usam a campanha desligada (teste no celular antes de ligar para todos).
 
 A cada minuto (os 2 workers do gunicorn rodam; o PATCH condicionado deixa só um fazer cada coisa):
   1. bônus reservados: abasteceu = usado; não abasteceu = volta a disponível;
@@ -71,16 +72,24 @@ def config(forcar=False):
     """Linha da campanha (cache de 60 s). Sem a tabela = desligada (o SQL ainda não rodou)."""
     if forcar or _cfg["v"] is None or time.time() - _cfg["ts"] > 60:
         try:
-            rows = cp._sget("oct_app_indicacao_config?id=eq.1&select=ativo,multiplicador,amigo_ganha,dias_codigo&limit=1")
+            rows = cp._sget("oct_app_indicacao_config?id=eq.1"
+                            "&select=ativo,multiplicador,amigo_ganha,dias_codigo,testadores&limit=1")
             v = rows[0] if rows else None
         except Exception:
             v = None
-        _cfg.update(ts=time.time(), v=v or {"ativo": False, "multiplicador": 2, "amigo_ganha": False, "dias_codigo": 7})
+        _cfg.update(ts=time.time(), v=v or {"ativo": False, "multiplicador": 2, "amigo_ganha": False, "dias_codigo": 7,
+                                             "testadores": []})
     return _cfg["v"]
 
 
-def ligada():
-    return bool(config().get("ativo"))
+def ligada(cpf=None):
+    """Campanha valendo para este cliente: ligada para todos ou, desligada, só nas contas de teste (01/11/2026, Ronan:
+    "vamos testar primeiro no meu iPhone" — config.testadores = CPFs que já veem e usam a campanha)."""
+    cfg = config()
+    if cfg.get("ativo"):
+        return True
+    cpf = cp._so_digitos(cpf)
+    return bool(cpf) and cpf in {cp._so_digitos(x) for x in cfg.get("testadores") or []}
 
 
 def normalizar(codigo):
@@ -143,7 +152,7 @@ def _conferir(codigo, cpf, telefone, chave_pix):
 
 def conferir_no_cadastro(codigo, cpf, telefone, chave_pix):
     """Cadastro com código: (código normalizado, None) / (None, erro). Campanha desligada = ignora o código."""
-    if not normalizar(codigo) or not ligada():
+    if not normalizar(codigo) or not ligada(cpf):
         return None, None
     ind, erro = _conferir(codigo, cpf, telefone, chave_pix)
     return (normalizar(codigo), None) if ind else (None, erro)
@@ -181,7 +190,7 @@ def registrar(cli):
         cp._spatch(f"oct_cashback_clientes?cpf=eq.{cli['cpf']}", {"convite_usado": None})
     except Exception:
         pass
-    if not ligada():
+    if not ligada(cli["cpf"]):
         return None
     ind, erro = _conferir(cod, cli["cpf"], cli.get("telefone"), cli.get("chave_pix"))
     if not ind:
@@ -425,6 +434,7 @@ def api_indicacao():
     if not cli:
         return jsonify({"erro": "sessão expirada"}), 401
     cfg = config()
+    ativo = ligada(cli["cpf"])
     try:
         resolver(cli["cpf"])
         bonus = cp._sget(f"oct_app_bonus?cliente_cpf=eq.{cli['cpf']}"
@@ -433,14 +443,15 @@ def api_indicacao():
                           "&select=id,indicado_nome,status,criado_em,abasteceu_em&order=criado_em.desc&limit=50")
     except Exception:
         bonus, amigos = [], []          # SQL ainda não rodou
-    if not cfg.get("ativo") and not bonus and not amigos:
+    if not ativo and not bonus and not amigos:
         return jsonify({"ok": True, "ativo": False})
     por_ind = {b["indicacao_id"]: b for b in bonus if b.get("origem") == "indicou"}
     ex = _exemplos_desconto()
     mult = float(cfg.get("multiplicador") or 2)
     return jsonify({
-        "ok": True, "ativo": bool(cfg.get("ativo")), "multiplicador": mult, "amigo_ganha": bool(cfg.get("amigo_ganha")),
-        "codigo": codigo_do_cliente(cli) if cfg.get("ativo") else cli.get("convite_codigo"),
+        "ok": True, "ativo": ativo, "teste": ativo and not cfg.get("ativo"),
+        "multiplicador": mult, "amigo_ganha": bool(cfg.get("amigo_ganha")),
+        "codigo": codigo_do_cliente(cli) if ativo else cli.get("convite_codigo"),
         "link": "https://www.redesn.com.br/baixar?o=convite",
         "disponiveis": sum(1 for b in bonus if b["status"] == "disponivel"),
         "reservado": any(b["status"] == "reservado" for b in bonus),
@@ -450,7 +461,7 @@ def api_indicacao():
                     "abasteceu_em": a.get("abasteceu_em"),
                     "bonus": (por_ind.get(a["id"]) or {}).get("status")} for a in amigos],
         "descontos": [dict(e, dobrado=round(min(e["desconto"] * mult, cp.DESCONTO_APP_MAX), 3)) for e in ex],
-        "pode_digitar": bool(cfg.get("ativo")) and _pode_digitar(cli),
+        "pode_digitar": ativo and _pode_digitar(cli),
     })
 
 
@@ -462,7 +473,7 @@ def api_usar_codigo():
         return jsonify({"erro": "sessão expirada"}), 401
     if not cp._limite_ok("convite:" + cp._ip(), 20, 3600):
         return cp._muitas()
-    if not ligada():
+    if not ligada(cli["cpf"]):
         return jsonify({"erro": "A campanha de indicação não está valendo agora."}), 409
     if not _pode_digitar(cli):
         return jsonify({"erro": "O código de convite vale só para conta nova que ainda não abasteceu pelo app."}), 409
